@@ -1,0 +1,7 @@
+google-api-python-client
+requests
+beautifulsoup4
+python-dotenv
+urllib3==2.0.4
+chardet==5.2.0
+charset_normalizer==3.2.0
