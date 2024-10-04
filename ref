@@ -75,7 +75,7 @@ urllib3.__version__ = '2.0.4'
 chardet.__version__ = '5.2.0'
 charset_normalizer.__version__ = '3.2.0'
 
-__VERSION__ = "v1.4.1"
+__VERSION__ = "v1.5.0"
 
 # Filter out the RequestsDependencyWarning
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="urllib3")
@@ -198,8 +198,7 @@ def resolve_redirect(url: str) -> str:
 
 def get_title_from_url(url: str) -> str:
     """
-    Fetches the title of a webpage given its URL using BeautifulSoup first, and falls back to the requests library if needed.
-    This version removes the fragment from the URL before making the request.
+    Fetches the title of a webpage given its URL by dumping HTML with lynx and parsing it.
 
     Args:
         url (str): The URL of the webpage.
@@ -207,55 +206,60 @@ def get_title_from_url(url: str) -> str:
     Returns:
         str: The title of the webpage, or an error message if the title cannot be fetched.
     """
-    # Parse the URL and remove the fragment
-    parsed_url = urlparse(url)
-    url_without_fragment = urlunparse(parsed_url._replace(fragment=''))
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
-    }
-
-    logging.debug(f"Requesting URL: {url_without_fragment} with headers: {headers}")
+    lynx_command = f'lynx -dump -nolist -force_html -hiddenlinks=ignore -display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines -dont_wrap_pre -source "{url}"'
 
     try:
-        # Fetch the page content
-        response = requests.get(url_without_fragment, headers=headers)
-        logging.debug(f"Response Status Code: {response.status_code}")
-        logging.debug(f"Response Headers: {response.headers}")
+        # Run lynx command to get the HTML source
+        result = subprocess.run(lynx_command, shell=True, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode != 0:
+            logging.error(f"Lynx command failed with return code {result.returncode}")
+            return f"Error: Lynx command failed with return code {result.returncode}"
 
-        if response.status_code == 404:
-            logging.error(f"404 Error: Page not found for URL: {url}")
-            return "404 Error: Page not found"
-        response.raise_for_status()  # Raise an error for other bad responses
+        # Parse the HTML with BeautifulSoup
+        soup = BeautifulSoup(result.stdout, 'html.parser')
 
-        # Parse the content with BeautifulSoup
-        soup = BeautifulSoup(response.content, 'html.parser')
+        # Try to find the title
+        title = None
 
-        # Extract the title using BeautifulSoup
-        title = soup.title.string if soup.title else None
+        # Check for <title> tag
+        if soup.title:
+            title = soup.title.string.strip()
+
+        # If no <title> tag, check for Open Graph title
+        if not title:
+            og_title = soup.find('meta', property='og:title')
+            if og_title:
+                title = og_title.get('content', '').strip()
+
+        # If still no title, check for Twitter card title
+        if not title:
+            twitter_title = soup.find('meta', name='twitter:title')
+            if twitter_title:
+                title = twitter_title.get('content', '').strip()
+
+        # If still no title, look for the first <h1> tag
+        if not title:
+            h1 = soup.find('h1')
+            if h1:
+                title = h1.get_text().strip()
+
         if title:
-            logging.debug(f"Title found using BeautifulSoup: {title}")
+            logging.info(f"Title found: {title}")
             return title
+        else:
+            logging.warning("No suitable title found in the HTML content")
+            return "No title found"
 
-        # Fallback: Try to parse Open Graph or Twitter titles
-        og_title = soup.find('meta', property='og:title')
-        if og_title and og_title.get('content'):
-            title = og_title['content'].strip()
-            logging.debug(f"Found og:title: {title}")
-            return title
-
-        twitter_title = soup.find('meta', name='twitter:title')
-        if twitter_title and twitter_title.get('content'):
-            title = twitter_title['content'].strip()
-            logging.debug(f"Found twitter:title: {title}")
-            return title
-
-        logging.debug("No title found after all checks")
-        return "No title found"
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching title: {e}")
-        return f"Error fetching title: {e}"
+    except subprocess.TimeoutExpired:
+        logging.error("Lynx command timed out")
+        return "Error: Request timed out"
+    except subprocess.SubprocessError as e:
+        logging.error(f"Subprocess error occurred: {e}")
+        return f"Error: Subprocess error - {e}"
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}")
+        return f"Error: Unexpected error - {e}"
 
 
 def check_integrity():
