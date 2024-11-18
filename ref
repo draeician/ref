@@ -493,6 +493,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--search-uploader", help="Search entries by uploader.")
     parser.add_argument("--search", help="Search entries across all fields (URL, title, date, source, uploader).")
     parser.add_argument("--transcript", action="store_true", help="Update the transcript for an existing YouTube entry.")
+    parser.add_argument("--file", help="Read URLs from a file (one URL per line)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__VERSION__}")
     args = parser.parse_args()
     if args.edit:
@@ -521,6 +522,60 @@ def url_exists_in_file(url: str, file_path: str) -> bool:
             if match and match.group(1) == url:
                 return True
     return False
+
+def read_urls_from_file(file_path: str, force: bool = False) -> None:
+    """
+    Reads URLs from a file and processes each one sequentially.
+    Comments out successfully processed URLs in the original file.
+    
+    Args:
+        file_path (str): Path to the file containing URLs (one per line)
+        force (bool): Whether to force processing even if URL exists
+        
+    Returns:
+        None
+    """
+    try:
+        # Read all lines from the file
+        with open(file_path, 'r') as file:
+            lines = file.readlines()
+
+        # Process URLs and track successful ones
+        modified_lines = []
+        for line_number, line in enumerate(lines, 1):
+            original_line = line
+            url = line.strip()
+            
+            # Skip empty lines and already commented lines
+            if not url or url.startswith('#'):
+                modified_lines.append(original_line)
+                continue
+
+            print(f"\nProcessing URL {line_number}: {url}")
+            try:
+                process_url(url, force)
+                # Comment out the successful URL
+                modified_lines.append(f"# {original_line}")
+                print(f"Successfully processed and commented out: {url}")
+            except Exception as e:
+                # Keep failed URLs uncommented
+                modified_lines.append(original_line)
+                print(f"Error processing URL on line {line_number}: {e}")
+                logging.error(f"Error processing URL '{url}' on line {line_number}: {e}")
+            
+            time.sleep(1)  # Add a delay between processing each URL
+
+        # Write the modified content back to the file
+        with open(file_path, 'w') as file:
+            file.writelines(modified_lines)
+
+        print("\nFinished processing all URLs from file.")
+    except FileNotFoundError:
+        print(f"Error: File '{file_path}' not found")
+        logging.error(f"File not found: {file_path}")
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        logging.error(f"Error reading file {file_path}: {e}")
 
 def fetch_youtube_transcript(video_id: str) -> str:
     transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
@@ -553,29 +608,53 @@ def fetch_youtube_transcript(video_id: str) -> str:
         logging.error(f"Failed to fetch transcript for video ID {video_id}: {e}")
         return None
 
+def log_error(error_type: str, url: str, error_message: str) -> None:
+    """
+    Logs an error to both the error log file and standard logging.
+    
+    Args:
+        error_type (str): The type of error that occurred
+        url (str): The URL that caused the error
+        error_message (str): The detailed error message
+    """
+    error_msg = f"{error_type} - URL: {url} - Error: {error_message}"
+    error_logger.error(error_msg)
+    logging.error(error_msg)
+
 def process_url(url: str, force: bool) -> None:
     """
     Processes a given URL to extract and record relevant information.
-
-    Args:
-        url (str): The URL to be processed.
-        force (bool): A flag indicating whether to force the addition of the URL even if it already exists.
-
-    Returns:
-        None
     """
     logging.debug(f"Original URL: {url}")
+    
+    # Handle YouTube search results
+    if "youtube.com/results" in url:
+        log_error("URL Processing", url, "YouTube search results pages are not supported")
+        print("Error: YouTube search results pages are not supported")
+        raise ValueError("YouTube search results pages are not supported")
+    
+    # Handle PDF files
+    if url.lower().endswith('.pdf'):
+        current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        # Extract filename from URL as title
+        title = os.path.basename(urlparse(url).path)
+        if not url_exists_in_file(url, UNIFIED) or force:
+            append_to_file(UNIFIED, f"{current_time}|[{url}]|({title})|PDF Document|General\n")
+            print(f"{current_time}|[{url}]|({title})|PDF Document|General")
+            logging.info(f"Added PDF URL: {url}")
+        return
+
     try:
-        resolved_url = resolve_redirect(url)  # Resolve the redirect first
+        resolved_url = resolve_redirect(url)
         logging.debug(f"Resolved URL: {resolved_url}")
-        simplified_url = simplify_url(resolved_url)  # Then simplify the resolved URL
+        simplified_url = simplify_url(resolved_url)
         logging.debug(f"Simplified URL after resolving redirects: {simplified_url}")
     except Exception as e:
         error_message = f"Failed to process URL: {e}"
         log_error("URL Processing", url, error_message)
         print(f"Error: {error_message}. Skipping...")
-        return
-    
+        raise
+
     current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')  # Format without milliseconds
     
     if "youtube.com" in simplified_url and not simplified_url.startswith('https://www.youtube.com/redirect'):
@@ -814,6 +893,8 @@ def main() -> None:
                     print(f"-Hit Type: {hit_type}")
         elif args.transcript and args.url:
             update_transcript(args.url)
+        elif args.file:
+            read_urls_from_file(args.file, args.force)
         elif args.url:
             process_url(args.url, args.force)
         else:
