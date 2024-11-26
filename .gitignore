@@ -13,3 +13,8 @@ ref-save
 .cursorrules
 BUG.md
 broken_links.md
+
+# Cursor specific
+.cursorrules.bak
+
+research/
