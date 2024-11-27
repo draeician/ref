@@ -1,0 +1,12 @@
+paths:
+  references: ~/references
+  transcripts: ~/references/transcripts
+removable_keys:
+  - utm_source
+  - utm_medium
+  - utm_campaign
+  - utm_term
+  - utm_content
+  - fbclid
+  - gclid
+  - _ga 
