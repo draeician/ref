@@ -22,3 +22,6 @@ research/
 # Python package build artifacts
 *.egg-info/
 _version.py
+
+# Development planning files
+project_structure
