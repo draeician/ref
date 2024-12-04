@@ -18,3 +18,7 @@ broken_links.md
 .cursorrules.bak
 
 research/
+
+# Python package build artifacts
+*.egg-info/
+_version.py
