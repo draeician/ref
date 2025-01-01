@@ -144,11 +144,37 @@ def resolve_redirect(url: str) -> str:
             return query_params['q'][0]
     
     session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"]  # Allow these methods to retry
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', InsecureRequestWarning)
         try:
-            response = session.head(url, allow_redirects=True, verify=False)
+            # First try with headers that mimic a browser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+            }
+            response = session.get(url, 
+                                 allow_redirects=True, 
+                                 verify=False, 
+                                 timeout=10,
+                                 headers=headers)
+            
+            # If we got redirected to the homepage, return the original URL
+            if response.url == "https://www.msn.com/" and url != "https://www.msn.com/":
+                logging.debug(f"Prevented incorrect redirect to homepage, keeping original URL: {url}")
+                return url
+                
             return response.url
         except requests.exceptions.RequestException as e:
             logging.error(f"Error resolving redirect for URL: {url}, error: {e}")
