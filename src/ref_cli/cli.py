@@ -564,26 +564,38 @@ def log_error(error_type: str, url: str, error_message: str) -> None:
     error_logger.error(error_msg)
     logging.error(error_msg)
 
+def translate_arxiv_url(url: str) -> str:
+    """
+    Translates arXiv PDF URLs to their corresponding article URLs.
+    Only processes URLs that contain 'arxiv.org/pdf/'.
+    
+    Args:
+        url (str): The URL to check and potentially translate
+        
+    Returns:
+        str: Translated article URL if it was an arXiv PDF URL, otherwise original URL
+    """
+    if 'arxiv.org/pdf/' not in url:
+        return url
+
+    arxiv_pdf_pattern = re.compile(r'(?:https?://)?arxiv\.org/pdf/(\d+\.\d+)')
+    if match := arxiv_pdf_pattern.search(url):
+        article_id = match.group(1)
+        article_url = f"https://arxiv.org/abs/{article_id}"
+        logging.debug(f"Translated arXiv PDF URL to article URL: {article_url}")
+        return article_url
+    return url
+
 def process_url(url: str, force: bool) -> None:
     """
     Processes a given URL to extract and record relevant information.
     """
     logging.debug(f"Original URL: {url}")
     
-    if "youtube.com/results" in url:
-        log_error("URL Processing", url, "YouTube search results pages are not supported")
-        print("Error: YouTube search results pages are not supported")
-        raise ValueError("YouTube search results pages are not supported")
+    # Only translate if it's potentially an arXiv PDF URL
+    url = translate_arxiv_url(url) if 'arxiv.org/pdf/' in url else url
+    logging.debug(f"URL after arXiv check: {url}")
     
-    if url.lower().endswith('.pdf'):
-        current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-        title = os.path.basename(urlparse(url).path)
-        if not url_exists_in_file(url, UNIFIED) or force:
-            append_to_file(UNIFIED, f"{current_time}|[{url}]|({title})|PDF Document|General\n")
-            print(f"{current_time}|[{url}]|({title})|PDF Document|General")
-            logging.info(f"Added PDF URL: {url}")
-        return
-
     try:
         resolved_url = resolve_redirect(url)
         logging.debug(f"Resolved URL: {resolved_url}")
