@@ -30,7 +30,8 @@ dependencies = [
     "urllib3>=2.0.4",
     "chardet>=5.2.0",
     "charset-normalizer>=3.2.0",
-    "setuptools>=45.0.0"
+    "setuptools>=45.0.0",
+    "colorama>=0.4.6"
 ]
 dynamic = ["version"]
 
@@ -39,6 +40,7 @@ ref = "ref_cli.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+packages = ["ref_cli", "ref_cli.utils"]
 
 [tool.setuptools_scm]
 write_to = "src/ref_cli/_version.py" 
