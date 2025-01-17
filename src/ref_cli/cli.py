@@ -255,7 +255,11 @@ def get_title_from_url(url: str) -> str:
                 title = og_title.get('content', '').strip()
 
         if not title:
-            twitter_title = soup.find('meta', name='twitter:title')
+            # Try with name attribute first
+            twitter_title = soup.find('meta', {'name': 'twitter:title'})
+            if not twitter_title:
+                # If not found, try with property attribute
+                twitter_title = soup.find('meta', {'property': 'twitter:title'})
             if twitter_title:
                 title = twitter_title.get('content', '').strip()
 
@@ -643,6 +647,9 @@ def process_url(url_str: str, force: bool) -> None:
     Processes a given URL to extract and record relevant information.
     """
     logging.debug(f"Original URL: {url_str}")
+    
+    # First, translate arxiv PDF URLs to article URLs
+    url_str = translate_arxiv_url(url_str)
     
     if "youtube.com/results" in url_str:
         error_msg = "YouTube search results pages are not supported"
