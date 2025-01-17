@@ -48,7 +48,9 @@ def get_default_config():
             },
             'removable_keys': [
                 'utm_source', 'utm_medium', 'utm_campaign', 
-                'utm_term', 'utm_content', 'fbclid', 'gclid', '_ga'
+                'utm_term', 'utm_content', 'fbclid', 'gclid',
+                '_ga', 'gi', 'ref', 'source', 'medium', 
+                'campaign', 'feature', 'share', 'src'
             ]
         }
 
@@ -116,17 +118,53 @@ def load_config() -> dict:
 
 # Copy all the remaining functions from the original file here
 def simplify_url(url: str) -> str:
-    """Simplifies the URL by removing advertising campaign information."""
-    removable_keys = set(config['removable_keys'])
-    parsed_url = urlparse(url)
-    query_params = parse_qs(parsed_url.query)
-    filtered_query_params = {k: v for k, v in query_params.items() if k not in removable_keys}
-    simplified_query = '&'.join([f"{k}={v[0]}" for k, v in filtered_query_params.items()])
+    """
+    Simplifies the URL by removing tracking parameters and normalizing the format.
     
-    if simplified_query:
-        simplified_url = parsed_url._replace(query=simplified_query).geturl()
-    else:
-        simplified_url = parsed_url._replace(query=None).geturl()
+    Args:
+        url (str): The URL to simplify
+        
+    Returns:
+        str: The simplified URL
+    """
+    # Additional parameters to remove
+    removable_keys = set(config['removable_keys'] + [
+        'gi',  # GitConnected parameter
+        'ref',  # Common referral parameter
+        'source',  # Source tracking
+        'medium',  # Medium tracking
+        'campaign',  # Campaign tracking
+        'feature',  # Feature tracking
+        'share',  # Share tracking
+        'src',  # Source tracking alternative
+    ])
+    
+    parsed_url = urlparse(url)
+    
+    # Parse query parameters
+    query_params = parse_qs(parsed_url.query)
+    
+    # Remove tracking parameters
+    filtered_query_params = {k: v for k, v in query_params.items() if k.lower() not in removable_keys}
+    
+    # Sort parameters for consistent ordering
+    sorted_params = sorted(filtered_query_params.items())
+    
+    # Rebuild query string
+    simplified_query = '&'.join([f"{k}={v[0]}" for k, v in sorted_params])
+    
+    # Remove trailing slashes and normalize
+    path = re.sub(r'/+$', '', parsed_url.path)
+    
+    # Rebuild URL with normalized components
+    simplified_url = urlunparse((
+        parsed_url.scheme,
+        parsed_url.netloc.lower(),
+        path,
+        parsed_url.params,
+        simplified_query,
+        None  # Remove fragments
+    ))
     
     logging.debug(f"Simplified URL: {simplified_url}")
     return simplified_url
@@ -479,19 +517,25 @@ def parse_arguments() -> argparse.Namespace:
 def url_exists_in_file(url: str, file_path: str) -> bool:
     """
     Checks if a URL already exists in the specified file.
+    Compares simplified versions of URLs to catch duplicates with different parameters.
     
     Args:
-        url (str): The URL to check.
-        file_path (str): The path to the file.
+        url (str): The URL to check
+        file_path (str): The path to the file
     
     Returns:
-        bool: True if the URL exists in the file, False otherwise.
+        bool: True if the URL exists in the file, False otherwise
     """
+    simplified_input_url = simplify_url(url)
+    
     with open(file_path, "r") as f:
         for line in f:
             match = re.search(r'\[([^\]]+)\]', line)
-            if match and match.group(1) == url:
-                return True
+            if match:
+                existing_url = match.group(1)
+                simplified_existing_url = simplify_url(existing_url)
+                if simplified_input_url == simplified_existing_url:
+                    return True
     return False
 
 def read_urls_from_file(file_path: str, force: bool = False) -> None:
