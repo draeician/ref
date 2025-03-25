@@ -233,6 +233,14 @@ def get_title_from_url(url: str) -> str:
     Returns:
         str: The title of the webpage, or an error message if the title cannot be fetched.
     """
+    # Check if lynx is installed
+    try:
+        subprocess.run(['which', 'lynx'], capture_output=True, check=True)
+    except subprocess.CalledProcessError:
+        error_msg = "Error: 'lynx' is not installed. Please install it to fetch webpage titles."
+        logging.error(error_msg)
+        return error_msg
+
     lynx_command = f'lynx -dump -nolist -force_html -hiddenlinks=ignore -display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines -dont_wrap_pre -source "{url}"'
 
     try:
@@ -255,11 +263,7 @@ def get_title_from_url(url: str) -> str:
                 title = og_title.get('content', '').strip()
 
         if not title:
-            # Try with name attribute first
-            twitter_title = soup.find('meta', {'name': 'twitter:title'})
-            if not twitter_title:
-                # If not found, try with property attribute
-                twitter_title = soup.find('meta', {'property': 'twitter:title'})
+            twitter_title = soup.find('meta', name='twitter:title')
             if twitter_title:
                 title = twitter_title.get('content', '').strip()
 
@@ -642,40 +646,35 @@ def translate_arxiv_url(url: str) -> str:
         return article_url
     return url
 
-def process_url(url_str: str, force: bool) -> None:
+def process_url(url: str, force: bool) -> None:
     """
     Processes a given URL to extract and record relevant information.
     """
-    logging.debug(f"Original URL: {url_str}")
+    logging.debug(f"Original URL: {url}")
     
-    # First, translate arxiv PDF URLs to article URLs
-    url_str = translate_arxiv_url(url_str)
+    if "youtube.com/results" in url:
+        log_error("URL Processing", url, "YouTube search results pages are not supported")
+        print("Error: YouTube search results pages are not supported")
+        raise ValueError("YouTube search results pages are not supported")
     
-    if "youtube.com/results" in url_str:
-        error_msg = "YouTube search results pages are not supported"
-        log_error("URL Processing", url_str, error_msg)
-        print(error(f"Error: {error_msg}"))
-        raise ValueError(error_msg)
-    
-    if url_str.lower().endswith('.pdf'):
+    if url.lower().endswith('.pdf'):
         current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-        pdf_title = os.path.basename(urlparse(url_str).path)
-        if not url_exists_in_file(url_str, UNIFIED) or force:
-            entry = f"{current_time}|[{url_str}]|({pdf_title})|PDF Document|General\n"
-            append_to_file(UNIFIED, entry)
-            print(success(f"Added PDF: {url(url_str)} - {title(pdf_title)}"))
-            logging.info(f"Added PDF URL: {url_str}")
+        title = os.path.basename(urlparse(url).path)
+        if not url_exists_in_file(url, UNIFIED) or force:
+            append_to_file(UNIFIED, f"{current_time}|[{url}]|({title})|PDF Document|General\n")
+            print(f"{current_time}|[{url}]|({title})|PDF Document|General")
+            logging.info(f"Added PDF URL: {url}")
         return
 
     try:
-        resolved_url = resolve_redirect(url_str)
+        resolved_url = resolve_redirect(url)
         logging.debug(f"Resolved URL: {resolved_url}")
         simplified_url = simplify_url(resolved_url)
         logging.debug(f"Simplified URL after resolving redirects: {simplified_url}")
     except Exception as e:
         error_message = f"Failed to process URL: {e}"
-        log_error("URL Processing", url_str, error_message)
-        print(error(f"Error: {error_message}. Skipping..."))
+        log_error("URL Processing", url, error_message)
+        print(f"Error: {error_message}. Skipping...")
         raise
 
     current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
@@ -687,34 +686,28 @@ def process_url(url_str: str, force: bool) -> None:
                 playlist_title, playlist_uploader, videos = result
                 playlist_url = simplified_url
                 if not url_exists_in_file(playlist_url, UNIFIED) or force:
-                    entry = f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n"
-                    append_to_file(UNIFIED, entry)
-                    print(success(f"Added playlist: {url(playlist_url)}"))
-                    print(info(f"Title: {title(playlist_title)}"))
-                    print(info(f"Uploader: {highlight(playlist_uploader)}"))
+                    append_to_file(UNIFIED, f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n")
+                    print(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube")
                     logging.info(f"Added playlist URL: {playlist_url}")
-                    
-                    # Process videos in playlist
-                    for video_id, video_title, uploader in videos:
-                        video_title = re.sub('[^0-9a-zA-Z]+', ' ', video_title).strip()
-                        video_url = f"https://www.youtube.com/watch?v={video_id}"
-                        transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
-                        transcript_file_exists = os.path.exists(transcript_file)
-                        url_exists = url_exists_in_file(video_url, UNIFIED)
+                for video_id, title, uploader in videos:
+                    title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                    transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+                    transcript_file_exists = os.path.exists(transcript_file)
+                    url_exists = url_exists_in_file(video_url, UNIFIED)
 
-                        if not url_exists or force or not transcript_file_exists or not reference_has_transcript(video_url):
-                            if not transcript_file_exists:
-                                print(info(f"Fetching transcript for: {url(video_url)}"))
-                                transcript_file = fetch_youtube_transcript(video_id)
-                                if transcript_file is None:
-                                    log_error("Transcript Retrieval", video_url, "Failed to fetch transcript")
-                                    print(warning(f"Failed to fetch transcript for: {url(video_url)}"))
-                            update_reference_entry(video_url, video_title, uploader, transcript_file or "None")
-                else:
-                    print(warning(f"Playlist already exists: {url(playlist_url)}"))
-            else:  # Single video
-                video_id, video_title, uploader = result
-                video_title = re.sub('[^0-9a-zA-Z]+', ' ', video_title).strip()
+                    if not url_exists or force or not transcript_file_exists or not reference_has_transcript(video_url):
+                        if not transcript_file_exists:
+                            transcript_file = fetch_youtube_transcript(video_id)
+                            if transcript_file is None:
+                                log_error("Transcript Retrieval", video_url, "Failed to fetch transcript")
+                        update_reference_entry(video_url, title, uploader, transcript_file)
+                    else:
+                        print(f"URL {video_url} already recorded.")
+                        logging.info(f"Duplicate URL: {video_url}")
+            else:  # Single Video
+                video_id, title, uploader = result
+                title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
                 transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
                 transcript_file_exists = os.path.exists(transcript_file)
@@ -722,48 +715,49 @@ def process_url(url_str: str, force: bool) -> None:
 
                 if not url_exists or force or not transcript_file_exists or not reference_has_transcript(video_url):
                     if not transcript_file_exists:
-                        print(info(f"Fetching transcript for: {url(video_url)}"))
                         transcript_file = fetch_youtube_transcript(video_id)
                         if transcript_file is None:
                             log_error("Transcript Retrieval", video_url, "Failed to fetch transcript")
-                            print(warning(f"Failed to fetch transcript for: {url(video_url)}"))
-                    update_reference_entry(video_url, video_title, uploader, transcript_file or "None")
+                    update_reference_entry(video_url, title, uploader, transcript_file)
+                    print(f"Title: {title}")
                 else:
-                    print(warning(f"Video already exists: {url(video_url)}"))
-                    print(info(f"Title: {title(video_title)}"))
-
+                    print(f"URL {video_url} already recorded.")
+                    print(f"Title: {title}")
+                    logging.info(f"Duplicate URL: {video_url}")
         except ValueError as e:
             error_message = f"Invalid YouTube URL: {e}"
             log_error("YouTube Processing", simplified_url, error_message)
-            print(error(f"Error: {error_message}"))
+            print(f"Error: {error_message}")
     else:
-        webpage_title = get_title_from_url(simplified_url)
-        logging.debug(f"Fetched title: {webpage_title}")
-        if webpage_title == "Dead link":
+        title = get_title_from_url(simplified_url)
+        logging.debug(f"Fetched title: {title}")
+        if title.startswith("Error: 'lynx' is not installed"):
+            print(title)
+            print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
+            return
+        elif title == "Dead link":
             log_error("URL Processing", simplified_url, "Dead link detected")
-            print(error(f"Error: The URL {url(simplified_url)} is a dead link."))
-        elif webpage_title == "Timeout error":
+            print(f"Error: The URL {simplified_url} is a dead link.")
+        elif title == "Timeout error":
             log_error("URL Processing", simplified_url, "Request timed out")
-            print(error(f"Error: The request to {url(simplified_url)} timed out."))
-        elif webpage_title == "Too many redirects":
+            print(f"Error: The request to {simplified_url} timed out.")
+        elif title == "Too many redirects":
             log_error("URL Processing", simplified_url, "Too many redirects")
-            print(error(f"Error: The URL {url(simplified_url)} has too many redirects."))
-        elif webpage_title.startswith("Unexpected error"):
-            log_error("URL Processing", simplified_url, webpage_title)
-            print(error("Error: An unexpected error occurred."))
-        elif webpage_title and not webpage_title.startswith("Error"):
+            print(f"Error: The URL {simplified_url} has too many redirects.")
+        elif title.startswith("Unexpected error"):
+            log_error("URL Processing", simplified_url, title)
+            print("Error: An unexpected error occurred.")
+        elif title and not title.startswith("Error"):
             if url_exists_in_file(simplified_url, UNIFIED) and not force:
-                print(warning(f"URL already recorded: {url(simplified_url)}"))
+                print(f"URL {simplified_url} already recorded.")
                 logging.info(f"Duplicate URL: {simplified_url}")
             else:
-                entry = f"{current_time}|[{simplified_url}]|({webpage_title})|General|General\n"
-                append_to_file(UNIFIED, entry)
-                print(success(f"Added URL: {url(simplified_url)}"))
-                print(info(f"Title: {title(webpage_title)}"))
+                append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|General|General\n")
+                print(f"{current_time}|[{simplified_url}]|({title})|General|General")
                 logging.info(f"Added URL: {simplified_url}")
         else:
-            log_error("URL Processing", simplified_url, f"Invalid URL with title: {webpage_title}")
-            print(error("Invalid URL"))
+            log_error("URL Processing", simplified_url, f"Invalid URL with title: {title}")
+            print("Invalid URL")
 
 def update_reference_entry(video_url: str, video_title: str, uploader: str, transcript_file: str) -> None:
     """
