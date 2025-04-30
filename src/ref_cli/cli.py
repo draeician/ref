@@ -805,18 +805,23 @@ def process_url(url: str, force: bool) -> None:
                 print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
                 return
             
+            # Always check if transcript exists and fetch if it doesn't
+            transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+            transcript_file_exists = os.path.exists(transcript_file)
+            
+            if not transcript_file_exists:
+                transcript_file = fetch_youtube_transcript(video_id)
+                if transcript_file is None:
+                    log_error("Transcript Retrieval", video_id, "Failed to fetch transcript")
+            
+            # Add or update the reference entry
             if not url_exists_in_file(simplified_url, UNIFIED) or force:
-                transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
-                transcript_file_exists = os.path.exists(transcript_file)
-                
-                if not transcript_file_exists:
-                    transcript_file = fetch_youtube_transcript(video_id)
-                    if transcript_file is None:
-                        log_error("Transcript Retrieval", video_id, "Failed to fetch transcript")
-                
-                append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|Rumble|General\n")
-                print(f"{current_time}|[{simplified_url}]|({title})|Rumble|General")
+                append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|Rumble|General|{transcript_file}\n")
+                print(f"{current_time}|[{simplified_url}]|({title})|Rumble|General|{transcript_file}")
                 logging.info(f"Added Rumble URL: {simplified_url}")
+            else:
+                # Update existing entry with transcript if needed
+                update_reference_entry(simplified_url, title, "Rumble", transcript_file)
         except Exception as e:
             error_message = f"Failed to process Rumble URL: {e}"
             log_error("Rumble Processing", simplified_url, error_message)
