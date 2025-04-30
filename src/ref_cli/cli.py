@@ -254,23 +254,33 @@ def get_title_from_url(url: str) -> str:
 
         title = None
 
-        if soup.title:
-            title = soup.title.string.strip()
-
-        if not title:
+        # Try different title sources based on the website
+        if "rumble.com" in url:
+            # For Rumble, try to get the video title from meta tags
             og_title = soup.find('meta', property='og:title')
             if og_title:
                 title = og_title.get('content', '').strip()
-
-        if not title:
-            twitter_title = soup.find('meta', name='twitter:title')
-            if twitter_title:
-                title = twitter_title.get('content', '').strip()
-
-        if not title:
-            h1 = soup.find('h1')
-            if h1:
-                title = h1.get_text().strip()
+            if not title:
+                # Fallback to h1 tag which often contains the video title on Rumble
+                h1 = soup.find('h1')
+                if h1:
+                    title = h1.get_text().strip()
+        else:
+            # For other sites, try the standard title sources
+            if soup.title:
+                title = soup.title.string.strip()
+            if not title:
+                og_title = soup.find('meta', property='og:title')
+                if og_title:
+                    title = og_title.get('content', '').strip()
+            if not title:
+                twitter_title = soup.find('meta', name='twitter:title')
+                if twitter_title:
+                    title = twitter_title.get('content', '').strip()
+            if not title:
+                h1 = soup.find('h1')
+                if h1:
+                    title = h1.get_text().strip()
 
         if title:
             logging.info(f"Title found: {title}")
@@ -593,23 +603,129 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
 
 def fetch_youtube_transcript(video_id: str) -> str:
     """
-    Fetches the transcript for a given YouTube video ID and saves it in the transcript directory.
+    Fetches the transcript for a given YouTube or Rumble video ID and saves it in the transcript directory.
 
     Args:
-        video_id (str): The YouTube video ID.
+        video_id (str): The YouTube or Rumble video ID or URL.
 
     Returns:
         str: The path to the saved transcript file.
     """
-    transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
-    command = f"yt https://www.youtube.com/watch?v={video_id} > {transcript_file}"
-    try:
-        subprocess.run(command, shell=True, check=True)
-        logging.info(f"Transcript saved to: {transcript_file}")
-        return transcript_file
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to fetch transcript for video ID {video_id}: {e}")
-        return None
+    # Ensure the transcripts directory exists
+    os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+    
+    # Determine if this is a Rumble URL
+    is_rumble = "rumble.com" in video_id
+    
+    # Extract the video ID based on the platform
+    if is_rumble:
+        # Extract the video ID from the Rumble URL
+        match = re.search(r'rumble\.com/([^/?]+)', video_id)
+        if match:
+            video_id = match.group(1)
+        else:
+            logging.error(f"Could not extract video ID from Rumble URL: {video_id}")
+            return None
+    else:
+        # For YouTube, extract the video ID if it's a full URL
+        if "youtube.com" in video_id:
+            match = re.search(r'v=([^&]+)', video_id)
+            if match:
+                video_id = match.group(1)
+    
+    safe_video_id = re.sub(r'[^\w\-_.]', '_', video_id)
+    base_transcript_file = os.path.join(TRANSCRIPTS_DIR, safe_video_id)
+    
+    if is_rumble:
+        # For Rumble, we need to ensure the URL is properly formatted
+        rumble_url = f"https://rumble.com/{video_id}"
+        
+        # First, check video info
+        info_command = [
+            "yt-dlp",
+            "--dump-json",
+            rumble_url
+        ]
+        
+        try:
+            # Get video info
+            result = subprocess.run(info_command, check=True, capture_output=True, text=True)
+            logging.info(f"Video info:\n{result.stdout}")
+            
+            # Try to download subtitles with different approaches
+            approaches = [
+                # Try with auto-generated subtitles
+                [
+                    "yt-dlp",
+                    "--skip-download",
+                    "--write-auto-subs",
+                    "--sub-lang", "en",
+                    "--sub-format", "vtt",
+                    "--output", f"{base_transcript_file}.%(ext)s",
+                    rumble_url
+                ],
+                # Try with manual subtitles
+                [
+                    "yt-dlp",
+                    "--skip-download",
+                    "--write-subs",
+                    "--sub-lang", "en",
+                    "--sub-format", "vtt",
+                    "--output", f"{base_transcript_file}.%(ext)s",
+                    rumble_url
+                ],
+                # Try with all available subtitles
+                [
+                    "yt-dlp",
+                    "--skip-download",
+                    "--write-subs",
+                    "--write-auto-subs",
+                    "--all-subs",
+                    "--sub-format", "vtt",
+                    "--output", f"{base_transcript_file}.%(ext)s",
+                    rumble_url
+                ]
+            ]
+            
+            for approach in approaches:
+                try:
+                    result = subprocess.run(approach, check=True, capture_output=True, text=True)
+                    logging.info(f"yt-dlp output:\n{result.stdout}")
+                    logging.info(f"yt-dlp error output:\n{result.stderr}")
+                    
+                    # Check for any subtitle files that might have been created
+                    for ext in ['.en-auto.vtt', '.en.vtt', '.vtt']:
+                        transcript_file = f"{base_transcript_file}{ext}"
+                        if os.path.exists(transcript_file):
+                            with open(transcript_file, 'r') as f:
+                                content = f.read()
+                                if content.strip():
+                                    logging.info(f"Successfully saved transcript to: {transcript_file}")
+                                    return transcript_file
+                            
+                    logging.warning(f"Failed to get subtitles with current approach")
+                except subprocess.CalledProcessError as e:
+                    logging.warning(f"Failed to get subtitles: {e}")
+                    logging.warning(f"yt-dlp stderr: {e.stderr}")
+                    continue
+            
+            logging.error(f"Failed to get subtitles with any approach for video: {rumble_url}")
+            return None
+            
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to get video info for Rumble video ID {video_id}: {e}")
+            logging.error(f"yt-dlp stderr: {e.stderr}")
+            return None
+    else:
+        # YouTube URL handling
+        command = f"yt https://www.youtube.com/watch?v={video_id} > {base_transcript_file}.json"
+        try:
+            subprocess.run(command, shell=True, check=True)
+            logging.info(f"Transcript saved to: {base_transcript_file}.json")
+            return f"{base_transcript_file}.json"
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to fetch transcript for YouTube video ID {video_id}: {e}")
+            return None
 
 def log_error(error_type: str, url: str, error_message: str) -> None:
     """
@@ -679,7 +795,33 @@ def process_url(url: str, force: bool) -> None:
 
     current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
     
-    if "youtube.com" in simplified_url and not simplified_url.startswith('https://www.youtube.com/redirect'):
+    if "rumble.com" in simplified_url:
+        try:
+            # Extract video ID from Rumble URL
+            video_id = simplified_url
+            title = get_title_from_url(simplified_url)
+            if title.startswith("Error: 'lynx' is not installed"):
+                print(title)
+                print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
+                return
+            
+            if not url_exists_in_file(simplified_url, UNIFIED) or force:
+                transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+                transcript_file_exists = os.path.exists(transcript_file)
+                
+                if not transcript_file_exists:
+                    transcript_file = fetch_youtube_transcript(video_id)
+                    if transcript_file is None:
+                        log_error("Transcript Retrieval", video_id, "Failed to fetch transcript")
+                
+                append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|Rumble|General\n")
+                print(f"{current_time}|[{simplified_url}]|({title})|Rumble|General")
+                logging.info(f"Added Rumble URL: {simplified_url}")
+        except Exception as e:
+            error_message = f"Failed to process Rumble URL: {e}"
+            log_error("Rumble Processing", simplified_url, error_message)
+            print(f"Error: {error_message}")
+    elif "youtube.com" in simplified_url and not simplified_url.startswith('https://www.youtube.com/redirect'):
         try:
             result = get_youtube_data(simplified_url)
             if isinstance(result, tuple) and isinstance(result[2], list):  # Playlist
