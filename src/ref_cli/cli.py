@@ -270,11 +270,11 @@ def get_title_from_url(url: str) -> str:
             if soup.title:
                 title = soup.title.string.strip()
             if not title:
-                og_title = soup.find('meta', property='og:title')
+                og_title = soup.find('meta', {'property': 'og:title'})
                 if og_title:
                     title = og_title.get('content', '').strip()
             if not title:
-                twitter_title = soup.find('meta', name='twitter:title')
+                twitter_title = soup.find('meta', {'name': 'twitter:title'})
                 if twitter_title:
                     title = twitter_title.get('content', '').strip()
             if not title:
