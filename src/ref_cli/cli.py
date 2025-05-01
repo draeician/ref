@@ -171,14 +171,27 @@ def simplify_url(url: str) -> str:
 
 def resolve_redirect(url: str) -> str:
     """
-    Resolves the final URL after following any redirects. Specifically handles YouTube redirect URLs.
+    Resolves the final URL after following any redirects. Specifically handles YouTube redirect URLs
+    and authentication redirects.
 
     Args:
         url (str): The original URL to resolve.
 
     Returns:
-        str: The final URL after following redirects.
+        str: The final URL after following redirects, or the original URL if redirected to authentication.
     """
+    # List of common authentication/login URL patterns
+    auth_patterns = [
+        r'/auth/login',
+        r'/login',
+        r'/signin',
+        r'/authenticate',
+        r'/oauth',
+        r'/auth/oauth',
+        r'/auth/signin',
+        r'/auth/authenticate'
+    ]
+    
     youtube_redirect_pattern = re.compile(r'https://www\.youtube\.com/redirect\?')
     if youtube_redirect_pattern.match(url):
         parsed_url = urlparse(url)
@@ -191,7 +204,7 @@ def resolve_redirect(url: str) -> str:
         total=3,
         backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"]  # Allow these methods to retry
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
@@ -200,7 +213,6 @@ def resolve_redirect(url: str) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', InsecureRequestWarning)
         try:
-            # First try with headers that mimic a browser
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -208,11 +220,17 @@ def resolve_redirect(url: str) -> str:
                 'Connection': 'keep-alive',
             }
             response = session.get(url, 
-                                 allow_redirects=True, 
-                                 verify=False, 
-                                 timeout=10,
-                                 headers=headers)
+                                allow_redirects=True, 
+                                verify=False, 
+                                timeout=10,
+                                headers=headers)
             
+            # Check if the final URL is an authentication page
+            final_url = response.url
+            if any(re.search(pattern, final_url) for pattern in auth_patterns):
+                logging.debug(f"Authentication redirect detected, keeping original URL: {url}")
+                return url
+                
             # If we got redirected to the homepage, return the original URL
             if response.url == "https://www.msn.com/" and url != "https://www.msn.com/":
                 logging.debug(f"Prevented incorrect redirect to homepage, keeping original URL: {url}")
