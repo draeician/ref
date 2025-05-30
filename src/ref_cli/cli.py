@@ -375,7 +375,10 @@ def get_youtube_data(url: str) -> tuple:
     if isinstance(video_id, list):
         video_id = video_id[0]
     video_response = youtube.videos().list(part='snippet', id=video_id).execute()
-    video_data = video_response['items'][0]['snippet']
+    items = video_response.get('items', [])
+    if not items:
+        raise ValueError(f"No video found for id '{video_id}'")
+    video_data = items[0]['snippet']
     return video_id, video_data['title'], video_data['channelTitle']
 
 def get_youtube_playlist_data(playlist_id: str, youtube) -> tuple:
@@ -546,8 +549,8 @@ def parse_arguments() -> argparse.Namespace:
     if args.edit:
         os.system(f"vim {UNIFIED}")
         sys.exit()
-    if args.url:
-        args.url = args.url.replace('&', '\\&')
+    # No manual escaping is necessary; the URL arrives as a single argument
+    # and should be preserved exactly for later processing.
     return args
 
 def url_exists_in_file(url: str, file_path: str) -> bool:
@@ -815,8 +818,13 @@ def process_url(url: str, force: bool) -> None:
     
     if "rumble.com" in simplified_url:
         try:
-            # Extract video ID from Rumble URL
-            video_id = simplified_url
+            # Extract video ID from the Rumble URL for file naming
+            match = re.search(r"rumble\.com/([^/?]+)", simplified_url)
+            if match:
+                video_id = match.group(1)
+            else:
+                video_id = simplified_url
+            safe_video_id = re.sub(r"[^\w\-_.]", "_", video_id)
             title = get_title_from_url(simplified_url)
             if title.startswith("Error: 'lynx' is not installed"):
                 print(title)
@@ -824,11 +832,11 @@ def process_url(url: str, force: bool) -> None:
                 return
             
             # Always check if transcript exists and fetch if it doesn't
-            transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+            transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{safe_video_id}.json")
             transcript_file_exists = os.path.exists(transcript_file)
-            
+
             if not transcript_file_exists:
-                transcript_file = fetch_youtube_transcript(video_id)
+                transcript_file = fetch_youtube_transcript(simplified_url)
                 if transcript_file is None:
                     log_error("Transcript Retrieval", video_id, "Failed to fetch transcript")
             
