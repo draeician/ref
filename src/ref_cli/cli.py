@@ -911,13 +911,13 @@ def process_url(url: str, force: bool) -> None:
         elif title == "Dead link":
             log_error("URL Processing", simplified_url, "Dead link detected")
             print(f"Error: The URL {simplified_url} is a dead link.")
-        elif title == "Timeout error":
+        elif title in ("Timeout error", "Error: Request timed out"):
             log_error("URL Processing", simplified_url, "Request timed out")
             print(f"Error: The request to {simplified_url} timed out.")
         elif title == "Too many redirects":
             log_error("URL Processing", simplified_url, "Too many redirects")
             print(f"Error: The URL {simplified_url} has too many redirects.")
-        elif title.startswith("Unexpected error"):
+        elif title.startswith("Error: Unexpected error"):
             log_error("URL Processing", simplified_url, title)
             print("Error: An unexpected error occurred.")
         elif title and not title.startswith("Error"):
