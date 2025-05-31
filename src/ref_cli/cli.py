@@ -815,8 +815,13 @@ def process_url(url: str, force: bool) -> None:
     
     if "rumble.com" in simplified_url:
         try:
-            # Extract video ID from Rumble URL
-            video_id = simplified_url
+            # Extract video ID from the Rumble URL for file naming
+            match = re.search(r"rumble\.com/([^/?]+)", simplified_url)
+            if match:
+                video_id = match.group(1)
+            else:
+                video_id = simplified_url
+            safe_video_id = re.sub(r"[^\w\-_.]", "_", video_id)
             title = get_title_from_url(simplified_url)
             if title.startswith("Error: 'lynx' is not installed"):
                 print(title)
@@ -824,11 +829,11 @@ def process_url(url: str, force: bool) -> None:
                 return
             
             # Always check if transcript exists and fetch if it doesn't
-            transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+            transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{safe_video_id}.json")
             transcript_file_exists = os.path.exists(transcript_file)
-            
+
             if not transcript_file_exists:
-                transcript_file = fetch_youtube_transcript(video_id)
+                transcript_file = fetch_youtube_transcript(simplified_url)
                 if transcript_file is None:
                     log_error("Transcript Retrieval", video_id, "Failed to fetch transcript")
             
@@ -903,13 +908,13 @@ def process_url(url: str, force: bool) -> None:
         elif title == "Dead link":
             log_error("URL Processing", simplified_url, "Dead link detected")
             print(f"Error: The URL {simplified_url} is a dead link.")
-        elif title == "Timeout error":
+        elif title in ("Timeout error", "Error: Request timed out"):
             log_error("URL Processing", simplified_url, "Request timed out")
             print(f"Error: The request to {simplified_url} timed out.")
         elif title == "Too many redirects":
             log_error("URL Processing", simplified_url, "Too many redirects")
             print(f"Error: The URL {simplified_url} has too many redirects.")
-        elif title.startswith("Unexpected error"):
+        elif title.startswith("Error: Unexpected error"):
             log_error("URL Processing", simplified_url, title)
             print("Error: An unexpected error occurred.")
         elif title and not title.startswith("Error"):
