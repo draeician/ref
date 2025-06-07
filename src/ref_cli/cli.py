@@ -172,7 +172,7 @@ def simplify_url(url: str) -> str:
 def resolve_redirect(url: str) -> str:
     """
     Resolves the final URL after following any redirects. Specifically handles YouTube redirect URLs
-    and authentication redirects.
+    and authentication redirects. Includes better handling for Medium/GitConnected rate limiting.
 
     Args:
         url (str): The original URL to resolve.
@@ -189,8 +189,22 @@ def resolve_redirect(url: str) -> str:
         r'/oauth',
         r'/auth/oauth',
         r'/auth/signin',
-        r'/auth/authenticate'
+        r'/auth/authenticate',
+        r'/m/global-identity',  # Medium auth pattern
     ]
+    
+    # Special handling for Medium/GitConnected URLs that are known to cause issues
+    medium_patterns = [
+        r'levelup\.gitconnected\.com',
+        r'medium\.com',
+        r'towardsdatascience\.com',
+        r'betterprogramming\.pub',
+    ]
+    
+    # Check if this is a known problematic Medium URL
+    if any(re.search(pattern, url) for pattern in medium_patterns):
+        logging.debug(f"Detected Medium-based URL, using original URL to avoid rate limiting: {url}")
+        return url
     
     youtube_redirect_pattern = re.compile(r'https://www\.youtube\.com/redirect\?')
     if youtube_redirect_pattern.match(url):
@@ -201,9 +215,9 @@ def resolve_redirect(url: str) -> str:
     
     session = requests.Session()
     retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
+        total=2,  # Reduced retries to avoid excessive requests
+        backoff_factor=2,  # Increased backoff factor for rate limiting
+        status_forcelist=[500, 502, 503, 504],  # Removed 429 from forcelist to handle separately
         allowed_methods=["HEAD", "GET", "OPTIONS"]
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -222,8 +236,13 @@ def resolve_redirect(url: str) -> str:
             response = session.get(url, 
                                 allow_redirects=True, 
                                 verify=False, 
-                                timeout=10,
+                                timeout=15,  # Increased timeout
                                 headers=headers)
+            
+            # Check if we got a 429 response
+            if response.status_code == 429:
+                logging.warning(f"Rate limited (429) for URL: {url}, using original URL")
+                return url
             
             # Check if the final URL is an authentication page
             final_url = response.url
@@ -238,8 +257,13 @@ def resolve_redirect(url: str) -> str:
                 
             return response.url
         except requests.exceptions.RequestException as e:
-            logging.error(f"Error resolving redirect for URL: {url}, error: {e}")
-            return url
+            # Check if it's specifically a 429 error
+            if "429" in str(e) or "too many 429 error responses" in str(e).lower():
+                logging.warning(f"Rate limited for URL: {url}, using original URL")
+                return url
+            else:
+                logging.error(f"Error resolving redirect for URL: {url}, error: {e}")
+                return url
 
 def get_title_from_url(url: str) -> str:
     """
