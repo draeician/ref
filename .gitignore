@@ -32,3 +32,5 @@ project_structure
 listing
 testfile
 
+.cursorindexingignore
+.specstory/
