@@ -32,7 +32,8 @@ dependencies = [
     "charset-normalizer>=3.2.0",
     "setuptools>=45.0.0",
     "colorama>=0.4.6",
-    "yt-dlp>=2023.12.30"
+    "yt-dlp>=2023.12.30",
+    "youtube-transcript-api>=1.1.0"
 ]
 dynamic = ["version"]
 
