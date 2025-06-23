@@ -15,6 +15,7 @@ import argparse
 import warnings
 import logging
 import yaml
+import json
 from datetime import datetime
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -29,6 +30,24 @@ import importlib.resources
 from ref_cli import __version__
 from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
+
+# Import the new transcript functionality
+try:
+    import sys
+    import os
+    # Add the project root directory to the path to import get_transcript
+    # The CLI is in src/ref_cli/cli.py, so we need to go up 2 levels to reach the project root
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from get_transcript import get_youtube_transcript_with_metadata
+    logging.info("Successfully imported enhanced transcript functionality")
+except ImportError as e:
+    logging.info(f"Enhanced transcript functionality not available: {e}")
+    logging.info("To enable enhanced transcript features with metadata, install dependencies:")
+    logging.info("pip install youtube-transcript-api google-api-python-client")
+    logging.info("Falling back to legacy transcript method.")
+    get_youtube_transcript_with_metadata = None
 
 # Initialize colorama
 init()
@@ -649,6 +668,7 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
 def fetch_youtube_transcript(video_id: str) -> str:
     """
     Fetches the transcript for a given YouTube or Rumble video ID and saves it in the transcript directory.
+    Uses the new structured JSON format with metadata when possible.
 
     Args:
         video_id (str): The YouTube or Rumble video ID or URL.
@@ -762,7 +782,25 @@ def fetch_youtube_transcript(video_id: str) -> str:
             logging.error(f"yt-dlp stderr: {e.stderr}")
             return None
     else:
-        # YouTube URL handling - using youtube_transcript_api instead of non-existent 'yt' command
+        # YouTube URL handling - use new structured JSON format when available
+        if get_youtube_transcript_with_metadata:
+            try:
+                # Use the new structured approach
+                result = get_youtube_transcript_with_metadata(video_id, save_to_file=False)
+                
+                # Save the structured JSON with metadata
+                json_file = f"{base_transcript_file}.json"
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, indent=2, ensure_ascii=False)
+                
+                logging.info(f"Structured transcript saved to: {json_file}")
+                return json_file  # Return the structured JSON file as primary
+                
+            except Exception as e:
+                logging.warning(f"Failed to use new transcript method, falling back to legacy: {e}")
+                # Fall through to legacy method
+        
+        # Legacy YouTube transcript handling (fallback)
         try:
             result = subprocess.run([
                 "youtube_transcript_api", 
@@ -770,17 +808,53 @@ def fetch_youtube_transcript(video_id: str) -> str:
                 "--format", "json"
             ], check=True, capture_output=True, text=True)
             
-            # Save the JSON output to file
-            transcript_file = f"{base_transcript_file}.json"
-            with open(transcript_file, 'w') as f:
-                f.write(result.stdout)
+            # Parse the JSON output and extract clean text
+            transcript_data = json.loads(result.stdout)
             
-            logging.info(f"Transcript saved to: {transcript_file}")
-            return transcript_file
+            # Handle nested array format from youtube_transcript_api
+            if isinstance(transcript_data, list) and len(transcript_data) > 0 and isinstance(transcript_data[0], list):
+                transcript_entries = transcript_data[0]  # Extract the inner list
+            else:
+                transcript_entries = transcript_data
+            
+            # Extract text from each transcript entry and join them
+            clean_text = ""
+            total_duration = 0
+            for entry in transcript_entries:
+                if isinstance(entry, dict) and 'text' in entry:
+                    clean_text += entry['text'] + " "
+                    total_duration += entry.get('duration', 0)
+            
+            # Clean up the text (remove extra spaces, etc.)
+            clean_text = ' '.join(clean_text.split())
+            
+            # Create a structured JSON format similar to the new method
+            json_file = f"{base_transcript_file}.json"
+            structured_data = {
+                "transcript": clean_text,
+                "duration": int(total_duration),  # Convert to int like the new method
+                "comments": [],
+                "metadata": {
+                    "id": video_id,
+                    "title": "Title unavailable (legacy method)",
+                    "channel": "Channel unavailable (legacy method)",
+                    "published_at": "Date unavailable (legacy method)"
+                }
+            }
+            
+            # Save structured JSON
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(structured_data, f, indent=2, ensure_ascii=False)
+            
+            logging.info(f"Legacy transcript saved to: {json_file}")
+            return json_file
             
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to fetch transcript for YouTube video ID {video_id}: {e}")
             logging.error(f"youtube_transcript_api stderr: {e.stderr}")
+            return None
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse transcript JSON for video ID {video_id}: {e}")
             return None
 
 def log_error(error_type: str, url: str, error_message: str) -> None:
@@ -867,8 +941,32 @@ def process_url(url: str, force: bool) -> None:
                 return
             
             # Always check if transcript exists and fetch if it doesn't
-            transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{safe_video_id}.json")
-            transcript_file_exists = os.path.exists(transcript_file)
+            # Check for structured JSON (new format) or legacy JSON
+            transcript_file_structured = os.path.join(TRANSCRIPTS_DIR, f"{safe_video_id}.json")
+            
+            # Check if structured JSON exists and contains metadata
+            transcript_file_exists = False
+            transcript_file = None
+            
+            if os.path.exists(transcript_file_structured):
+                try:
+                    with open(transcript_file_structured, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        # Check if it's the new structured format with metadata
+                        if 'metadata' in data and 'transcript' in data:
+                            transcript_file = transcript_file_structured
+                            transcript_file_exists = True
+                        else:
+                            # Legacy JSON format - still use it
+                            transcript_file = transcript_file_structured
+                            transcript_file_exists = True
+                except (json.JSONDecodeError, KeyError):
+                    # Invalid JSON - will need to refetch
+                    transcript_file = None
+                    transcript_file_exists = False
+            else:
+                transcript_file = None
+                transcript_file_exists = False
 
             if not transcript_file_exists:
                 transcript_file = fetch_youtube_transcript(simplified_url)
@@ -900,8 +998,34 @@ def process_url(url: str, force: bool) -> None:
                 for video_id, title, uploader in videos:
                     title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
-                    transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
-                    transcript_file_exists = os.path.exists(transcript_file)
+                    
+                    # Check for structured JSON (new format) or legacy JSON
+                    transcript_file_structured = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+                    
+                    # Check if structured JSON exists and contains metadata
+                    transcript_file_exists = False
+                    transcript_file = None
+                    
+                    if os.path.exists(transcript_file_structured):
+                        try:
+                            with open(transcript_file_structured, 'r', encoding='utf-8') as f:
+                                data = json.load(f)
+                                # Check if it's the new structured format with metadata
+                                if 'metadata' in data and 'transcript' in data:
+                                    transcript_file = transcript_file_structured
+                                    transcript_file_exists = True
+                                else:
+                                    # Legacy JSON format - still use it
+                                    transcript_file = transcript_file_structured
+                                    transcript_file_exists = True
+                        except (json.JSONDecodeError, KeyError):
+                            # Invalid JSON - will need to refetch
+                            transcript_file = None
+                            transcript_file_exists = False
+                    else:
+                        transcript_file = None
+                        transcript_file_exists = False
+                    
                     url_exists = url_exists_in_file(video_url, UNIFIED)
 
                     if not url_exists or force or not transcript_file_exists or not reference_has_transcript(video_url):
@@ -917,8 +1041,34 @@ def process_url(url: str, force: bool) -> None:
                 video_id, title, uploader = result
                 title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
-                transcript_file = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
-                transcript_file_exists = os.path.exists(transcript_file)
+                
+                # Check for structured JSON (new format) or legacy JSON
+                transcript_file_structured = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+                
+                # Check if structured JSON exists and contains metadata
+                transcript_file_exists = False
+                transcript_file = None
+                
+                if os.path.exists(transcript_file_structured):
+                    try:
+                        with open(transcript_file_structured, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            # Check if it's the new structured format with metadata
+                            if 'metadata' in data and 'transcript' in data:
+                                transcript_file = transcript_file_structured
+                                transcript_file_exists = True
+                            else:
+                                # Legacy JSON format - still use it
+                                transcript_file = transcript_file_structured
+                                transcript_file_exists = True
+                    except (json.JSONDecodeError, KeyError):
+                        # Invalid JSON - will need to refetch
+                        transcript_file = None
+                        transcript_file_exists = False
+                else:
+                    transcript_file = None
+                    transcript_file_exists = False
+                    
                 url_exists = url_exists_in_file(video_url, UNIFIED)
 
                 if not url_exists or force or not transcript_file_exists or not reference_has_transcript(video_url):
@@ -927,7 +1077,6 @@ def process_url(url: str, force: bool) -> None:
                         if transcript_file is None:
                             log_error("Transcript Retrieval", video_url, "Failed to fetch transcript")
                     update_reference_entry(video_url, title, uploader, transcript_file)
-                    print(f"Title: {title}")
                 else:
                     print(f"URL {video_url} already recorded.")
                     print(f"Title: {title}")
