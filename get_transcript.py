@@ -67,7 +67,20 @@ def get_youtube_transcript_with_metadata(video_id: str, api_key: Optional[str] =
         return result
         
     except Exception as e:
-        raise Exception(f"Failed to fetch transcript and metadata for video {video_id}: {str(e)}")
+        # Check if it's a transcript unavailable error
+        error_msg = str(e).lower()
+        if any(phrase in error_msg for phrase in [
+            'could not retrieve a transcript',
+            'subtitles are disabled',
+            'no transcript',
+            'transcript not available',
+            'no subtitles'
+        ]):
+            # This is a normal case for videos without transcripts (like music videos)
+            raise Exception(f"No transcript available for video {video_id}: {str(e)}")
+        else:
+            # This is an unexpected error
+            raise Exception(f"Failed to fetch transcript and metadata for video {video_id}: {str(e)}")
 
 def get_video_metadata(video_id: str, api_key: str) -> Dict[str, str]:
     """

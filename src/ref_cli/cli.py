@@ -797,8 +797,18 @@ def fetch_youtube_transcript(video_id: str) -> str:
                 return json_file  # Return the structured JSON file as primary
                 
             except Exception as e:
-                logging.warning(f"Failed to use new transcript method, falling back to legacy: {e}")
-                # Fall through to legacy method
+                # Check if it's a "no transcript available" error
+                error_msg = str(e).lower()
+                if any(phrase in error_msg for phrase in [
+                    'no transcript available',
+                    'could not retrieve a transcript',
+                    'subtitles are disabled'
+                ]):
+                    logging.info(f"No transcript available for video {video_id}: {e}")
+                    return None  # Don't try legacy method if transcript is simply not available
+                else:
+                    logging.warning(f"Failed to use new transcript method, falling back to legacy: {e}")
+                    # Fall through to legacy method
         
         # Legacy YouTube transcript handling (fallback)
         try:
@@ -808,14 +818,35 @@ def fetch_youtube_transcript(video_id: str) -> str:
                 "--format", "json"
             ], check=True, capture_output=True, text=True)
             
-            # Parse the JSON output and extract clean text
-            transcript_data = json.loads(result.stdout)
+            # Check if the output contains an error message instead of JSON
+            if "Could not retrieve a transcript" in result.stdout or "Subtitles are disabled" in result.stdout:
+                logging.info(f"No transcript available for video ID {video_id}: Subtitles are disabled or not available")
+                return None
+            
+            # Check if stdout is empty or whitespace only
+            if not result.stdout.strip():
+                logging.info(f"No transcript data returned for video ID {video_id}")
+                return None
+            
+            # Try to parse the JSON output
+            try:
+                transcript_data = json.loads(result.stdout)
+            except json.JSONDecodeError as e:
+                # If JSON parsing fails, log the actual output for debugging
+                logging.warning(f"Failed to parse transcript JSON for video ID {video_id}. Output was: {result.stdout[:200]}...")
+                logging.info(f"This likely means no transcript is available for video ID {video_id}")
+                return None
             
             # Handle nested array format from youtube_transcript_api
             if isinstance(transcript_data, list) and len(transcript_data) > 0 and isinstance(transcript_data[0], list):
                 transcript_entries = transcript_data[0]  # Extract the inner list
             else:
                 transcript_entries = transcript_data
+            
+            # Check if we have actual transcript entries
+            if not transcript_entries:
+                logging.info(f"No transcript entries found for video ID {video_id}")
+                return None
             
             # Extract text from each transcript entry and join them
             clean_text = ""
@@ -824,6 +855,11 @@ def fetch_youtube_transcript(video_id: str) -> str:
                 if isinstance(entry, dict) and 'text' in entry:
                     clean_text += entry['text'] + " "
                     total_duration += entry.get('duration', 0)
+            
+            # Check if we actually got any text
+            if not clean_text.strip():
+                logging.info(f"No transcript text found for video ID {video_id}")
+                return None
             
             # Clean up the text (remove extra spaces, etc.)
             clean_text = ' '.join(clean_text.split())
@@ -850,11 +886,8 @@ def fetch_youtube_transcript(video_id: str) -> str:
             return json_file
             
         except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to fetch transcript for YouTube video ID {video_id}: {e}")
-            logging.error(f"youtube_transcript_api stderr: {e.stderr}")
-            return None
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse transcript JSON for video ID {video_id}: {e}")
+            logging.info(f"youtube_transcript_api command failed for video ID {video_id}: {e}")
+            logging.info("This likely means no transcript is available for this video")
             return None
 
 def log_error(error_type: str, url: str, error_message: str) -> None:
@@ -971,7 +1004,9 @@ def process_url(url: str, force: bool) -> None:
             if not transcript_file_exists:
                 transcript_file = fetch_youtube_transcript(simplified_url)
                 if transcript_file is None:
-                    log_error("Transcript Retrieval", video_id, "Failed to fetch transcript")
+                    # Use "No transcript available" instead of None for cleaner display
+                    transcript_file = "No transcript available"
+                    logging.info(f"No transcript available for Rumble video {video_id}")
             
             # Add or update the reference entry
             if not url_exists_in_file(simplified_url, UNIFIED) or force:
@@ -1032,7 +1067,9 @@ def process_url(url: str, force: bool) -> None:
                         if not transcript_file_exists:
                             transcript_file = fetch_youtube_transcript(video_id)
                             if transcript_file is None:
-                                log_error("Transcript Retrieval", video_url, "Failed to fetch transcript")
+                                # Use "No transcript available" instead of None for cleaner display
+                                transcript_file = "No transcript available"
+                                logging.info(f"No transcript available for video {video_id} (common for music videos)")
                         update_reference_entry(video_url, title, uploader, transcript_file)
                     else:
                         print(f"URL {video_url} already recorded.")
@@ -1075,7 +1112,9 @@ def process_url(url: str, force: bool) -> None:
                     if not transcript_file_exists:
                         transcript_file = fetch_youtube_transcript(video_id)
                         if transcript_file is None:
-                            log_error("Transcript Retrieval", video_url, "Failed to fetch transcript")
+                            # Use "No transcript available" instead of None for cleaner display
+                            transcript_file = "No transcript available"
+                            logging.info(f"No transcript available for video {video_id} (common for music videos)")
                     update_reference_entry(video_url, title, uploader, transcript_file)
                 else:
                     print(f"URL {video_url} already recorded.")
