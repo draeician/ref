@@ -516,12 +516,12 @@ def search_entries(search_term: str, search_field: str, file_path: str) -> dict:
 
     return results
 
-def update_transcript(url: str) -> None:
+def update_transcript(video_url: str) -> None:
     """
     Updates the transcript for an existing YouTube entry in the references.md file.
 
     Args:
-        url (str): The URL of the YouTube video to update.
+        video_url (str): The URL of the YouTube video to update.
     """
     with open(UNIFIED, 'r') as file:
         lines = file.readlines()
@@ -529,22 +529,22 @@ def update_transcript(url: str) -> None:
     updated = False
     with open(UNIFIED, 'w') as file:
         for line in lines:
-            if url in line and line.strip().endswith("|None"):
-                video_id = re.search(r'v=([^&]+)', url).group(1)
-                print(info(f"Fetching transcript for: {url(url)}"))
+            if video_url in line and line.strip().endswith("|None"):
+                video_id = re.search(r'v=([^&]+)', video_url).group(1)
+                print(info(f"Fetching transcript for: {url(video_url)}"))
                 transcript_file = fetch_youtube_transcript(video_id)
                 if transcript_file:
                     line = line.replace("|None", f"|{transcript_file}")
                     updated = True
-                    logging.info(f"Transcript updated for URL: {url}")
+                    logging.info(f"Transcript updated for URL: {video_url}")
                 else:
-                    print(warning(f"Failed to fetch transcript for: {url(url)}"))
+                    print(warning(f"Failed to fetch transcript for: {url(video_url)}"))
             file.write(line)
 
     if updated:
-        print(success(f"Transcript for {url(url)} has been updated."))
+        print(success(f"Transcript for {url(video_url)} has been updated."))
     else:
-        print(warning(f"No matching entry found for {url(url)} or transcript already exists."))
+        print(warning(f"No matching entry found for {url(video_url)} or transcript already exists."))
 
 def parse_arguments() -> argparse.Namespace:
     """
@@ -762,14 +762,25 @@ def fetch_youtube_transcript(video_id: str) -> str:
             logging.error(f"yt-dlp stderr: {e.stderr}")
             return None
     else:
-        # YouTube URL handling
-        command = f"yt https://www.youtube.com/watch?v={video_id} > {base_transcript_file}.json"
+        # YouTube URL handling - using youtube_transcript_api instead of non-existent 'yt' command
         try:
-            subprocess.run(command, shell=True, check=True)
-            logging.info(f"Transcript saved to: {base_transcript_file}.json")
-            return f"{base_transcript_file}.json"
+            result = subprocess.run([
+                "youtube_transcript_api", 
+                video_id, 
+                "--format", "json"
+            ], check=True, capture_output=True, text=True)
+            
+            # Save the JSON output to file
+            transcript_file = f"{base_transcript_file}.json"
+            with open(transcript_file, 'w') as f:
+                f.write(result.stdout)
+            
+            logging.info(f"Transcript saved to: {transcript_file}")
+            return transcript_file
+            
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to fetch transcript for YouTube video ID {video_id}: {e}")
+            logging.error(f"youtube_transcript_api stderr: {e.stderr}")
             return None
 
 def log_error(error_type: str, url: str, error_message: str) -> None:
