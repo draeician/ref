@@ -422,7 +422,7 @@ def get_youtube_data(url: str) -> tuple:
     if not items:
         raise ValueError(f"No video found for id '{video_id}'")
     video_data = items[0]['snippet']
-    return video_id, video_data['title'], video_data['channelTitle']
+    return video_id, video_data['title'], video_data['channelTitle'], video_data.get('publishedAt', 'Date unavailable')
 
 def get_youtube_playlist_data(playlist_id: str, youtube) -> tuple:
     """
@@ -459,7 +459,8 @@ def get_youtube_playlist_data(playlist_id: str, youtube) -> tuple:
             video_id = item['snippet']['resourceId']['videoId']
             title = item['snippet']['title']
             uploader = item['snippet']['channelTitle']
-            video_details.append((video_id, title, uploader))
+            published_at = item['snippet'].get('publishedAt', 'Date unavailable')
+            video_details.append((video_id, title, uploader, published_at))
         next_page_token = playlist_items_response.get('nextPageToken')
         if not next_page_token:
             break
@@ -665,13 +666,15 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
         print(f"Error reading file: {e}")
         logging.error(f"Error reading file {file_path}: {e}")
 
-def fetch_youtube_transcript(video_id: str) -> str:
+def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
     """
     Fetches the transcript for a given YouTube or Rumble video ID and saves it in the transcript directory.
     Uses the new structured JSON format with metadata when possible.
 
     Args:
         video_id (str): The YouTube or Rumble video ID or URL.
+        metadata (dict, optional): Pre-collected metadata containing id, title, channel, published_at.
+                                 If provided, this will be used instead of making additional API calls.
 
     Returns:
         str: The path to the saved transcript file.
@@ -788,6 +791,11 @@ def fetch_youtube_transcript(video_id: str) -> str:
                 # Use the new structured approach
                 result = get_youtube_transcript_with_metadata(video_id, save_to_file=False)
                 
+                # If we have pre-collected metadata, use it instead of the API metadata
+                if metadata:
+                    result['metadata'] = metadata
+                    logging.info(f"Using pre-collected metadata for video {video_id}")
+                
                 # Save the structured JSON with metadata
                 json_file = f"{base_transcript_file}.json"
                 with open(json_file, 'w', encoding='utf-8') as f:
@@ -866,16 +874,24 @@ def fetch_youtube_transcript(video_id: str) -> str:
             
             # Create a structured JSON format similar to the new method
             json_file = f"{base_transcript_file}.json"
-            structured_data = {
-                "transcript": clean_text,
-                "duration": int(total_duration),  # Convert to int like the new method
-                "comments": [],
-                "metadata": {
+            
+            # Use pre-collected metadata if available, otherwise use legacy fallback
+            if metadata:
+                metadata_to_use = metadata
+                logging.info(f"Using pre-collected metadata for video {video_id} (legacy method)")
+            else:
+                metadata_to_use = {
                     "id": video_id,
                     "title": "Title unavailable (legacy method)",
                     "channel": "Channel unavailable (legacy method)",
                     "published_at": "Date unavailable (legacy method)"
                 }
+            
+            structured_data = {
+                "transcript": clean_text,
+                "duration": int(total_duration),  # Convert to int like the new method
+                "comments": [],
+                "metadata": metadata_to_use
             }
             
             # Save structured JSON
@@ -1023,14 +1039,14 @@ def process_url(url: str, force: bool) -> None:
     elif "youtube.com" in simplified_url and not simplified_url.startswith('https://www.youtube.com/redirect'):
         try:
             result = get_youtube_data(simplified_url)
-            if isinstance(result, tuple) and isinstance(result[2], list):  # Playlist
+            if isinstance(result, tuple) and len(result) >= 3 and isinstance(result[2], list):  # Playlist
                 playlist_title, playlist_uploader, videos = result
                 playlist_url = simplified_url
                 if not url_exists_in_file(playlist_url, UNIFIED) or force:
                     append_to_file(UNIFIED, f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n")
                     print(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube")
                     logging.info(f"Added playlist URL: {playlist_url}")
-                for video_id, title, uploader in videos:
+                for video_id, title, uploader, published_at in videos:
                     title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
                     
@@ -1065,7 +1081,14 @@ def process_url(url: str, force: bool) -> None:
 
                     if not url_exists or force or not transcript_file_exists or not reference_has_transcript(video_url):
                         if not transcript_file_exists:
-                            transcript_file = fetch_youtube_transcript(video_id)
+                            # Create metadata dict from the already collected data
+                            video_metadata = {
+                                "id": video_id,
+                                "title": title,
+                                "channel": uploader,
+                                "published_at": published_at
+                            }
+                            transcript_file = fetch_youtube_transcript(video_id, metadata=video_metadata)
                             if transcript_file is None:
                                 # Use "No transcript available" instead of None for cleaner display
                                 transcript_file = "No transcript available"
@@ -1075,7 +1098,7 @@ def process_url(url: str, force: bool) -> None:
                         print(f"URL {video_url} already recorded.")
                         logging.info(f"Duplicate URL: {video_url}")
             else:  # Single Video
-                video_id, title, uploader = result
+                video_id, title, uploader, published_at = result
                 title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
                 
@@ -1110,7 +1133,14 @@ def process_url(url: str, force: bool) -> None:
 
                 if not url_exists or force or not transcript_file_exists or not reference_has_transcript(video_url):
                     if not transcript_file_exists:
-                        transcript_file = fetch_youtube_transcript(video_id)
+                        # Create metadata dict from the already collected data
+                        video_metadata = {
+                            "id": video_id,
+                            "title": title,
+                            "channel": uploader,
+                            "published_at": published_at
+                        }
+                        transcript_file = fetch_youtube_transcript(video_id, metadata=video_metadata)
                         if transcript_file is None:
                             # Use "No transcript available" instead of None for cleaner display
                             transcript_file = "No transcript available"
