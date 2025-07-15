@@ -30,6 +30,7 @@ import importlib.resources
 from ref_cli import __version__
 from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # Import the new transcript functionality
 try:
@@ -136,6 +137,51 @@ def load_config() -> dict:
     return config
 
 # Copy all the remaining functions from the original file here
+def is_youtube_video_id(text: str) -> bool:
+    """
+    Checks if the given text is a YouTube video ID.
+    
+    YouTube video IDs are typically 11 characters long and contain alphanumeric characters,
+    hyphens, and underscores.
+    
+    Args:
+        text (str): The text to check
+        
+    Returns:
+        bool: True if the text appears to be a YouTube video ID, False otherwise
+    """
+    if not text:
+        return False
+    
+    # YouTube video IDs are 11 characters long
+    if len(text) != 11:
+        return False
+    
+    # Check if it contains only valid characters (alphanumeric, hyphen, underscore)
+    if not re.match(r'^[a-zA-Z0-9_-]+$', text):
+        return False
+    
+    # Additional check: YouTube video IDs don't contain certain patterns that would indicate URLs
+    if any(pattern in text.lower() for pattern in ['.com', 'http', 'www', '/', '?', '=']):
+        return False
+    
+    logging.debug(f"Text '{text}' identified as potential YouTube video ID")
+    return True
+
+def convert_video_id_to_url(video_id: str) -> str:
+    """
+    Converts a YouTube video ID to a full YouTube URL.
+    
+    Args:
+        video_id (str): The YouTube video ID
+        
+    Returns:
+        str: The full YouTube URL
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    logging.debug(f"Converted video ID '{video_id}' to URL: {url}")
+    return url
+
 def simplify_url(url: str) -> str:
     """
     Simplifies the URL by removing tracking parameters and normalizing the format.
@@ -574,7 +620,7 @@ def parse_arguments() -> argparse.Namespace:
         argparse.Namespace: The parsed command-line arguments.
     """
     parser = argparse.ArgumentParser(description="Add or search URL entries in markdown files.")
-    parser.add_argument("url", nargs='?', default=None, help="URL to be added.")
+    parser.add_argument("url", nargs='?', default=None, help="URL to be added or YouTube video ID (11 characters).")
     parser.add_argument("-f", "--force", action="store_true", help="Force addition even if URL already exists.")
     parser.add_argument("-e", "--edit", action="store_true", help="Open markdown file for editing.")
     parser.add_argument("-d", "--debug", type=int, choices=[1, 2, 3], help="Set the debug level: 1 for INFO, 2 for WARNING, 3 for DEBUG.")
@@ -820,54 +866,15 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
         
         # Legacy YouTube transcript handling (fallback)
         try:
-            result = subprocess.run([
-                "youtube_transcript_api", 
-                video_id, 
-                "--format", "json"
-            ], check=True, capture_output=True, text=True)
-            
-            # Check if the output contains an error message instead of JSON
-            if "Could not retrieve a transcript" in result.stdout or "Subtitles are disabled" in result.stdout:
-                logging.info(f"No transcript available for video ID {video_id}: Subtitles are disabled or not available")
-                return None
-            
-            # Check if stdout is empty or whitespace only
-            if not result.stdout.strip():
-                logging.info(f"No transcript data returned for video ID {video_id}")
-                return None
-            
-            # Try to parse the JSON output
-            try:
-                transcript_data = json.loads(result.stdout)
-            except json.JSONDecodeError as e:
-                # If JSON parsing fails, log the actual output for debugging
-                logging.warning(f"Failed to parse transcript JSON for video ID {video_id}. Output was: {result.stdout[:200]}...")
-                logging.info(f"This likely means no transcript is available for video ID {video_id}")
-                return None
-            
-            # Handle nested array format from youtube_transcript_api
-            if isinstance(transcript_data, list) and len(transcript_data) > 0 and isinstance(transcript_data[0], list):
-                transcript_entries = transcript_data[0]  # Extract the inner list
-            else:
-                transcript_entries = transcript_data
-            
-            # Check if we have actual transcript entries
-            if not transcript_entries:
-                logging.info(f"No transcript entries found for video ID {video_id}")
-                return None
+            # Use the Python API directly instead of command-line tool
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
             
             # Extract text from each transcript entry and join them
             clean_text = ""
             total_duration = 0
-            for entry in transcript_entries:
-                if isinstance(entry, dict) and 'text' in entry:
-                    clean_text += entry['text'] + " "
-                    total_duration += entry.get('duration', 0)
-            
-            # Check if we actually got any text
-            if not clean_text.strip():
-                logging.info(f"No transcript text found for video ID {video_id}")
-                return None
+            for entry in transcript_list:
+                clean_text += entry['text'] + " "
+                total_duration += entry.get('duration', 0)
             
             # Clean up the text (remove extra spaces, etc.)
             clean_text = ' '.join(clean_text.split())
@@ -901,8 +908,8 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
             logging.info(f"Legacy transcript saved to: {json_file}")
             return json_file
             
-        except subprocess.CalledProcessError as e:
-            logging.info(f"youtube_transcript_api command failed for video ID {video_id}: {e}")
+        except Exception as e:
+            logging.info(f"Failed to get transcript for video {video_id}: {e}")
             logging.info("This likely means no transcript is available for this video")
             return None
 
@@ -1333,20 +1340,34 @@ def main():
         elif args.file:
             read_urls_from_file(args.file, args.force)
         elif args.url:
-            process_url(args.url, args.force)
+            # Check if the provided argument is a YouTube video ID
+            if is_youtube_video_id(args.url):
+                print(info(f"Detected YouTube video ID: {highlight(args.url)}"))
+                youtube_url = convert_video_id_to_url(args.url)
+                print(info(f"Converting to URL: {url(youtube_url)}"))
+                process_url(youtube_url, args.force)
+            else:
+                process_url(args.url, args.force)
         else:
             timeout = None
             while True:
                 try:
-                    print(highlight("Enter a URL to record (or press Ctrl+C to quit): "))
+                    print(highlight("Enter a URL or YouTube video ID to record (or press Ctrl+C to quit): "))
                     ready, _, _ = select.select([sys.stdin], [], [], timeout)
                     if ready:
-                        url = sys.stdin.readline().strip()
-                        if url:  # Only process non-empty URLs
+                        user_input = sys.stdin.readline().strip()
+                        if user_input:  # Only process non-empty input
                             force = False
-                            process_url(url, force)
+                            # Check if the input is a YouTube video ID
+                            if is_youtube_video_id(user_input):
+                                print(info(f"Detected YouTube video ID: {highlight(user_input)}"))
+                                youtube_url = convert_video_id_to_url(user_input)
+                                print(info(f"Converting to URL: {url(youtube_url)}"))
+                                process_url(youtube_url, force)
+                            else:
+                                process_url(user_input, force)
                         else:
-                            print(warning("Empty URL. Please enter a valid URL."))
+                            print(warning("Empty input. Please enter a valid URL or YouTube video ID."))
                         time.sleep(1)  # Add a delay between processing each URL
                     else:
                         print(info("\nNo input received. Exiting..."))
