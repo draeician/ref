@@ -31,6 +31,7 @@ from ref_cli import __version__
 from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
 
 # Import the new transcript functionality
 try:
@@ -52,6 +53,17 @@ except ImportError as e:
 
 # Initialize colorama
 init()
+
+# Custom verbose logger
+class VerboseLogger:
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+
+    def log(self, message):
+        if self.enabled:
+            print(dim(f"[VERBOSE] {message}"))
+
+verbose_logger = VerboseLogger()
 
 # Configuration and setup
 def get_default_config():
@@ -245,6 +257,8 @@ def resolve_redirect(url: str) -> str:
     Returns:
         str: The final URL after following redirects, or the original URL if redirected to authentication.
     """
+    verbose_logger.log(f"Attempting to resolve redirects for URL: {url}")
+    
     # List of common authentication/login URL patterns
     auth_patterns = [
         r'/auth/login',
@@ -268,6 +282,7 @@ def resolve_redirect(url: str) -> str:
     
     # Check if this is a known problematic Medium URL
     if any(re.search(pattern, url) for pattern in medium_patterns):
+        verbose_logger.log("Detected Medium-based URL, skipping redirect resolution")
         logging.debug(f"Detected Medium-based URL, using original URL to avoid rate limiting: {url}")
         return url
     
@@ -340,15 +355,19 @@ def get_title_from_url(url: str) -> str:
     Returns:
         str: The title of the webpage, or an error message if the title cannot be fetched.
     """
+    verbose_logger.log(f"Attempting to fetch title for URL: {url}")
+    
     # Check if lynx is installed
     try:
         subprocess.run(['which', 'lynx'], capture_output=True, check=True)
     except subprocess.CalledProcessError:
+        verbose_logger.log("'lynx' command not found in system")
         error_msg = "Error: 'lynx' is not installed. Please install it to fetch webpage titles."
         logging.error(error_msg)
         return error_msg
 
     lynx_command = f'lynx -dump -nolist -force_html -hiddenlinks=ignore -display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines -dont_wrap_pre -source "{url}"'
+    verbose_logger.log(f"Executing lynx command: {lynx_command}")
 
     try:
         result = subprocess.run(lynx_command, shell=True, capture_output=True, text=True, timeout=30)
@@ -442,32 +461,43 @@ def get_youtube_data(url: str) -> tuple:
     Raises:
         ValueError: If the YouTube URL is invalid.
     """
+    verbose_logger.log(f"Fetching YouTube data for URL: {url}")
     youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=DEVELOPER_KEY)
     parsed_url = urlparse(url)
     query_params = parse_qs(parsed_url.query)
     
     if 'list' in query_params:
+        verbose_logger.log("Detected playlist URL")
         return get_youtube_playlist_data(query_params['list'][0], youtube)
     
     video_id = query_params.get('v')
     if not video_id:
+        verbose_logger.log("No video ID in query parameters, checking for shorts/live URL")
         shorts_match = re.match(r'/shorts/([^/?]+)', parsed_url.path)
         if shorts_match:
+            verbose_logger.log("Detected YouTube Shorts URL")
             video_id = shorts_match.group(1)
         else:
             live_match = re.match(r'/live/([^/?]+)', parsed_url.path)
             if live_match:
+                verbose_logger.log("Detected YouTube Live URL")
                 video_id = live_match.group(1)
             else:
+                verbose_logger.log("Invalid YouTube URL format")
                 raise ValueError("Invalid YouTube URL")
     
     if isinstance(video_id, list):
         video_id = video_id[0]
+    
+    verbose_logger.log(f"Fetching video data for ID: {video_id}")
     video_response = youtube.videos().list(part='snippet', id=video_id).execute()
     items = video_response.get('items', [])
     if not items:
+        verbose_logger.log(f"No video found for ID: {video_id}")
         raise ValueError(f"No video found for id '{video_id}'")
+    
     video_data = items[0]['snippet']
+    verbose_logger.log(f"Successfully fetched video data: {json.dumps(video_data, indent=2)}")
     return video_id, video_data['title'], video_data['channelTitle'], video_data.get('publishedAt', 'Date unavailable')
 
 def get_youtube_playlist_data(playlist_id: str, youtube) -> tuple:
@@ -552,26 +582,34 @@ def search_entries(search_term: str, search_field: str, file_path: str) -> dict:
     Returns:
         dict: A dictionary where keys are lines from the file that match the search criteria and values are lists of hit types.
     """
+    verbose_logger.log(f"Starting search for term '{search_term}' in field '{search_field}'")
     results = {}
     search_term_lower = search_term.lower()
 
     with open(file_path, "r") as file:
-        for line in file:
+        for line_number, line in enumerate(file, start=1):
+            verbose_logger.log(f"Processing line {line_number}")
             fields = line.split('|')
             if len(fields) < 5:
+                verbose_logger.log(f"Line {line_number} does not have the expected number of fields")
                 logging.warning(f"Line does not have the expected number of fields: {line.strip()}")
                 continue
 
             hit_types = []
             if search_field == "url" and search_term_lower in fields[1].lower():
+                verbose_logger.log(f"Found URL match in line {line_number}")
                 hit_types.append("Url")
             elif search_field == "title" and search_term_lower in fields[2].lower():
+                verbose_logger.log(f"Found title match in line {line_number}")
                 hit_types.append("Title")
             elif search_field == "date" and search_term_lower in fields[0].lower():
+                verbose_logger.log(f"Found date match in line {line_number}")
                 hit_types.append("Date")
             elif search_field == "source" and search_term_lower in fields[4].lower():
+                verbose_logger.log(f"Found source match in line {line_number}")
                 hit_types.append("Source")
             elif search_field == "uploader" and search_term_lower in fields[3].lower():
+                verbose_logger.log(f"Found uploader match in line {line_number}")
                 hit_types.append("Uploader")
 
             if hit_types:
@@ -580,6 +618,7 @@ def search_entries(search_term: str, search_field: str, file_path: str) -> dict:
                 else:
                     results[line].extend(hit_types)
 
+    verbose_logger.log(f"Search complete. Found {len(results)} matching entries")
     return results
 
 def update_transcript(video_url: str) -> None:
@@ -589,27 +628,36 @@ def update_transcript(video_url: str) -> None:
     Args:
         video_url (str): The URL of the YouTube video to update.
     """
+    verbose_logger.log(f"Starting transcript update for URL: {video_url}")
+    
     with open(UNIFIED, 'r') as file:
         lines = file.readlines()
+        verbose_logger.log(f"Read {len(lines)} lines from references file")
 
     updated = False
     with open(UNIFIED, 'w') as file:
         for line in lines:
             if video_url in line and line.strip().endswith("|None"):
+                verbose_logger.log("Found matching entry without transcript")
                 video_id = re.search(r'v=([^&]+)', video_url).group(1)
+                verbose_logger.log(f"Extracted video ID: {video_id}")
                 print(info(f"Fetching transcript for: {url(video_url)}"))
                 transcript_file = fetch_youtube_transcript(video_id)
                 if transcript_file:
+                    verbose_logger.log(f"Successfully fetched transcript: {transcript_file}")
                     line = line.replace("|None", f"|{transcript_file}")
                     updated = True
                     logging.info(f"Transcript updated for URL: {video_url}")
                 else:
+                    verbose_logger.log("Failed to fetch transcript")
                     print(warning(f"Failed to fetch transcript for: {url(video_url)}"))
             file.write(line)
 
     if updated:
+        verbose_logger.log("Transcript update completed successfully")
         print(success(f"Transcript for {url(video_url)} has been updated."))
     else:
+        verbose_logger.log("No transcript update needed or possible")
         print(warning(f"No matching entry found for {url(video_url)} or transcript already exists."))
 
 def parse_arguments() -> argparse.Namespace:
@@ -624,6 +672,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("-f", "--force", action="store_true", help="Force addition even if URL already exists.")
     parser.add_argument("-e", "--edit", action="store_true", help="Open markdown file for editing.")
     parser.add_argument("-d", "--debug", type=int, choices=[1, 2, 3], help="Set the debug level: 1 for INFO, 2 for WARNING, 3 for DEBUG.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output for detailed operation information.")
     parser.add_argument("--integrity", action="store_true", help="Check the integrity of log files.")
     parser.add_argument("-b", "--backup", action="store_true", help="Create a backup of the references.md file.")
     parser.add_argument("--search-url", help="Search entries by URL.")
@@ -676,9 +725,13 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
         file_path (str): Path to the file containing URLs (one per line)
         force (bool): Whether to force processing even if URL exists
     """
+    verbose_logger.log(f"Starting to read URLs from file: {file_path}")
+    verbose_logger.log(f"Force mode: {'enabled' if force else 'disabled'}")
+    
     try:
         with open(file_path, 'r') as file:
             lines = file.readlines()
+            verbose_logger.log(f"Found {len(lines)} lines in file")
 
         modified_lines = []
         for line_number, line in enumerate(lines, 1):
@@ -686,29 +739,34 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
             url = line.strip()
             
             if not url or url.startswith('#'):
+                verbose_logger.log(f"Line {line_number}: Skipping empty or commented line")
                 modified_lines.append(original_line)
                 continue
 
-            print(f"\nProcessing URL {line_number}: {url}")
+            verbose_logger.log(f"Processing line {line_number}: {url}")
             try:
                 process_url(url, force)
                 modified_lines.append(f"# {original_line}")
-                print(f"Successfully processed and commented out: {url}")
+                verbose_logger.log(f"Successfully processed and commented out: {url}")
             except Exception as e:
                 modified_lines.append(original_line)
+                verbose_logger.log(f"Error processing URL on line {line_number}: {e}")
                 print(f"Error processing URL on line {line_number}: {e}")
                 logging.error(f"Error processing URL '{url}' on line {line_number}: {e}")
             
             time.sleep(1)
 
+        verbose_logger.log("Writing modified content back to file")
         with open(file_path, 'w') as file:
             file.writelines(modified_lines)
 
-        print("\nFinished processing all URLs from file.")
+        verbose_logger.log("Finished processing all URLs from file")
     except FileNotFoundError:
+        verbose_logger.log(f"File not found: {file_path}")
         print(f"Error: File '{file_path}' not found")
         logging.error(f"File not found: {file_path}")
     except Exception as e:
+        verbose_logger.log(f"Error reading file: {e}")
         print(f"Error reading file: {e}")
         logging.error(f"Error reading file {file_path}: {e}")
 
@@ -725,11 +783,18 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
     Returns:
         str: The path to the saved transcript file.
     """
+    verbose_logger.log(f"Starting transcript fetch for video ID: {video_id}")
+    if metadata:
+        verbose_logger.log("Using pre-collected metadata")
+        verbose_logger.log(f"Metadata: {json.dumps(metadata, indent=2)}")
+    
     # Ensure the transcripts directory exists
     os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+    verbose_logger.log(f"Using transcripts directory: {TRANSCRIPTS_DIR}")
     
     # Determine if this is a Rumble URL
     is_rumble = "rumble.com" in video_id
+    verbose_logger.log(f"Platform detected: {'Rumble' if is_rumble else 'YouTube'}")
     
     # Extract the video ID based on the platform
     if is_rumble:
@@ -750,7 +815,144 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
     safe_video_id = re.sub(r'[^\w\-_.]', '_', video_id)
     base_transcript_file = os.path.join(TRANSCRIPTS_DIR, safe_video_id)
     
-    if is_rumble:
+    if not is_rumble:
+        # YouTube URL handling - use new structured JSON format when available
+        if get_youtube_transcript_with_metadata:
+            verbose_logger.log("Attempting to use enhanced transcript functionality")
+            try:
+                # Use the new structured approach
+                result = get_youtube_transcript_with_metadata(video_id, save_to_file=False)
+                
+                # If we have pre-collected metadata, use it instead of the API metadata
+                if metadata:
+                    result['metadata'] = metadata
+                    verbose_logger.log(f"Using pre-collected metadata for video {video_id}")
+                
+                # Save the structured JSON with metadata
+                json_file = f"{base_transcript_file}.json"
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, indent=2, ensure_ascii=False)
+                
+                verbose_logger.log(f"Structured transcript saved to: {json_file}")
+                return json_file  # Return the structured JSON file as primary
+                
+            except Exception as e:
+                # Check if it's a "no transcript available" error
+                error_msg = str(e).lower()
+                verbose_logger.log(f"Enhanced transcript error: {error_msg}")
+                if any(phrase in error_msg for phrase in [
+                    'no transcript available',
+                    'could not retrieve a transcript',
+                    'subtitles are disabled'
+                ]):
+                    verbose_logger.log(f"No transcript available for video {video_id}: {e}")
+                    return None  # Don't try legacy method if transcript is simply not available
+                else:
+                    verbose_logger.log(f"Failed to use new transcript method, falling back to legacy: {e}")
+                    # Fall through to legacy method
+        
+        # Legacy YouTube transcript handling (fallback)
+        try:
+            verbose_logger.log("Attempting to use legacy transcript method")
+            verbose_logger.log(f"Attempting to get transcript for video ID: {video_id}")
+            
+            # Create an instance of YouTubeTranscriptApi
+            yt_api = YouTubeTranscriptApi()
+            verbose_logger.log("Created YouTubeTranscriptApi instance")
+            
+            try:
+                # Try to fetch transcript directly first
+                verbose_logger.log("Attempting direct transcript fetch")
+                transcript_data = yt_api.fetch(video_id, languages=['en'])
+                verbose_logger.log(f"Successfully retrieved transcript with {len(transcript_data.snippets)} entries")
+                
+                # Convert transcript data to our format
+                clean_text = ""
+                total_duration = 0
+                
+                # Process each snippet in the transcript
+                for snippet in transcript_data.snippets:
+                    clean_text += snippet.text + " "
+                    total_duration += snippet.duration
+                
+                verbose_logger.log("Successfully processed transcript data")
+                
+            except Exception as e:
+                verbose_logger.log(f"Direct fetch failed: {str(e)}")
+                try:
+                    # Try listing available transcripts and finding the best match
+                    verbose_logger.log("Attempting to list available transcripts")
+                    transcript_list = yt_api.list(video_id)
+                    verbose_logger.log("Successfully listed transcripts")
+                    
+                    # Try to get English transcript first
+                    try:
+                        transcript = transcript_list.find_transcript(['en'])
+                        verbose_logger.log("Found English transcript")
+                    except NoTranscriptFound:
+                        verbose_logger.log("No English transcript found, trying other languages")
+                        # Get the first available transcript and translate it to English
+                        transcript = next(iter(transcript_list)).translate('en')
+                        verbose_logger.log("Using translated transcript")
+                    
+                    transcript_data = transcript.fetch()
+                    verbose_logger.log(f"Successfully retrieved transcript with {len(transcript_data.snippets)} entries")
+                    
+                    # Convert transcript data to our format
+                    clean_text = ""
+                    total_duration = 0
+                    
+                    # Process each snippet in the transcript
+                    for snippet in transcript_data.snippets:
+                        clean_text += snippet.text + " "
+                        total_duration += snippet.duration
+                    
+                    verbose_logger.log("Successfully processed transcript data")
+                    
+                except Exception as e:
+                    verbose_logger.log(f"Failed to get transcript: {str(e)}")
+                    return None
+            
+            # Clean up the text (remove extra spaces, etc.)
+            clean_text = ' '.join(clean_text.split())
+            
+            # Create a structured JSON format similar to the new method
+            json_file = f"{base_transcript_file}.json"
+            
+            # Use pre-collected metadata if available, otherwise use legacy fallback
+            if metadata:
+                metadata_to_use = metadata
+                verbose_logger.log(f"Using pre-collected metadata for video {video_id} (legacy method)")
+            else:
+                metadata_to_use = {
+                    "id": video_id,
+                    "title": "Title unavailable (legacy method)",
+                    "channel": "Channel unavailable (legacy method)",
+                    "published_at": "Date unavailable (legacy method)"
+                }
+            
+            structured_data = {
+                "transcript": clean_text,
+                "duration": int(total_duration),  # Convert to int like the new method
+                "comments": [],
+                "metadata": metadata_to_use
+            }
+            
+            # Save structured JSON
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(structured_data, f, indent=2, ensure_ascii=False)
+            
+            verbose_logger.log(f"Legacy transcript saved to: {json_file}")
+            return json_file
+            
+        except Exception as e:
+            verbose_logger.log(f"Legacy transcript method failed: {str(e)}")
+            logging.info(f"Failed to get transcript for video {video_id}: {e}")
+            logging.info("This likely means no transcript is available for this video")
+            return None
+
+    else:
+        # Rumble handling code...
         # For Rumble, we need to ensure the URL is properly formatted
         rumble_url = f"https://rumble.com/{video_id}"
         
@@ -830,88 +1032,6 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
             logging.error(f"Failed to get video info for Rumble video ID {video_id}: {e}")
             logging.error(f"yt-dlp stderr: {e.stderr}")
             return None
-    else:
-        # YouTube URL handling - use new structured JSON format when available
-        if get_youtube_transcript_with_metadata:
-            try:
-                # Use the new structured approach
-                result = get_youtube_transcript_with_metadata(video_id, save_to_file=False)
-                
-                # If we have pre-collected metadata, use it instead of the API metadata
-                if metadata:
-                    result['metadata'] = metadata
-                    logging.info(f"Using pre-collected metadata for video {video_id}")
-                
-                # Save the structured JSON with metadata
-                json_file = f"{base_transcript_file}.json"
-                with open(json_file, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=2, ensure_ascii=False)
-                
-                logging.info(f"Structured transcript saved to: {json_file}")
-                return json_file  # Return the structured JSON file as primary
-                
-            except Exception as e:
-                # Check if it's a "no transcript available" error
-                error_msg = str(e).lower()
-                if any(phrase in error_msg for phrase in [
-                    'no transcript available',
-                    'could not retrieve a transcript',
-                    'subtitles are disabled'
-                ]):
-                    logging.info(f"No transcript available for video {video_id}: {e}")
-                    return None  # Don't try legacy method if transcript is simply not available
-                else:
-                    logging.warning(f"Failed to use new transcript method, falling back to legacy: {e}")
-                    # Fall through to legacy method
-        
-        # Legacy YouTube transcript handling (fallback)
-        try:
-            # Use the Python API directly instead of command-line tool
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            
-            # Extract text from each transcript entry and join them
-            clean_text = ""
-            total_duration = 0
-            for entry in transcript_list:
-                clean_text += entry['text'] + " "
-                total_duration += entry.get('duration', 0)
-            
-            # Clean up the text (remove extra spaces, etc.)
-            clean_text = ' '.join(clean_text.split())
-            
-            # Create a structured JSON format similar to the new method
-            json_file = f"{base_transcript_file}.json"
-            
-            # Use pre-collected metadata if available, otherwise use legacy fallback
-            if metadata:
-                metadata_to_use = metadata
-                logging.info(f"Using pre-collected metadata for video {video_id} (legacy method)")
-            else:
-                metadata_to_use = {
-                    "id": video_id,
-                    "title": "Title unavailable (legacy method)",
-                    "channel": "Channel unavailable (legacy method)",
-                    "published_at": "Date unavailable (legacy method)"
-                }
-            
-            structured_data = {
-                "transcript": clean_text,
-                "duration": int(total_duration),  # Convert to int like the new method
-                "comments": [],
-                "metadata": metadata_to_use
-            }
-            
-            # Save structured JSON
-            with open(json_file, 'w', encoding='utf-8') as f:
-                json.dump(structured_data, f, indent=2, ensure_ascii=False)
-            
-            logging.info(f"Legacy transcript saved to: {json_file}")
-            return json_file
-            
-        except Exception as e:
-            logging.info(f"Failed to get transcript for video {video_id}: {e}")
-            logging.info("This likely means no transcript is available for this video")
-            return None
 
 def log_error(error_type: str, url: str, error_message: str) -> None:
     """
@@ -952,17 +1072,21 @@ def process_url(url: str, force: bool) -> None:
     """
     Processes a given URL to extract and record relevant information.
     """
+    verbose_logger.log(f"Starting URL processing for: {url}")
     logging.debug(f"Original URL: {url}")
     
     if "youtube.com/results" in url:
+        verbose_logger.log("Detected YouTube search results page - not supported")
         log_error("URL Processing", url, "YouTube search results pages are not supported")
         print("Error: YouTube search results pages are not supported")
         raise ValueError("YouTube search results pages are not supported")
     
     if url.lower().endswith('.pdf'):
+        verbose_logger.log("Processing PDF URL")
         current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         title = os.path.basename(urlparse(url).path)
         if not url_exists_in_file(url, UNIFIED) or force:
+            verbose_logger.log(f"Adding PDF entry with title: {title}")
             append_to_file(UNIFIED, f"{current_time}|[{url}]|({title})|PDF Document|General\n")
             print(f"{current_time}|[{url}]|({title})|PDF Document|General")
             logging.info(f"Added PDF URL: {url}")
@@ -1261,16 +1385,24 @@ def main():
     ensure_path_exists(UNIFIED)
     try:
         args = parse_arguments()
+        
+        # Enable verbose logging if flag is set
+        verbose_logger.enabled = args.verbose
+        verbose_logger.log("Verbose logging enabled")
 
         # Set logging level based on the debug argument
         if args.debug == 1:
             logging.getLogger().setLevel(logging.INFO)
+            verbose_logger.log("Setting logging level to INFO")
         elif args.debug == 2:
             logging.getLogger().setLevel(logging.WARNING)
+            verbose_logger.log("Setting logging level to WARNING")
         elif args.debug == 3:
             logging.getLogger().setLevel(logging.DEBUG)
+            verbose_logger.log("Setting logging level to DEBUG")
         else:
             logging.getLogger().setLevel(logging.ERROR)
+            verbose_logger.log("Setting logging level to ERROR")
 
         if args.integrity:
             integrity_errors = check_integrity()
