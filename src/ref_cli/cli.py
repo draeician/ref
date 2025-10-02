@@ -942,7 +942,13 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                     
                 except Exception as e:
                     verbose_logger.log(f"Failed to get transcript: {str(e)}")
-                    return None
+                    legacy_message = str(e)
+                    if failure_info and failure_info[0] == "enhanced":
+                        legacy_message = (
+                            f"{legacy_message} (Enhanced method previously failed: {failure_info[1]})"
+                        )
+                    failure_info = ("legacy", legacy_message)
+                    return None, failure_info
             
             # Clean up the text (remove extra spaces, etc.)
             clean_text = ' '.join(clean_text.split())
