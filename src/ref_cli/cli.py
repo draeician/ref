@@ -55,6 +55,28 @@ except ImportError as e:
 # Initialize colorama
 init()
 
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+_TRANSCRIPT_PROMPT_PHRASES = [
+    "Enter a URL or YouTube video ID to record",
+    "YouTube is blocking requests from your IP",
+]
+
+
+def sanitize_transcript_reference(value: Optional[str]) -> str:
+    """Strip formatting and CLI prompt noise from transcript references."""
+
+    if value is None:
+        return "None"
+
+    sanitized = ANSI_ESCAPE_RE.sub("", str(value))
+    sanitized = sanitized.replace("\r", " ").replace("\n", " ")
+
+    for phrase in _TRANSCRIPT_PROMPT_PHRASES:
+        sanitized = sanitized.replace(phrase, "")
+
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+    return sanitized
+
 # Custom verbose logger
 class VerboseLogger:
     def __init__(self, enabled=False):
@@ -790,9 +812,10 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
         return "No transcript available"
 
     method, message = failure_info
-    method_display = method.replace('_', ' ').title()
-    cleaned_message = ' '.join(str(message).split())
-    return f"No transcript available ({method_display} method: {cleaned_message})"
+    method_display = sanitize_transcript_reference(method.replace('_', ' ').title())
+    cleaned_message = sanitize_transcript_reference(message)
+    failure_text = f"No transcript available ({method_display} method: {cleaned_message})"
+    return sanitize_transcript_reference(failure_text)
 
 
 def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Optional[str], Optional[Tuple[str, str]]]:
@@ -1058,7 +1081,10 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                             with open(transcript_file, 'r') as f:
                                 content = f.read()
                                 if content.strip():
-                                    logging.info(f"Successfully saved transcript to: {transcript_file}")
+                                    sanitized_transcript = sanitize_transcript_reference(transcript_file)
+                                    logging.info(
+                                        f"Successfully saved transcript to: {sanitized_transcript}"
+                                    )
                                     return transcript_file, None
 
                     logging.warning(f"Failed to get subtitles with current approach")
@@ -1392,6 +1418,7 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
     """
     Updates or adds a YouTube video entry in the references.md file with the transcript file reference.
     """
+    sanitized_transcript_file = sanitize_transcript_reference(transcript_file)
     updated = False
     with open(UNIFIED, 'r') as file:
         lines = file.readlines()
@@ -1400,20 +1427,22 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
         for line in lines:
             if video_url in line:
                 if line.strip().endswith("|None"):
-                    line = line.replace("|None", f"|{transcript_file}")
-                elif not line.strip().endswith(f"|{transcript_file}"):
-                    line = line.rstrip() + f"|{transcript_file}\n"
+                    line = line.replace("|None", f"|{sanitized_transcript_file}")
+                elif not line.strip().endswith(f"|{sanitized_transcript_file}"):
+                    line = line.rstrip() + f"|{sanitized_transcript_file}\n"
                 updated = True
             file.write(line)
 
     if not updated:
-        entry = f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|[{video_url}]|({video_title})|{uploader}|YouTube|{transcript_file}\n"
+        entry = f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|[{video_url}]|({video_title})|{uploader}|YouTube|{sanitized_transcript_file}\n"
         append_to_file(UNIFIED, entry)
 
-    logging.info(f"Updated reference entry for URL: {video_url} with transcript file: {transcript_file}")
+    logging.info(
+        f"Updated reference entry for URL: {video_url} with transcript file: {sanitized_transcript_file}"
+    )
     print(success(f"Updated reference entry for {url(video_url)}"))
     print(info(f"Title: {title(video_title)}"))
-    print(info(f"Transcript: {dim(transcript_file)}"))
+    print(info(f"Transcript: {dim(sanitized_transcript_file)}"))
 
 def reference_has_transcript(url: str) -> bool:
     """
