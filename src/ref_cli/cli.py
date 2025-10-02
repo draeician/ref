@@ -27,6 +27,7 @@ import time
 import select
 from urllib3.exceptions import InsecureRequestWarning
 import importlib.resources
+from typing import Optional, Tuple
 from ref_cli import __version__
 from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
@@ -635,6 +636,7 @@ def update_transcript(video_url: str) -> None:
         verbose_logger.log(f"Read {len(lines)} lines from references file")
 
     updated = False
+    failure_recorded = False
     with open(UNIFIED, 'w') as file:
         for line in lines:
             if video_url in line and line.strip().endswith("|None"):
@@ -642,7 +644,7 @@ def update_transcript(video_url: str) -> None:
                 video_id = re.search(r'v=([^&]+)', video_url).group(1)
                 verbose_logger.log(f"Extracted video ID: {video_id}")
                 print(info(f"Fetching transcript for: {url(video_url)}"))
-                transcript_file = fetch_youtube_transcript(video_id)
+                transcript_file, failure_info = fetch_youtube_transcript(video_id)
                 if transcript_file:
                     verbose_logger.log(f"Successfully fetched transcript: {transcript_file}")
                     line = line.replace("|None", f"|{transcript_file}")
@@ -650,12 +652,23 @@ def update_transcript(video_url: str) -> None:
                     logging.info(f"Transcript updated for URL: {video_url}")
                 else:
                     verbose_logger.log("Failed to fetch transcript")
-                    print(warning(f"Failed to fetch transcript for: {url(video_url)}"))
+                    formatted_failure = format_transcript_failure(failure_info)
+                    line = line.replace("|None", f"|{formatted_failure}")
+                    failure_recorded = True
+                    print(warning(f"{formatted_failure} for {url(video_url)}"))
+                    if failure_info:
+                        method_display = failure_info[0].replace('_', ' ').title()
+                        logging.info(
+                            f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
+                        )
             file.write(line)
 
     if updated:
         verbose_logger.log("Transcript update completed successfully")
         print(success(f"Transcript for {url(video_url)} has been updated."))
+    elif failure_recorded:
+        verbose_logger.log("Transcript failure recorded")
+        print(info(f"Stored failure reason for {url(video_url)}."))
     else:
         verbose_logger.log("No transcript update needed or possible")
         print(warning(f"No matching entry found for {url(video_url)} or transcript already exists."))
@@ -770,32 +783,47 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
         print(f"Error reading file: {e}")
         logging.error(f"Error reading file {file_path}: {e}")
 
-def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
+def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
+    """Create a human-readable explanation for a transcript retrieval failure."""
+
+    if not failure_info:
+        return "No transcript available"
+
+    method, message = failure_info
+    method_display = method.replace('_', ' ').title()
+    cleaned_message = ' '.join(str(message).split())
+    return f"No transcript available ({method_display} method: {cleaned_message})"
+
+
+def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Optional[str], Optional[Tuple[str, str]]]:
     """
-    Fetches the transcript for a given YouTube or Rumble video ID and saves it in the transcript directory.
-    Uses the new structured JSON format with metadata when possible.
+    Fetch the transcript for a given YouTube or Rumble video ID and save it in the transcript directory.
 
     Args:
         video_id (str): The YouTube or Rumble video ID or URL.
         metadata (dict, optional): Pre-collected metadata containing id, title, channel, published_at.
-                                 If provided, this will be used instead of making additional API calls.
+            If provided, this will be used instead of making additional API calls.
 
     Returns:
-        str: The path to the saved transcript file.
+        Tuple[Optional[str], Optional[Tuple[str, str]]]: A tuple containing the path to the saved transcript
+        file (if retrieval succeeded) and structured failure metadata consisting of the retrieval method
+        name and exception message when transcript retrieval fails.
     """
     verbose_logger.log(f"Starting transcript fetch for video ID: {video_id}")
     if metadata:
         verbose_logger.log("Using pre-collected metadata")
         verbose_logger.log(f"Metadata: {json.dumps(metadata, indent=2)}")
-    
+
     # Ensure the transcripts directory exists
     os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
     verbose_logger.log(f"Using transcripts directory: {TRANSCRIPTS_DIR}")
-    
+
     # Determine if this is a Rumble URL
     is_rumble = "rumble.com" in video_id
     verbose_logger.log(f"Platform detected: {'Rumble' if is_rumble else 'YouTube'}")
-    
+
+    failure_info: Optional[Tuple[str, str]] = None
+
     # Extract the video ID based on the platform
     if is_rumble:
         # Extract the video ID from the Rumble URL
@@ -804,7 +832,8 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
             video_id = match.group(1)
         else:
             logging.error(f"Could not extract video ID from Rumble URL: {video_id}")
-            return None
+            failure_info = ("rumble", "Unable to extract video ID from URL")
+            return None, failure_info
     else:
         # For YouTube, extract the video ID if it's a full URL
         if "youtube.com" in video_id:
@@ -822,35 +851,37 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
             try:
                 # Use the new structured approach
                 result = get_youtube_transcript_with_metadata(video_id, save_to_file=False)
-                
+
                 # If we have pre-collected metadata, use it instead of the API metadata
                 if metadata:
                     result['metadata'] = metadata
                     verbose_logger.log(f"Using pre-collected metadata for video {video_id}")
-                
+
                 # Save the structured JSON with metadata
                 json_file = f"{base_transcript_file}.json"
                 with open(json_file, 'w', encoding='utf-8') as f:
                     json.dump(result, f, indent=2, ensure_ascii=False)
-                
+
                 verbose_logger.log(f"Structured transcript saved to: {json_file}")
-                return json_file  # Return the structured JSON file as primary
-                
+                return json_file, None  # Return the structured JSON file as primary
+
             except Exception as e:
                 # Check if it's a "no transcript available" error
                 error_msg = str(e).lower()
                 verbose_logger.log(f"Enhanced transcript error: {error_msg}")
+                failure_info = ("enhanced", str(e))
                 if any(phrase in error_msg for phrase in [
                     'no transcript available',
                     'could not retrieve a transcript',
                     'subtitles are disabled'
                 ]):
                     verbose_logger.log(f"No transcript available for video {video_id}: {e}")
-                    return None  # Don't try legacy method if transcript is simply not available
+                    logging.info(f"No transcript available for video {video_id} (Enhanced method: {str(e)})")
+                    return None, failure_info  # Don't try legacy method if transcript is simply not available
                 else:
                     verbose_logger.log(f"Failed to use new transcript method, falling back to legacy: {e}")
                     # Fall through to legacy method
-        
+
         # Legacy YouTube transcript handling (fallback)
         try:
             verbose_logger.log("Attempting to use legacy transcript method")
@@ -941,33 +972,38 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
             # Save structured JSON
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(structured_data, f, indent=2, ensure_ascii=False)
-            
+
             verbose_logger.log(f"Legacy transcript saved to: {json_file}")
-            return json_file
-            
+            return json_file, None
+
         except Exception as e:
             verbose_logger.log(f"Legacy transcript method failed: {str(e)}")
-            logging.info(f"Failed to get transcript for video {video_id}: {e}")
+            logging.info(f"Failed to get transcript for video {video_id} (Legacy method: {e})")
             logging.info("This likely means no transcript is available for this video")
-            return None
+            legacy_message = str(e)
+            if failure_info:
+                legacy_message = f"{legacy_message} (Enhanced method previously failed: {failure_info[1]})"
+            failure_info = ("legacy", legacy_message)
+            return None, failure_info
 
     else:
         # Rumble handling code...
         # For Rumble, we need to ensure the URL is properly formatted
         rumble_url = f"https://rumble.com/{video_id}"
-        
+
         # First, check video info
         info_command = [
             "yt-dlp",
             "--dump-json",
             rumble_url
         ]
-        
+
         try:
             # Get video info
             result = subprocess.run(info_command, check=True, capture_output=True, text=True)
             logging.info(f"Video info:\n{result.stdout}")
-            
+
+            failure_info = None
             # Try to download subtitles with different approaches
             approaches = [
                 # Try with auto-generated subtitles
@@ -1002,13 +1038,13 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
                     rumble_url
                 ]
             ]
-            
-            for approach in approaches:
+
+            for index, approach in enumerate(approaches, start=1):
                 try:
                     result = subprocess.run(approach, check=True, capture_output=True, text=True)
                     logging.info(f"yt-dlp output:\n{result.stdout}")
                     logging.info(f"yt-dlp error output:\n{result.stderr}")
-                    
+
                     # Check for any subtitle files that might have been created
                     for ext in ['.en-auto.vtt', '.en.vtt', '.vtt']:
                         transcript_file = f"{base_transcript_file}{ext}"
@@ -1017,21 +1053,32 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> str:
                                 content = f.read()
                                 if content.strip():
                                     logging.info(f"Successfully saved transcript to: {transcript_file}")
-                                    return transcript_file
-                            
+                                    return transcript_file, None
+
                     logging.warning(f"Failed to get subtitles with current approach")
+                    failure_info = (f"rumble approach {index}", "yt-dlp completed without producing subtitles")
                 except subprocess.CalledProcessError as e:
                     logging.warning(f"Failed to get subtitles: {e}")
                     logging.warning(f"yt-dlp stderr: {e.stderr}")
+                    failure_info = (f"rumble approach {index}", e.stderr.strip() or str(e))
                     continue
-            
+
             logging.error(f"Failed to get subtitles with any approach for video: {rumble_url}")
-            return None
-            
+            if failure_info is None:
+                failure_info = ("rumble", "yt-dlp did not produce subtitle files")
+            logging.info(
+                f"Failed to get transcript for {rumble_url} ({failure_info[0].replace('_', ' ').title()} method: {failure_info[1]})"
+            )
+            return None, failure_info
+
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to get video info for Rumble video ID {video_id}: {e}")
             logging.error(f"yt-dlp stderr: {e.stderr}")
-            return None
+            failure_info = ("rumble info", e.stderr.strip() or str(e))
+            logging.info(
+                f"Failed to get transcript for {rumble_url} ({failure_info[0].replace('_', ' ').title()} method: {failure_info[1]})"
+            )
+            return None, failure_info
 
 def log_error(error_type: str, url: str, error_message: str) -> None:
     """
@@ -1149,11 +1196,16 @@ def process_url(url: str, force: bool) -> None:
                 transcript_file_exists = False
 
             if not transcript_file_exists:
-                transcript_file = fetch_youtube_transcript(simplified_url)
+                transcript_file, failure_info = fetch_youtube_transcript(simplified_url)
                 if transcript_file is None:
-                    # Use "No transcript available" instead of None for cleaner display
-                    transcript_file = "No transcript available"
-                    logging.info(f"No transcript available for Rumble video {video_id}")
+                    transcript_file = format_transcript_failure(failure_info)
+                    if failure_info:
+                        method_display = failure_info[0].replace('_', ' ').title()
+                        logging.info(
+                            f"No transcript available for Rumble video {video_id} ({method_display} method: {failure_info[1]})"
+                        )
+                    else:
+                        logging.info(f"No transcript available for Rumble video {video_id}")
             
             # Add or update the reference entry
             if not url_exists_in_file(simplified_url, UNIFIED) or force:
@@ -1219,11 +1271,18 @@ def process_url(url: str, force: bool) -> None:
                                 "channel": uploader,
                                 "published_at": published_at
                             }
-                            transcript_file = fetch_youtube_transcript(video_id, metadata=video_metadata)
+                            transcript_file, failure_info = fetch_youtube_transcript(video_id, metadata=video_metadata)
                             if transcript_file is None:
-                                # Use "No transcript available" instead of None for cleaner display
-                                transcript_file = "No transcript available"
-                                logging.info(f"No transcript available for video {video_id} (common for music videos)")
+                                transcript_file = format_transcript_failure(failure_info)
+                                if failure_info:
+                                    method_display = failure_info[0].replace('_', ' ').title()
+                                    logging.info(
+                                        f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
+                                    )
+                                else:
+                                    logging.info(
+                                        f"No transcript available for video {video_id} (common for music videos)"
+                                    )
                         update_reference_entry(video_url, title, uploader, transcript_file)
                     else:
                         print(f"URL {video_url} already recorded.")
@@ -1271,11 +1330,18 @@ def process_url(url: str, force: bool) -> None:
                             "channel": uploader,
                             "published_at": published_at
                         }
-                        transcript_file = fetch_youtube_transcript(video_id, metadata=video_metadata)
+                        transcript_file, failure_info = fetch_youtube_transcript(video_id, metadata=video_metadata)
                         if transcript_file is None:
-                            # Use "No transcript available" instead of None for cleaner display
-                            transcript_file = "No transcript available"
-                            logging.info(f"No transcript available for video {video_id} (common for music videos)")
+                            transcript_file = format_transcript_failure(failure_info)
+                            if failure_info:
+                                method_display = failure_info[0].replace('_', ' ').title()
+                                logging.info(
+                                    f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
+                                )
+                            else:
+                                logging.info(
+                                    f"No transcript available for video {video_id} (common for music videos)"
+                                )
                     update_reference_entry(video_url, title, uploader, transcript_file)
                 else:
                     print(f"URL {video_url} already recorded.")
