@@ -17,6 +17,7 @@ import logging
 import yaml
 import json
 from datetime import datetime
+import textwrap
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv, set_key
@@ -32,7 +33,7 @@ from ref_cli import __version__
 from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, RequestBlocked
 
 # Import the new transcript functionality
 try:
@@ -54,6 +55,44 @@ except ImportError as e:
 
 # Initialize colorama
 init()
+
+BLOCKED_ERROR_GUIDANCE_URL = (
+    "https://github.com/jdepoix/youtube-transcript-api"
+    "?tab=readme-ov-file#working-around-ip-bans-requestblocked-or-ipblocked-exception"
+)
+
+BLOCKED_ERROR_USER_MESSAGE = (
+    "YouTube is blocking transcript requests from your IP address. "
+    f"See {BLOCKED_ERROR_GUIDANCE_URL} for steps to restore access."
+)
+
+
+def is_request_blocked_error(error: Exception) -> bool:
+    """Return True when YouTube is blocking transcript requests for the current IP."""
+
+    if isinstance(error, RequestBlocked):
+        return True
+
+    message = str(error).lower()
+    blocked_indicators = [
+        "youtube is blocking requests from your ip",
+        "youtube is blocking requests from your ip address",
+        "requests from your ip have been blocked",
+        "requestblocked",
+        "ipblocked",
+    ]
+    return any(phrase in message for phrase in blocked_indicators)
+
+
+def log_blocked_warning(video_identifier: str, error: Exception) -> None:
+    """Log a helpful warning when YouTube blocks transcript requests."""
+
+    logging.warning(
+        "YouTube blocked transcript requests for %s. See %s for guidance on working around IP bans.",
+        video_identifier,
+        BLOCKED_ERROR_GUIDANCE_URL,
+    )
+    logging.debug("YouTube transcript blocking details for %s: %s", video_identifier, error)
 
 # Custom verbose logger
 class VerboseLogger:
@@ -790,8 +829,14 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
         return "No transcript available"
 
     method, message = failure_info
-    method_display = method.replace('_', ' ').title()
     cleaned_message = ' '.join(str(message).split())
+
+    if method == "blocked":
+        details = textwrap.shorten(cleaned_message, width=300, placeholder="...") if cleaned_message else ""
+        detail_suffix = f" (Details: {details})" if details else ""
+        return f"Transcript blocked by YouTube: {BLOCKED_ERROR_USER_MESSAGE}{detail_suffix}"
+
+    method_display = method.replace('_', ' ').title()
     return f"No transcript available ({method_display} method: {cleaned_message})"
 
 
@@ -869,6 +914,11 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 # Check if it's a "no transcript available" error
                 error_msg = str(e).lower()
                 verbose_logger.log(f"Enhanced transcript error: {error_msg}")
+                if is_request_blocked_error(e):
+                    failure_info = ("blocked", str(e))
+                    log_blocked_warning(video_id, e)
+                    return None, failure_info
+
                 failure_info = ("enhanced", str(e))
                 if any(phrase in error_msg for phrase in [
                     'no transcript available',
@@ -896,20 +946,24 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 verbose_logger.log("Attempting direct transcript fetch")
                 transcript_data = yt_api.fetch(video_id, languages=['en'])
                 verbose_logger.log(f"Successfully retrieved transcript with {len(transcript_data.snippets)} entries")
-                
+
                 # Convert transcript data to our format
                 clean_text = ""
                 total_duration = 0
-                
+
                 # Process each snippet in the transcript
                 for snippet in transcript_data.snippets:
                     clean_text += snippet.text + " "
                     total_duration += snippet.duration
-                
+
                 verbose_logger.log("Successfully processed transcript data")
-                
+
             except Exception as e:
                 verbose_logger.log(f"Direct fetch failed: {str(e)}")
+                if is_request_blocked_error(e):
+                    failure_info = ("blocked", str(e))
+                    log_blocked_warning(video_id, e)
+                    return None, failure_info
                 try:
                     # Try listing available transcripts and finding the best match
                     verbose_logger.log("Attempting to list available transcripts")
@@ -942,6 +996,10 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                     
                 except Exception as e:
                     verbose_logger.log(f"Failed to get transcript: {str(e)}")
+                    if is_request_blocked_error(e):
+                        failure_info = ("blocked", str(e))
+                        log_blocked_warning(video_id, e)
+                        return None, failure_info
                     legacy_message = str(e)
                     if failure_info and failure_info[0] == "enhanced":
                         legacy_message = (
@@ -984,8 +1042,15 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
 
         except Exception as e:
             verbose_logger.log(f"Legacy transcript method failed: {str(e)}")
+            if is_request_blocked_error(e):
+                failure_info = ("blocked", str(e))
+                log_blocked_warning(video_id, e)
+                return None, failure_info
             logging.info(f"Failed to get transcript for video {video_id} (Legacy method: {e})")
-            logging.info("This likely means no transcript is available for this video")
+            logging.info(
+                "If YouTube is blocking requests from your IP, review %s for guidance.",
+                BLOCKED_ERROR_GUIDANCE_URL,
+            )
             legacy_message = str(e)
             if failure_info:
                 legacy_message = f"{legacy_message} (Enhanced method previously failed: {failure_info[1]})"

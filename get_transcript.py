@@ -1,4 +1,5 @@
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import RequestBlocked
 from googleapiclient.discovery import build
 from typing import Dict, Optional, Any
 import json
@@ -7,6 +8,28 @@ import os
 # You'll need to set your YouTube Data API key as an environment variable
 # Get your API key from: https://console.developers.google.com/
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
+
+BLOCKED_ERROR_GUIDANCE_URL = (
+    "https://github.com/jdepoix/youtube-transcript-api"
+    "?tab=readme-ov-file#working-around-ip-bans-requestblocked-or-ipblocked-exception"
+)
+
+BLOCKED_ERROR_USER_MESSAGE = (
+    "YouTube is blocking transcript requests from your IP address. "
+    f"See {BLOCKED_ERROR_GUIDANCE_URL} for steps to restore access."
+)
+
+
+def _is_request_blocked_error(error: Exception) -> bool:
+    message = str(error).lower()
+    indicators = [
+        "youtube is blocking requests from your ip",
+        "youtube is blocking requests from your ip address",
+        "requests from your ip have been blocked",
+        "requestblocked",
+        "ipblocked",
+    ]
+    return any(phrase in message for phrase in indicators)
 
 def get_youtube_transcript_with_metadata(video_id: str, api_key: Optional[str] = None, save_to_file: bool = True) -> Dict[str, Any]:
     """
@@ -66,9 +89,13 @@ def get_youtube_transcript_with_metadata(video_id: str, api_key: Optional[str] =
         
         return result
         
+    except RequestBlocked as e:
+        raise RequestBlocked(BLOCKED_ERROR_USER_MESSAGE) from e
     except Exception as e:
         # Check if it's a transcript unavailable error
         error_msg = str(e).lower()
+        if _is_request_blocked_error(e):
+            raise RequestBlocked(BLOCKED_ERROR_USER_MESSAGE) from e
         if any(phrase in error_msg for phrase in [
             'could not retrieve a transcript',
             'subtitles are disabled',
