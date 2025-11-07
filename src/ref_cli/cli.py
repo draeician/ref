@@ -171,7 +171,7 @@ config = get_default_config()
 BASE = os.path.expanduser(config['paths']['references'])
 UNIFIED = os.path.join(BASE, "references.md")
 TRANSCRIPTS_DIR = os.path.expanduser(config['paths']['transcripts'])
-TRANSCRIPT_PENDING_FILE = os.path.join(BASE, "transcript-pending.md")
+TRANSCRIPT_PENDING_FILE = os.path.join(BASE, "transcripts/transcript-pending.md")
 
 # Copy all functions from original file
 def ensure_config_exists():
