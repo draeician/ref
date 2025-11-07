@@ -171,6 +171,7 @@ config = get_default_config()
 BASE = os.path.expanduser(config['paths']['references'])
 UNIFIED = os.path.join(BASE, "references.md")
 TRANSCRIPTS_DIR = os.path.expanduser(config['paths']['transcripts'])
+TRANSCRIPT_PENDING_FILE = os.path.join(BASE, "transcript-pending.md")
 
 # Copy all functions from original file
 def ensure_config_exists():
@@ -700,6 +701,9 @@ def update_transcript(video_url: str) -> None:
                         logging.info(
                             f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
                         )
+                        # Add to pending file if blocked by YouTube
+                        if failure_info[0] == "blocked":
+                            add_url_to_pending_file(video_url)
             file.write(line)
 
     if updated:
@@ -768,6 +772,51 @@ def url_exists_in_file(url: str, file_path: str) -> bool:
                     return True
     return False
 
+def add_url_to_pending_file(url: str) -> None:
+    """
+    Adds a URL to the transcript-pending.md file if it doesn't already exist.
+    Prevents duplicate URLs from being added.
+    
+    Args:
+        url (str): The URL to add to the pending file
+    """
+    verbose_logger.log(f"Checking if URL exists in pending file: {url}")
+    
+    # Ensure the file exists
+    os.makedirs(os.path.dirname(TRANSCRIPT_PENDING_FILE), exist_ok=True)
+    
+    # Check if URL already exists in the file
+    url_exists = False
+    if os.path.exists(TRANSCRIPT_PENDING_FILE):
+        try:
+            with open(TRANSCRIPT_PENDING_FILE, 'r') as f:
+                for line in f:
+                    line_url = line.strip()
+                    # Skip empty lines and comments
+                    if not line_url or line_url.startswith('#'):
+                        continue
+                    # Compare simplified URLs to catch duplicates
+                    simplified_input_url = simplify_url(url)
+                    simplified_existing_url = simplify_url(line_url)
+                    if simplified_input_url == simplified_existing_url:
+                        url_exists = True
+                        verbose_logger.log(f"URL already exists in pending file: {url}")
+                        break
+        except Exception as e:
+            verbose_logger.log(f"Error reading pending file: {e}")
+            logging.warning(f"Error reading transcript-pending.md: {e}")
+    
+    # Add URL if it doesn't exist
+    if not url_exists:
+        try:
+            with open(TRANSCRIPT_PENDING_FILE, 'a') as f:
+                f.write(f"{url}\n")
+            verbose_logger.log(f"Added URL to pending file: {url}")
+            logging.info(f"Added blocked URL to transcript-pending.md: {url}")
+        except Exception as e:
+            verbose_logger.log(f"Error writing to pending file: {e}")
+            logging.error(f"Error writing to transcript-pending.md: {e}")
+
 def read_urls_from_file(file_path: str, force: bool = False) -> None:
     """
     Reads URLs from a file and processes each one sequentially.
@@ -832,9 +881,7 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
     cleaned_message = ' '.join(str(message).split())
 
     if method == "blocked":
-        details = textwrap.shorten(cleaned_message, width=300, placeholder="...") if cleaned_message else ""
-        detail_suffix = f" (Details: {details})" if details else ""
-        return f"Transcript blocked by YouTube: {BLOCKED_ERROR_USER_MESSAGE}{detail_suffix}"
+        return "Transcript unavailable (queued in transcript-pending.md)"
 
     method_display = method.replace('_', ' ').title()
     return f"No transcript available ({method_display} method: {cleaned_message})"
@@ -1350,6 +1397,9 @@ def process_url(url: str, force: bool) -> None:
                                     logging.info(
                                         f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
                                     )
+                                    # Add to pending file if blocked by YouTube
+                                    if failure_info[0] == "blocked":
+                                        add_url_to_pending_file(video_url)
                                 else:
                                     logging.info(
                                         f"No transcript available for video {video_id} (common for music videos)"
@@ -1409,6 +1459,9 @@ def process_url(url: str, force: bool) -> None:
                                 logging.info(
                                     f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
                                 )
+                                # Add to pending file if blocked by YouTube
+                                if failure_info[0] == "blocked":
+                                    add_url_to_pending_file(video_url)
                             else:
                                 logging.info(
                                     f"No transcript available for video {video_id} (common for music videos)"
@@ -1520,6 +1573,7 @@ def create_backup(file_path: str) -> None:
 def main():
     """Main function to handle the command-line interface for recording URLs."""
     ensure_path_exists(UNIFIED)
+    ensure_path_exists(TRANSCRIPT_PENDING_FILE)
     try:
         args = parse_arguments()
         

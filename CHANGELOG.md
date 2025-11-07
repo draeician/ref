@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2025-11-07
+
+### Added
+- YouTube transcript API throttling detection and pending queue system
+- Automatic addition of blocked URLs to `transcript-pending.md` for later processing
+- Duplicate prevention when adding URLs to the pending file
+- Simplified user-friendly message for blocked transcripts in references.md
+
+### Changed
+- Updated blocked transcript error message to show "Transcript unavailable (queued in transcript-pending.md)" instead of long technical details
+
 ## [1.6.0] - 2025-04-30
 
 ### Added
