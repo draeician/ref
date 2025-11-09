@@ -984,24 +984,24 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
             verbose_logger.log("Attempting to use legacy transcript method")
             verbose_logger.log(f"Attempting to get transcript for video ID: {video_id}")
             
-            # Create an instance of YouTubeTranscriptApi
-            yt_api = YouTubeTranscriptApi()
-            verbose_logger.log("Created YouTubeTranscriptApi instance")
-            
             try:
                 # Try to fetch transcript directly first
                 verbose_logger.log("Attempting direct transcript fetch")
-                transcript_data = yt_api.fetch(video_id, languages=['en'])
-                verbose_logger.log(f"Successfully retrieved transcript with {len(transcript_data.snippets)} entries")
+                transcript_segments = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                verbose_logger.log(
+                    f"Successfully retrieved transcript with {len(transcript_segments)} entries"
+                )
 
                 # Convert transcript data to our format
                 clean_text = ""
                 total_duration = 0
 
-                # Process each snippet in the transcript
-                for snippet in transcript_data.snippets:
-                    clean_text += snippet.text + " "
-                    total_duration += snippet.duration
+                # Process each segment in the transcript
+                for segment in transcript_segments:
+                    text = segment.get("text", "")
+                    duration = segment.get("duration", 0)
+                    clean_text += text + " "
+                    total_duration += duration
 
                 verbose_logger.log("Successfully processed transcript data")
 
@@ -1014,9 +1014,9 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 try:
                     # Try listing available transcripts and finding the best match
                     verbose_logger.log("Attempting to list available transcripts")
-                    transcript_list = yt_api.list(video_id)
+                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
                     verbose_logger.log("Successfully listed transcripts")
-                    
+
                     # Try to get English transcript first
                     try:
                         transcript = transcript_list.find_transcript(['en'])
@@ -1026,19 +1026,23 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                         # Get the first available transcript and translate it to English
                         transcript = next(iter(transcript_list)).translate('en')
                         verbose_logger.log("Using translated transcript")
-                    
-                    transcript_data = transcript.fetch()
-                    verbose_logger.log(f"Successfully retrieved transcript with {len(transcript_data.snippets)} entries")
-                    
+
+                    transcript_segments = transcript.fetch()
+                    verbose_logger.log(
+                        f"Successfully retrieved transcript with {len(transcript_segments)} entries"
+                    )
+
                     # Convert transcript data to our format
                     clean_text = ""
                     total_duration = 0
-                    
-                    # Process each snippet in the transcript
-                    for snippet in transcript_data.snippets:
-                        clean_text += snippet.text + " "
-                        total_duration += snippet.duration
-                    
+
+                    # Process each segment in the transcript
+                    for segment in transcript_segments:
+                        text = segment.get("text", "")
+                        duration = segment.get("duration", 0)
+                        clean_text += text + " "
+                        total_duration += duration
+
                     verbose_logger.log("Successfully processed transcript data")
                     
                 except Exception as e:
