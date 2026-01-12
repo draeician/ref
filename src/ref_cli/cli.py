@@ -1045,10 +1045,14 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
             verbose_logger.log("Attempting to use legacy transcript method")
             verbose_logger.log(f"Attempting to get transcript for video ID: {video_id}")
             
+            # Create an instance of YouTubeTranscriptApi (required for v1.2.3+)
+            api = YouTubeTranscriptApi()
+            
             try:
                 # Try to fetch transcript directly first
                 verbose_logger.log("Attempting direct transcript fetch")
-                transcript_segments = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                fetched_transcript = api.fetch(video_id, languages=['en'])
+                transcript_segments = fetched_transcript
                 verbose_logger.log(
                     f"Successfully retrieved transcript with {len(transcript_segments)} entries"
                 )
@@ -1075,7 +1079,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 try:
                     # Try listing available transcripts and finding the best match
                     verbose_logger.log("Attempting to list available transcripts")
-                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    transcript_list = api.list(video_id)
                     verbose_logger.log("Successfully listed transcripts")
 
                     # Try to get English transcript first
