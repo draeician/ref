@@ -55,8 +55,10 @@ def get_youtube_transcript_with_metadata(video_id: str, api_key: Optional[str] =
         Exception: If transcript or metadata cannot be fetched or file cannot be written
     """
     try:
-        # Fetch the transcript
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        # Fetch the transcript using the new API (v1.2.3+)
+        api = YouTubeTranscriptApi()
+        fetched_transcript = api.fetch(video_id)
+        transcript_list = fetched_transcript
         
         # Extract text segments and calculate duration
         text_segments = []
@@ -178,8 +180,10 @@ def get_youtube_transcript(video_id: str) -> tuple[str, float]:
         Exception: If transcript cannot be fetched or processed
     """
     try:
-        # Fetch the transcript
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        # Fetch the transcript using the new API (v1.2.3+)
+        api = YouTubeTranscriptApi()
+        fetched_transcript = api.fetch(video_id)
+        transcript_list = fetched_transcript
         
         # Extract text segments and durations
         text_segments = []
@@ -209,10 +213,13 @@ def get_youtube_transcript_with_languages(video_id: str, languages: Optional[lis
         Tuple[str, float]: A tuple containing the complete transcript text and total duration
     """
     try:
+        # Fetch the transcript using the new API (v1.2.3+)
+        api = YouTubeTranscriptApi()
         if languages:
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+            fetched_transcript = api.fetch(video_id, languages=languages)
         else:
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            fetched_transcript = api.fetch(video_id)
+        transcript_list = fetched_transcript
         
         text_segments = []
         total_duration = 0.0

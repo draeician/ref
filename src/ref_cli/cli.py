@@ -18,6 +18,7 @@ import yaml
 import json
 from datetime import datetime
 import textwrap
+import fnmatch
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv, set_key
@@ -123,7 +124,8 @@ def get_default_config():
                 'utm_term', 'utm_content', 'fbclid', 'gclid',
                 '_ga', 'gi', 'ref', 'source', 'medium', 
                 'campaign', 'feature', 'share', 'src'
-            ]
+            ],
+            'skip_patterns': []
         }
 
 # Define the directory where you want the logs to be stored
@@ -181,6 +183,22 @@ def ensure_config_exists():
     if not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'w') as file:
             yaml.dump(get_default_config(), file)
+    else:
+        # Merge missing keys from default config (e.g., skip_patterns)
+        default_config = get_default_config()
+        with open(CONFIG_FILE, 'r') as file:
+            user_config = yaml.safe_load(file) or {}
+        
+        # Merge missing keys
+        updated = False
+        for key, value in default_config.items():
+            if key not in user_config:
+                user_config[key] = value
+                updated = True
+        
+        if updated:
+            with open(CONFIG_FILE, 'w') as file:
+                yaml.dump(user_config, file)
 
 def load_config() -> dict:
     """Loads the configuration from the YAML file."""
@@ -772,6 +790,38 @@ def url_exists_in_file(url: str, file_path: str) -> bool:
                     return True
     return False
 
+def should_skip_url(url: str, config: dict) -> bool:
+    """
+    Checks if a URL should be skipped based on skip_patterns in the configuration.
+    Supports both exact matches and glob patterns (using * wildcard).
+    
+    Args:
+        url (str): The URL to check
+        config (dict): The configuration dictionary containing skip_patterns
+    
+    Returns:
+        bool: True if the URL should be skipped, False otherwise
+    """
+    skip_patterns = config.get('skip_patterns', [])
+    if not skip_patterns:
+        return False
+    
+    for pattern in skip_patterns:
+        # Skip empty patterns and comments
+        if not pattern or isinstance(pattern, str) and pattern.strip().startswith('#'):
+            continue
+        
+        pattern = pattern.strip()
+        # Check for exact match
+        if url == pattern:
+            return True
+        # Check for glob pattern match
+        if '*' in pattern or '?' in pattern:
+            if fnmatch.fnmatch(url, pattern):
+                return True
+    
+    return False
+
 def add_url_to_pending_file(url: str) -> None:
     """
     Adds a URL to the transcript-pending.md file if it doesn't already exist.
@@ -829,6 +879,9 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
     verbose_logger.log(f"Starting to read URLs from file: {file_path}")
     verbose_logger.log(f"Force mode: {'enabled' if force else 'disabled'}")
     
+    # Load config for skip patterns
+    user_config = load_config()
+    
     try:
         with open(file_path, 'r') as file:
             lines = file.readlines()
@@ -842,6 +895,14 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
             if not url or url.startswith('#'):
                 verbose_logger.log(f"Line {line_number}: Skipping empty or commented line")
                 modified_lines.append(original_line)
+                continue
+
+            # Check if URL should be skipped
+            if should_skip_url(url, user_config):
+                print(warning(f"Skipping URL (matches skip pattern): {url(url)}"))
+                logging.info(f"Skipped URL due to skip pattern: {url}")
+                modified_lines.append(f"# {original_line}")  # Comment out skipped URLs
+                verbose_logger.log(f"Line {line_number}: Skipped due to skip pattern: {url}")
                 continue
 
             verbose_logger.log(f"Processing line {line_number}: {url}")
@@ -984,10 +1045,14 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
             verbose_logger.log("Attempting to use legacy transcript method")
             verbose_logger.log(f"Attempting to get transcript for video ID: {video_id}")
             
+            # Create an instance of YouTubeTranscriptApi (required for v1.2.3+)
+            api = YouTubeTranscriptApi()
+            
             try:
                 # Try to fetch transcript directly first
                 verbose_logger.log("Attempting direct transcript fetch")
-                transcript_segments = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                fetched_transcript = api.fetch(video_id, languages=['en'])
+                transcript_segments = fetched_transcript
                 verbose_logger.log(
                     f"Successfully retrieved transcript with {len(transcript_segments)} entries"
                 )
@@ -1014,7 +1079,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 try:
                     # Try listing available transcripts and finding the best match
                     verbose_logger.log("Attempting to list available transcripts")
-                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    transcript_list = api.list(video_id)
                     verbose_logger.log("Successfully listed transcripts")
 
                     # Try to get English transcript first
@@ -1676,29 +1741,60 @@ def main():
             else:
                 process_url(args.url, args.force)
         else:
-            timeout = None
+            # Load config for skip patterns
+            user_config = load_config()
             while True:
                 try:
-                    print(highlight("Enter a URL or YouTube video ID to record (or press Ctrl+C to quit): "))
-                    ready, _, _ = select.select([sys.stdin], [], [], timeout)
-                    if ready:
-                        user_input = sys.stdin.readline().strip()
-                        if user_input:  # Only process non-empty input
-                            force = False
-                            # Check if the input is a YouTube video ID
-                            if is_youtube_video_id(user_input):
-                                print(info(f"Detected YouTube video ID: {highlight(user_input)}"))
-                                youtube_url = convert_video_id_to_url(user_input)
-                                print(info(f"Converting to URL: {url(youtube_url)}"))
-                                process_url(youtube_url, force)
-                            else:
-                                process_url(user_input, force)
-                        else:
-                            print(warning("Empty input. Please enter a valid URL or YouTube video ID."))
-                        time.sleep(1)  # Add a delay between processing each URL
-                    else:
+                    print(highlight("Enter a URL or YouTube video ID to record (or paste multiple URLs, one per line). Press Ctrl+C to quit: "))
+                    # Read all available input (handles multi-line paste)
+                    urls_to_process = []
+                    # Read first line (blocking)
+                    first_line = sys.stdin.readline()
+                    if not first_line:
                         print(info("\nNo input received. Exiting..."))
                         break
+                    
+                    first_line = first_line.strip()
+                    if first_line:
+                        urls_to_process.append(first_line)
+                    
+                    # Check if there's more input available (non-blocking)
+                    # This handles the case where multiple lines were pasted
+                    while True:
+                        ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                        if not ready:
+                            break
+                        line = sys.stdin.readline()
+                        if not line or not line.strip():
+                            break
+                        urls_to_process.append(line.strip())
+                    
+                    if not urls_to_process:
+                        print(warning("Empty input. Please enter a valid URL or YouTube video ID."))
+                        continue
+                    
+                    force = False
+                    # Process each URL
+                    for user_input in urls_to_process:
+                        if not user_input:
+                            continue
+                        
+                        # Check if URL should be skipped
+                        if should_skip_url(user_input, user_config):
+                            print(warning(f"Skipping URL (matches skip pattern): {url(user_input)}"))
+                            logging.info(f"Skipped URL due to skip pattern: {user_input}")
+                            continue
+                        
+                        # Check if the input is a YouTube video ID
+                        if is_youtube_video_id(user_input):
+                            print(info(f"Detected YouTube video ID: {highlight(user_input)}"))
+                            youtube_url = convert_video_id_to_url(user_input)
+                            print(info(f"Converting to URL: {url(youtube_url)}"))
+                            process_url(youtube_url, force)
+                        else:
+                            process_url(user_input, force)
+                        
+                        time.sleep(1)  # Add a delay between processing each URL
                 except Exception as e:
                     print(error(f"An error occurred: {e}"))
                     logging.error(f"An error occurred: {e}")
