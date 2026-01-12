@@ -9,4 +9,10 @@ removable_keys:
   - utm_content
   - fbclid
   - gclid
-  - _ga 
+  - _ga
+skip_patterns:
+  # URLs to skip during processing (exact matches or glob patterns)
+  # Examples:
+  # - https://mail.google.com/*  # Skip all Gmail URLs (glob pattern)
+  # - https://mail.google.com/mail/u/0  # Skip specific URL (exact match)
+  # Add your skip patterns below: 
