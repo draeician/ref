@@ -34,3 +34,5 @@ testfile
 
 .cursorindexingignore
 .specstory/
+
+logs/
