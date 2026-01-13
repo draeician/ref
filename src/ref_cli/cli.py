@@ -1063,8 +1063,19 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
 
                 # Process each segment in the transcript
                 for segment in transcript_segments:
-                    text = segment.get("text", "")
-                    duration = segment.get("duration", 0)
+                    try:
+                        # FetchedTranscriptSnippet objects support dictionary-style access
+                        text = segment["text"]
+                        duration = segment["duration"]
+                    except (KeyError, TypeError, AttributeError) as e:
+                        # Fallback: try attribute access if dictionary access fails
+                        try:
+                            text = segment.text if hasattr(segment, 'text') else ""
+                            duration = segment.duration if hasattr(segment, 'duration') else 0
+                        except (AttributeError, TypeError):
+                            verbose_logger.log(f"Error accessing segment attributes: {e}")
+                            text = ""
+                            duration = 0
                     clean_text += text + " "
                     total_duration += duration
 
@@ -1103,8 +1114,19 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
 
                     # Process each segment in the transcript
                     for segment in transcript_segments:
-                        text = segment.get("text", "")
-                        duration = segment.get("duration", 0)
+                        try:
+                            # FetchedTranscriptSnippet objects support dictionary-style access
+                            text = segment["text"]
+                            duration = segment["duration"]
+                        except (KeyError, TypeError, AttributeError) as e:
+                            # Fallback: try attribute access if dictionary access fails
+                            try:
+                                text = segment.text if hasattr(segment, 'text') else ""
+                                duration = segment.duration if hasattr(segment, 'duration') else 0
+                            except (AttributeError, TypeError):
+                                verbose_logger.log(f"Error accessing segment attributes: {e}")
+                                text = ""
+                                duration = 0
                         clean_text += text + " "
                         total_duration += duration
 
