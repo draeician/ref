@@ -890,31 +890,31 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
         modified_lines = []
         for line_number, line in enumerate(lines, 1):
             original_line = line
-            url = line.strip()
+            url_string = line.strip()
             
-            if not url or url.startswith('#'):
+            if not url_string or url_string.startswith('#'):
                 verbose_logger.log(f"Line {line_number}: Skipping empty or commented line")
                 modified_lines.append(original_line)
                 continue
 
             # Check if URL should be skipped
-            if should_skip_url(url, user_config):
-                print(warning(f"Skipping URL (matches skip pattern): {url(url)}"))
-                logging.info(f"Skipped URL due to skip pattern: {url}")
+            if should_skip_url(url_string, user_config):
+                print(warning(f"Skipping URL (matches skip pattern): {url(url_string)}"))
+                logging.info(f"Skipped URL due to skip pattern: {url_string}")
                 modified_lines.append(f"# {original_line}")  # Comment out skipped URLs
-                verbose_logger.log(f"Line {line_number}: Skipped due to skip pattern: {url}")
+                verbose_logger.log(f"Line {line_number}: Skipped due to skip pattern: {url_string}")
                 continue
 
-            verbose_logger.log(f"Processing line {line_number}: {url}")
+            verbose_logger.log(f"Processing line {line_number}: {url_string}")
             try:
-                process_url(url, force)
+                process_url(url_string, force)
                 modified_lines.append(f"# {original_line}")
-                verbose_logger.log(f"Successfully processed and commented out: {url}")
+                verbose_logger.log(f"Successfully processed and commented out: {url_string}")
             except Exception as e:
                 modified_lines.append(original_line)
                 verbose_logger.log(f"Error processing URL on line {line_number}: {e}")
                 print(f"Error processing URL on line {line_number}: {e}")
-                logging.error(f"Error processing URL '{url}' on line {line_number}: {e}")
+                logging.error(f"Error processing URL '{url_string}' on line {line_number}: {e}")
             
             time.sleep(1)
 
