@@ -10,6 +10,9 @@ removable_keys:
   - fbclid
   - gclid
   - _ga
+# For Rumble 403: set to browser name (e.g. firefox, chrome) to use its cookies with yt-dlp.
+# Some systems require the browser to be closed when using this. Env override: REF_RUMBLE_COOKIES_BROWSER
+rumble_cookies_from_browser: null
 skip_patterns:
   # URLs to skip during processing (exact matches or glob patterns)
   # Examples:

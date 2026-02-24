@@ -67,6 +67,25 @@ BLOCKED_ERROR_USER_MESSAGE = (
     f"See {BLOCKED_ERROR_GUIDANCE_URL} for steps to restore access."
 )
 
+# Browser-like headers so Rumble does not return 403 (used for all Rumble yt-dlp calls)
+RUMBLE_YT_DLP_HEADERS = [
+    "--add-header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "--add-header", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "--add-header", "Accept-Language: en-US,en;q=0.9",
+    "--add-header", "Referer: https://rumble.com/",
+]
+
+
+def _filter_yt_dlp_stderr(stderr: str) -> str:
+    """Drop WARNING lines from yt-dlp stderr; prefer ERROR line(s) for cleaner failure messages."""
+    if not (stderr and stderr.strip()):
+        return stderr or ""
+    lines = [line for line in stderr.strip().splitlines() if not line.strip().startswith("WARNING:")]
+    error_lines = [line for line in lines if line.strip().startswith("ERROR:")]
+    if error_lines:
+        return error_lines[-1].strip()
+    return "\n".join(lines).strip() or stderr.strip()
+
 
 def is_request_blocked_error(error: Exception) -> bool:
     """Return True when YouTube is blocking transcript requests for the current IP."""
@@ -944,6 +963,12 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
     if method == "blocked":
         return "Transcript unavailable (queued in transcript-pending.md)"
 
+    # For Rumble 403/unavailable, store a short placeholder so the reference file stays clean
+    if method.startswith("rumble") and (
+        "403" in message or "Forbidden" in message or "Unable to download webpage" in message
+    ):
+        return "No transcript available"
+
     method_display = method.replace('_', ' ').title()
     return f"No transcript available ({method_display} method: {cleaned_message})"
 
@@ -1200,9 +1225,20 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
         # For Rumble, we need to ensure the URL is properly formatted
         rumble_url = f"https://rumble.com/{video_id}"
 
+        # Optional: use browser cookies to avoid 403 (config or REF_RUMBLE_COOKIES_BROWSER env)
+        try:
+            rumble_config = load_config()
+            rumble_cookies_browser = os.environ.get("REF_RUMBLE_COOKIES_BROWSER") or rumble_config.get("rumble_cookies_from_browser")
+        except Exception:
+            rumble_cookies_browser = None
+        rumble_extra = list(RUMBLE_YT_DLP_HEADERS)
+        if rumble_cookies_browser:
+            rumble_extra.extend(["--cookies-from-browser", str(rumble_cookies_browser)])
+
         # First, check video info
         info_command = [
             "yt-dlp",
+            *rumble_extra,
             "--dump-json",
             rumble_url
         ]
@@ -1218,6 +1254,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 # Try with auto-generated subtitles
                 [
                     "yt-dlp",
+                    *rumble_extra,
                     "--skip-download",
                     "--write-auto-subs",
                     "--sub-lang", "en",
@@ -1228,6 +1265,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 # Try with manual subtitles
                 [
                     "yt-dlp",
+                    *rumble_extra,
                     "--skip-download",
                     "--write-subs",
                     "--sub-lang", "en",
@@ -1238,6 +1276,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 # Try with all available subtitles
                 [
                     "yt-dlp",
+                    *rumble_extra,
                     "--skip-download",
                     "--write-subs",
                     "--write-auto-subs",
@@ -1269,7 +1308,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 except subprocess.CalledProcessError as e:
                     logging.warning(f"Failed to get subtitles: {e}")
                     logging.warning(f"yt-dlp stderr: {e.stderr}")
-                    failure_info = (f"rumble approach {index}", e.stderr.strip() or str(e))
+                    failure_info = (f"rumble approach {index}", _filter_yt_dlp_stderr(e.stderr or "") or str(e))
                     continue
 
             logging.error(f"Failed to get subtitles with any approach for video: {rumble_url}")
@@ -1283,7 +1322,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to get video info for Rumble video ID {video_id}: {e}")
             logging.error(f"yt-dlp stderr: {e.stderr}")
-            failure_info = ("rumble info", e.stderr.strip() or str(e))
+            failure_info = ("rumble info", _filter_yt_dlp_stderr(e.stderr or "") or str(e))
             logging.info(
                 f"Failed to get transcript for {rumble_url} ({failure_info[0].replace('_', ' ').title()} method: {failure_info[1]})"
             )
@@ -1600,6 +1639,7 @@ def process_url(url: str, force: bool) -> None:
 def update_reference_entry(video_url: str, video_title: str, uploader: str, transcript_file: str) -> None:
     """
     Updates or adds a YouTube video entry in the references.md file with the transcript file reference.
+    When updating an existing line, also updates the title so re-running a URL refreshes the stored title.
     """
     updated = False
     with open(UNIFIED, 'r') as file:
@@ -1608,10 +1648,16 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
     with open(UNIFIED, 'w') as file:
         for line in lines:
             if video_url in line:
-                if line.strip().endswith("|None"):
-                    line = line.replace("|None", f"|{transcript_file}")
-                elif not line.strip().endswith(f"|{transcript_file}"):
-                    line = line.rstrip() + f"|{transcript_file}\n"
+                parts = line.rstrip().split('|')
+                if len(parts) >= 6:
+                    parts[2] = f"({video_title})"
+                    parts[-1] = transcript_file
+                    line = "|".join(parts) + "\n"
+                else:
+                    if line.strip().endswith("|None"):
+                        line = line.replace("|None", f"|{transcript_file}")
+                    elif not line.strip().endswith(f"|{transcript_file}"):
+                        line = line.rstrip() + f"|{transcript_file}\n"
                 updated = True
             file.write(line)
 
