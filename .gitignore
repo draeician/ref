@@ -36,3 +36,12 @@ testfile
 .specstory/
 
 logs/
+
+# Crules specific
+.cursor/rules/*.mdc
+.claude/rules/*.md
+.github/instructions/*.instructions.md
+.clinerules/*.md
+.roorules/*.md
+.windsurf/rules/*.md
+.aider/rules/*.md
