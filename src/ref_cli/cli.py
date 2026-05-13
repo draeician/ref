@@ -423,6 +423,86 @@ def resolve_redirect(url: str) -> str:
                 logging.error(f"Error resolving redirect for URL: {url}, error: {e}")
                 return url
 
+def _is_x_or_twitter_url(url: str) -> bool:
+    host = urlparse(url).hostname
+    if not host:
+        return False
+    h = host.lower()
+    return h == 'x.com' or h.endswith('.x.com') or h == 'twitter.com' or h.endswith('.twitter.com')
+
+
+def _clean_x_title(raw: str) -> Optional[str]:
+    if raw is None:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    s = re.sub(r'\s+', ' ', s)
+    while True:
+        prev = s
+        s = re.sub(r'(?:\s*/\s*|\s*\|\s*)[Xx]\s*$', '', s).rstrip()
+        if s == prev:
+            break
+    if not s:
+        return None
+    if s.lower() == 'x':
+        return None
+    return s
+
+
+def _is_x_noscript_placeholder_title(title: str) -> bool:
+    """True when X static HTML exposes a useless noscript/JS-disabled headline."""
+    if not title:
+        return True
+    norm = re.sub(r'\s+', ' ', title.strip().lower())
+    return 'javascript is not available' in norm
+
+
+def _x_title_from_html_raw(raw: str) -> Optional[str]:
+    """Like _clean_x_title but rejects X shell placeholder strings for HTML-derived text."""
+    cleaned = _clean_x_title(raw)
+    if not cleaned or _is_x_noscript_placeholder_title(cleaned):
+        return None
+    return cleaned
+
+
+def _x_title_from_oembed_candidate(cleaned: Optional[str]) -> Optional[str]:
+    if not cleaned or _is_x_noscript_placeholder_title(cleaned):
+        return None
+    return cleaned
+
+
+def _get_x_oembed_title(url: str) -> Optional[str]:
+    try:
+        response = requests.get(
+            'https://publish.twitter.com/oembed.json',
+            params={'url': url, 'omit_script': 'true'},
+            timeout=6,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw_title = payload.get('title')
+        if raw_title:
+            cleaned = _clean_x_title(str(raw_title))
+            cleaned = _x_title_from_oembed_candidate(cleaned)
+            if cleaned:
+                return cleaned
+        html = payload.get('html')
+        if isinstance(html, str) and html.strip():
+            blockquote = BeautifulSoup(html, 'html.parser').find('blockquote')
+            if blockquote:
+                cleaned = _clean_x_title(blockquote.get_text(separator=' ', strip=True))
+                cleaned = _x_title_from_oembed_candidate(cleaned)
+                if cleaned:
+                    return cleaned
+    except (requests.RequestException, ValueError, TypeError) as e:
+        logging.debug("oEmbed title unavailable for %s: %s", url, e)
+    return None
+
+
 def get_title_from_url(url: str) -> str:
     """
     Fetches the title of a webpage given its URL by dumping HTML with lynx and parsing it.
@@ -469,6 +549,26 @@ def get_title_from_url(url: str) -> str:
                 h1 = soup.find('h1')
                 if h1:
                     title = h1.get_text().strip()
+        elif _is_x_or_twitter_url(url):
+            og_title = soup.find('meta', property='og:title')
+            if og_title:
+                title = _x_title_from_html_raw(og_title.get('content') or '')
+            if not title:
+                tw_name = soup.find('meta', {'name': 'twitter:title'})
+                if tw_name:
+                    title = _x_title_from_html_raw(tw_name.get('content') or '')
+            if not title:
+                tw_prop = soup.find('meta', property='twitter:title')
+                if tw_prop:
+                    title = _x_title_from_html_raw(tw_prop.get('content') or '')
+            if not title and soup.title:
+                title = _x_title_from_html_raw(soup.title.get_text(separator=' ', strip=True))
+            if not title:
+                h1 = soup.find('h1')
+                if h1:
+                    title = _x_title_from_html_raw(h1.get_text())
+            if not title:
+                title = _get_x_oembed_title(url)
         else:
             # For other sites, try the standard title sources
             if soup.title:
