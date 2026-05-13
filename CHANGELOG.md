@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.7] - 2026-05-13
+
+### Fixed
+- X/Twitter title capture: prefer `og:title`/`twitter:title` over the generic `<title>` tag, strip ` / X` and ` | X` branding suffixes, and reject `X` placeholders so x.com and twitter.com URLs record the real post title (`src/ref_cli/cli.py`)
+- Detect X's `JavaScript is not available.` no-JS shell text and fall back to the `publish.twitter.com` oEmbed API for both `title` and blockquote HTML when the static page returns the placeholder
+- Improve Rumble transcript fetching with browser-style headers and cookie support, and surface cleaner error messages on failure
+- Remove explicit `urllib3` / `chardet` / `charset-normalizer` dependency pins that triggered `RequestsDependencyWarning`
+- Fix variable shadowing bug in `read_urls_from_file` that could mask the outer URL when processing files
+
+## [1.6.6] - 2026-02-15
+
+### Fixed
+- YouTube transcript `FetchedTranscriptSnippet` error: replaced `segment.get()` calls with dictionary-style access to fix `AttributeError` when processing YouTube transcripts
+
+## [1.6.5] - 2026-01-20
+
+### Changed
+- Post-merge updates and housekeeping following the URL skip patterns / multi-URL paste merge
+
 ## [1.6.4] - 2026-01-12
 
 ### Added
