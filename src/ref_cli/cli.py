@@ -87,6 +87,16 @@ def _filter_yt_dlp_stderr(stderr: str) -> str:
     return "\n".join(lines).strip() or stderr.strip()
 
 
+def _is_rumble_transcript_unavailable_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return any(phrase in text for phrase in [
+        "403",
+        "forbidden",
+        "unable to download webpage",
+        "did not produce subtitle files",
+    ])
+
+
 def is_request_blocked_error(error: Exception) -> bool:
     """Return True when YouTube is blocking transcript requests for the current IP."""
 
@@ -1064,9 +1074,7 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
         return "Transcript unavailable (queued in transcript-pending.md)"
 
     # For Rumble 403/unavailable, store a short placeholder so the reference file stays clean
-    if method.startswith("rumble") and (
-        "403" in message or "Forbidden" in message or "Unable to download webpage" in message
-    ):
+    if method.startswith("rumble") and _is_rumble_transcript_unavailable_error(message):
         return "No transcript available"
 
     method_display = method.replace('_', ' ').title()
@@ -1404,25 +1412,38 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                                     return transcript_file, None
 
                     logging.warning(f"Failed to get subtitles with current approach")
-                    failure_info = (f"rumble approach {index}", "yt-dlp completed without producing subtitles")
+                    failure_info = (f"rumble approach {index}", "yt-dlp did not produce subtitle files")
                 except subprocess.CalledProcessError as e:
-                    logging.warning(f"Failed to get subtitles: {e}")
-                    logging.warning(f"yt-dlp stderr: {e.stderr}")
-                    failure_info = (f"rumble approach {index}", _filter_yt_dlp_stderr(e.stderr or "") or str(e))
+                    filtered_stderr = _filter_yt_dlp_stderr(e.stderr or "") or str(e)
+                    if _is_rumble_transcript_unavailable_error(filtered_stderr):
+                        logging.warning(f"Rumble subtitles unavailable with approach {index}: {filtered_stderr}")
+                        logging.debug(f"yt-dlp stderr for Rumble subtitle attempt {index}: {e.stderr}")
+                    else:
+                        logging.warning(f"Failed to get subtitles: {e}")
+                        logging.warning(f"yt-dlp stderr: {e.stderr}")
+                    failure_info = (f"rumble approach {index}", filtered_stderr)
                     continue
 
-            logging.error(f"Failed to get subtitles with any approach for video: {rumble_url}")
             if failure_info is None:
                 failure_info = ("rumble", "yt-dlp did not produce subtitle files")
+            if _is_rumble_transcript_unavailable_error(failure_info[1]):
+                logging.warning(f"Rumble subtitles unavailable for video: {rumble_url}")
+            else:
+                logging.error(f"Failed to get subtitles with any approach for video: {rumble_url}")
             logging.info(
                 f"Failed to get transcript for {rumble_url} ({failure_info[0].replace('_', ' ').title()} method: {failure_info[1]})"
             )
             return None, failure_info
 
         except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to get video info for Rumble video ID {video_id}: {e}")
-            logging.error(f"yt-dlp stderr: {e.stderr}")
-            failure_info = ("rumble info", _filter_yt_dlp_stderr(e.stderr or "") or str(e))
+            filtered_stderr = _filter_yt_dlp_stderr(e.stderr or "") or str(e)
+            if _is_rumble_transcript_unavailable_error(filtered_stderr):
+                logging.warning(f"Rumble video info unavailable for {video_id}: {filtered_stderr}")
+                logging.debug(f"yt-dlp stderr for Rumble video info: {e.stderr}")
+            else:
+                logging.error(f"Failed to get video info for Rumble video ID {video_id}: {e}")
+                logging.error(f"yt-dlp stderr: {e.stderr}")
+            failure_info = ("rumble info", filtered_stderr)
             logging.info(
                 f"Failed to get transcript for {rumble_url} ({failure_info[0].replace('_', ' ').title()} method: {failure_info[1]})"
             )
