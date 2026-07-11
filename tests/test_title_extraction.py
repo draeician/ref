@@ -1,3 +1,9 @@
+"""Tests for get_title_from_url site-specific title extraction.
+
+Covers generic pages, X/Twitter (meta tags, profile/noscript placeholders,
+oEmbed fallback), and Reddit (verification placeholders, oEmbed fallback).
+"""
+
 import subprocess
 
 import requests
@@ -190,3 +196,186 @@ def test_x_com_oembed_failure_returns_no_title(monkeypatch):
 
     monkeypatch.setattr(cli.requests, 'get', fake_get)
     assert cli.get_title_from_url('https://x.com/user/status/504') == 'No title found'
+
+
+def test_x_com_profile_og_title_falls_through_to_oembed(monkeypatch):
+    html = (
+        '<html><head>'
+        '<meta property="og:title" content="GitHub Projects Community (@GithubProjects) on X"/>'
+        '<meta name="twitter:title" content="GitHub Projects Community (@GithubProjects) on X"/>'
+        '<title>X</title>'
+        '</head><body></body></html>'
+    )
+    _patch_subprocess(monkeypatch, html)
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                'title': (
+                    'CodeNomad wraps OpenCode in a full desktop UI with multi-instance '
+                    'workspaces — GitHub Projects Community (@GithubProjects) July 10, 2026'
+                ),
+            }
+
+    def fake_get(url, params=None, **_kwargs):
+        assert 'publish.twitter.com/oembed' in url
+        assert params.get('url') == (
+            'https://x.com/GithubProjects/status/2075527965958713554'
+        )
+        return Resp()
+
+    monkeypatch.setattr(cli.requests, 'get', fake_get)
+    assert cli.get_title_from_url(
+        'https://x.com/GithubProjects/status/2075527965958713554'
+    ).startswith('CodeNomad wraps OpenCode')
+
+
+def test_x_com_profile_og_falls_through_to_quoted_title_tag(monkeypatch):
+    html = (
+        '<html><head>'
+        '<meta property="og:title" content="GitHub Projects Community (@GithubProjects) on X"/>'
+        '<title>GitHub Projects Community on X: "CodeNomad wraps OpenCode" / X</title>'
+        '</head><body></body></html>'
+    )
+    _patch_subprocess(monkeypatch, html)
+
+    def boom(*_a, **_k):
+        raise AssertionError('oEmbed must not run when title tag has post text')
+
+    monkeypatch.setattr(cli.requests, 'get', boom)
+    assert cli.get_title_from_url(
+        'https://x.com/GithubProjects/status/2075527965958713554'
+    ) == 'GitHub Projects Community on X: "CodeNomad wraps OpenCode"'
+
+
+def test_reddit_og_title(monkeypatch):
+    html = (
+        '<html><head><meta property="og:title" content="Real Reddit post"/>'
+        '</head><body></body></html>'
+    )
+    _patch_subprocess(monkeypatch, html)
+
+    def boom(*_a, **_k):
+        raise AssertionError('oEmbed must not run when HTML meta succeeds')
+
+    monkeypatch.setattr(cli.requests, 'get', boom)
+    assert cli.get_title_from_url(
+        'https://www.reddit.com/r/codex/comments/1usossd/example/'
+    ) == 'Real Reddit post'
+
+
+def test_reddit_verification_title_falls_through_to_oembed(monkeypatch):
+    html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
+    _patch_subprocess(monkeypatch, html)
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {'title': 'New GPT-5.6 Sol reverse engineered its own app'}
+
+    def fake_get(url, params=None, **_kwargs):
+        assert 'reddit.com/oembed' in url
+        assert params.get('url', '').startswith('https://www.reddit.com/')
+        return Resp()
+
+    monkeypatch.setattr(cli.requests, 'get', fake_get)
+    assert cli.get_title_from_url(
+        'https://www.reddit.com/r/codex/comments/1usossd/new_gpt_56_sol_reverse_engineered_its_own_app_in'
+    ) == 'New GPT-5.6 Sol reverse engineered its own app'
+
+
+def test_reddit_verification_placeholder_og_falls_through_to_oembed(monkeypatch):
+    html = (
+        '<html><head>'
+        '<meta property="og:title" content="Reddit - Please wait for verification"/>'
+        '<title>Reddit - Please wait for verification</title>'
+        '</head><body></body></html>'
+    )
+    _patch_subprocess(monkeypatch, html)
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {'title': 'From oEmbed'}
+
+    monkeypatch.setattr(cli.requests, 'get', lambda *_a, **_k: Resp())
+    assert cli.get_title_from_url(
+        'https://old.reddit.com/r/test/comments/abc123/slug/'
+    ) == 'From oEmbed'
+
+
+def test_reddit_oembed_empty_title_uses_card_link(monkeypatch):
+    html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
+    _patch_subprocess(monkeypatch, html)
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                'title': '',
+                'html': (
+                    '<blockquote class="reddit-card">'
+                    '<a href="https://www.reddit.com/r/test/comments/1/">Title from card</a> from '
+                    '<a href="https://www.reddit.com/r/test/">test</a>'
+                    '</blockquote>'
+                ),
+            }
+
+    monkeypatch.setattr(cli.requests, 'get', lambda *_a, **_k: Resp())
+    assert cli.get_title_from_url(
+        'https://www.reddit.com/r/test/comments/1/slug/'
+    ) == 'Title from card'
+
+
+def test_reddit_oembed_failure_returns_no_title(monkeypatch):
+    html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
+    _patch_subprocess(monkeypatch, html)
+
+    def fake_get(*_a, **_k):
+        raise requests.ConnectionError('no network')
+
+    monkeypatch.setattr(cli.requests, 'get', fake_get)
+    assert cli.get_title_from_url(
+        'https://www.reddit.com/r/test/comments/1/slug/'
+    ) == 'No title found'
+
+
+def test_redd_it_short_url_uses_oembed(monkeypatch):
+    html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
+    _patch_subprocess(monkeypatch, html)
+    seen = {}
+
+    class Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {'title': 'Short link title'}
+
+    def fake_get(url, params=None, **_kwargs):
+        seen['post_url'] = params.get('url')
+        return Resp()
+
+    monkeypatch.setattr(cli.requests, 'get', fake_get)
+    short = 'https://redd.it/1usossd'
+    assert cli.get_title_from_url(short) == 'Short link title'
+    assert seen['post_url'] == short

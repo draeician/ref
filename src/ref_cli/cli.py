@@ -464,6 +464,7 @@ def resolve_redirect(url: str) -> str:
                 return url
 
 def _is_x_or_twitter_url(url: str) -> bool:
+    """Return True when *url* is an x.com or twitter.com host."""
     host = urlparse(url).hostname
     if not host:
         return False
@@ -471,7 +472,17 @@ def _is_x_or_twitter_url(url: str) -> bool:
     return h == 'x.com' or h.endswith('.x.com') or h == 'twitter.com' or h.endswith('.twitter.com')
 
 
+def _is_reddit_url(url: str) -> bool:
+    """Return True when *url* is a reddit.com or redd.it host."""
+    host = urlparse(url).hostname
+    if not host:
+        return False
+    h = host.lower()
+    return h == 'reddit.com' or h.endswith('.reddit.com') or h == 'redd.it' or h.endswith('.redd.it')
+
+
 def _clean_x_title(raw: str) -> Optional[str]:
+    """Normalize whitespace and strip trailing `` / X`` or `` | X`` branding."""
     if raw is None:
         return None
     s = raw.strip()
@@ -490,29 +501,79 @@ def _clean_x_title(raw: str) -> Optional[str]:
     return s
 
 
+def _clean_reddit_title(raw: str) -> Optional[str]:
+    """Normalize whitespace in a Reddit title candidate."""
+    if raw is None:
+        return None
+    s = re.sub(r'\s+', ' ', raw.strip())
+    return s or None
+
+
 def _is_x_noscript_placeholder_title(title: str) -> bool:
-    """True when X static HTML exposes a useless noscript/JS-disabled headline."""
+    """True when X HTML exposes a useless noscript or profile-card headline.
+
+    Rejects:
+    - empty / blank titles
+    - ``JavaScript is not available`` noscript shell text
+    - profile-card labels such as ``Name (@handle) on X`` or bare ``Name on X``
+      without quoted post text
+    """
+    if not title:
+        return True
+    cleaned = re.sub(r'\s+', ' ', title.strip())
+    norm = cleaned.lower()
+    if 'javascript is not available' in norm:
+        return True
+    # Status pages often serve a generic profile card as og/twitter:title, e.g.
+    # "GitHub Projects Community (@GithubProjects) on X"
+    if re.fullmatch(r'.+ \(@\w+\) on X', cleaned, flags=re.IGNORECASE):
+        return True
+    if (
+        re.fullmatch(r'.+ on X', cleaned, flags=re.IGNORECASE)
+        and '"' not in cleaned
+        and ':' not in cleaned
+    ):
+        return True
+    return False
+
+
+def _is_reddit_verification_placeholder_title(title: str) -> bool:
+    """True when Reddit returns a bot-challenge interstitial title."""
     if not title:
         return True
     norm = re.sub(r'\s+', ' ', title.strip().lower())
-    return 'javascript is not available' in norm
+    return 'please wait for verification' in norm
 
 
 def _x_title_from_html_raw(raw: str) -> Optional[str]:
-    """Like _clean_x_title but rejects X shell placeholder strings for HTML-derived text."""
+    """Clean an X HTML-derived title, rejecting noscript/profile placeholders."""
     cleaned = _clean_x_title(raw)
     if not cleaned or _is_x_noscript_placeholder_title(cleaned):
         return None
     return cleaned
 
 
+def _reddit_title_from_html_raw(raw: str) -> Optional[str]:
+    """Clean a Reddit HTML-derived title, rejecting verification placeholders."""
+    cleaned = _clean_reddit_title(raw)
+    if not cleaned or _is_reddit_verification_placeholder_title(cleaned):
+        return None
+    return cleaned
+
+
 def _x_title_from_oembed_candidate(cleaned: Optional[str]) -> Optional[str]:
+    """Accept an already-cleaned X oEmbed title unless it is a known placeholder."""
     if not cleaned or _is_x_noscript_placeholder_title(cleaned):
         return None
     return cleaned
 
 
 def _get_x_oembed_title(url: str) -> Optional[str]:
+    """Fetch a post title from the Twitter/X publish oEmbed API.
+
+    Uses ``https://publish.twitter.com/oembed.json``. Prefers the JSON ``title``
+    field, then blockquote text from the embed HTML.
+    """
     try:
         response = requests.get(
             'https://publish.twitter.com/oembed.json',
@@ -543,15 +604,60 @@ def _get_x_oembed_title(url: str) -> Optional[str]:
     return None
 
 
+def _get_reddit_oembed_title(url: str) -> Optional[str]:
+    """Fetch a post title from the Reddit oEmbed API.
+
+    Uses ``https://www.reddit.com/oembed``. Prefers the JSON ``title`` field,
+    then the first link text inside the embed HTML card.
+    """
+    try:
+        response = requests.get(
+            'https://www.reddit.com/oembed',
+            params={'url': url},
+            timeout=6,
+            headers={
+                'User-Agent': 'ref-cli:title-fetch:1.0',
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw_title = payload.get('title')
+        if raw_title:
+            cleaned = _reddit_title_from_html_raw(str(raw_title))
+            if cleaned:
+                return cleaned
+        html = payload.get('html')
+        if isinstance(html, str) and html.strip():
+            # Reddit card embeds put the post title in the first <a> inside the blockquote.
+            soup = BeautifulSoup(html, 'html.parser')
+            link = soup.find('a')
+            if link:
+                cleaned = _reddit_title_from_html_raw(link.get_text(separator=' ', strip=True))
+                if cleaned:
+                    return cleaned
+    except (requests.RequestException, ValueError, TypeError) as e:
+        logging.debug("Reddit oEmbed title unavailable for %s: %s", url, e)
+    return None
+
+
 def get_title_from_url(url: str) -> str:
     """
-    Fetches the title of a webpage given its URL by dumping HTML with lynx and parsing it.
+    Fetch a webpage title via lynx HTML dump, with site-specific fallbacks.
+
+    General sites use ``<title>``, Open Graph / Twitter meta tags, then ``h1``.
+    Special cases:
+
+    - Rumble: prefer ``og:title``, then ``h1``.
+    - X / Twitter: prefer meta tags, reject noscript and profile-card placeholders,
+      then fall back to the publish.twitter.com oEmbed API.
+    - Reddit: reject bot-challenge verification titles, then fall back to the
+      Reddit oEmbed API (``reddit.com`` / ``redd.it``).
 
     Args:
         url (str): The URL of the webpage.
 
     Returns:
-        str: The title of the webpage, or an error message if the title cannot be fetched.
+        str: The title of the webpage, or an error / ``No title found`` message.
     """
     verbose_logger.log(f"Attempting to fetch title for URL: {url}")
     
@@ -609,6 +715,22 @@ def get_title_from_url(url: str) -> str:
                     title = _x_title_from_html_raw(h1.get_text())
             if not title:
                 title = _get_x_oembed_title(url)
+        elif _is_reddit_url(url):
+            og_title = soup.find('meta', property='og:title')
+            if og_title:
+                title = _reddit_title_from_html_raw(og_title.get('content') or '')
+            if not title:
+                tw_name = soup.find('meta', {'name': 'twitter:title'})
+                if tw_name:
+                    title = _reddit_title_from_html_raw(tw_name.get('content') or '')
+            if not title and soup.title:
+                title = _reddit_title_from_html_raw(soup.title.get_text(separator=' ', strip=True))
+            if not title:
+                h1 = soup.find('h1')
+                if h1:
+                    title = _reddit_title_from_html_raw(h1.get_text())
+            if not title:
+                title = _get_reddit_oembed_title(url)
         else:
             # For other sites, try the standard title sources
             if soup.title:
