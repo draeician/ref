@@ -1,3 +1,4 @@
+import json
 import logging
 import subprocess
 
@@ -6,6 +7,8 @@ from youtube_transcript_api._errors import RequestBlocked
 
 from ref_cli import cli
 import get_transcript
+
+QUEUED_MESSAGE = "Transcript unavailable (queued in transcript-pending.md)"
 
 
 def test_fetch_youtube_transcript_returns_blocked(monkeypatch, tmp_path):
@@ -24,8 +27,82 @@ def test_fetch_youtube_transcript_returns_blocked(monkeypatch, tmp_path):
     assert method == "blocked"
 
     formatted = cli.format_transcript_failure(failure_info)
-    assert "Transcript unavailable (queued in transcript-pending.md)" in formatted
+    assert QUEUED_MESSAGE in formatted
     assert "No transcript available" not in formatted
+    assert cli.should_queue_transcript_pending(failure_info)
+
+
+def test_legacy_no_transcript_failure_queues_and_formats():
+    failure_info = (
+        "legacy",
+        "Could not retrieve a transcript for the video! Subtitles are disabled for this video",
+    )
+    assert cli.is_no_transcript_failure(failure_info)
+    assert cli.should_queue_transcript_pending(failure_info)
+    formatted = cli.format_transcript_failure(failure_info)
+    assert formatted == QUEUED_MESSAGE
+    assert "No transcript available" not in formatted
+
+
+def test_enhanced_no_transcript_failure_queues():
+    failure_info = (
+        "enhanced",
+        "No transcript available for video abcd1234567: subtitles are disabled",
+    )
+    assert cli.should_queue_transcript_pending(failure_info)
+    assert cli.format_transcript_failure(failure_info) == QUEUED_MESSAGE
+
+
+def test_rumble_failure_does_not_queue():
+    failure_info = ("rumble", "Unable to download webpage: HTTP Error 403: Forbidden")
+    assert not cli.should_queue_transcript_pending(failure_info)
+
+
+def test_add_url_to_pending_skips_when_transcript_on_disk(monkeypatch, tmp_path):
+    transcripts_dir = tmp_path / "transcripts"
+    transcripts_dir.mkdir()
+    pending_file = tmp_path / "transcript-pending.md"
+    video_id = "abcd1234567"
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    (transcripts_dir / f"{video_id}.json").write_text(
+        json.dumps({"transcript": "Hello world", "metadata": {}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(transcripts_dir))
+    monkeypatch.setattr(cli, "TRANSCRIPT_PENDING_FILE", str(pending_file))
+
+    cli.add_url_to_pending_file(video_url, video_id)
+
+    assert not pending_file.exists() or pending_file.read_text().strip() == ""
+
+
+def test_add_url_to_pending_appends_new_url(monkeypatch, tmp_path):
+    pending_file = tmp_path / "transcript-pending.md"
+    video_id = "abcd1234567"
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(cli, "TRANSCRIPT_PENDING_FILE", str(pending_file))
+
+    cli.add_url_to_pending_file(video_url, video_id)
+
+    assert pending_file.read_text().strip() == video_url
+
+
+def test_add_url_to_pending_dedupes_existing_url(monkeypatch, tmp_path):
+    pending_file = tmp_path / "transcript-pending.md"
+    video_id = "abcd1234567"
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    pending_file.write_text(f"{video_url}\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(cli, "TRANSCRIPT_PENDING_FILE", str(pending_file))
+
+    cli.add_url_to_pending_file(video_url, video_id)
+
+    assert pending_file.read_text().count(video_url) == 1
 
 
 def test_get_youtube_transcript_with_metadata_rethrows_blocked(monkeypatch):

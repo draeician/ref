@@ -4,6 +4,7 @@ TODO
 .env
 __pycache__
 venv/*
+.venv/*
 build/*
 dist/
 ref.spec

@@ -124,6 +124,36 @@ def log_blocked_warning(video_identifier: str, error: Exception) -> None:
     )
     logging.debug("YouTube transcript blocking details for %s: %s", video_identifier, error)
 
+
+_NO_TRANSCRIPT_PHRASES = (
+    "no transcript available",
+    "could not retrieve a transcript",
+    "subtitles are disabled",
+    "no transcript",
+    "transcript not available",
+    "no subtitles",
+)
+
+
+def is_no_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> bool:
+    """Return True when failure indicates no transcript is available (not IP blocked)."""
+    if not failure_info:
+        return False
+    method, message = failure_info
+    if method == "blocked":
+        return False
+    if method not in ("enhanced", "legacy"):
+        return False
+    msg = str(message).lower()
+    return any(phrase in msg for phrase in _NO_TRANSCRIPT_PHRASES)
+
+
+def should_queue_transcript_pending(failure_info: Optional[Tuple[str, str]]) -> bool:
+    """Return True when a failed fetch should be queued in transcript-pending.md."""
+    if not failure_info:
+        return False
+    return failure_info[0] == "blocked" or is_no_transcript_failure(failure_info)
+
 # Custom verbose logger
 class VerboseLogger:
     def __init__(self, enabled=False):
@@ -848,9 +878,8 @@ def update_transcript(video_url: str) -> None:
                         logging.info(
                             f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
                         )
-                        # Add to pending file if blocked by YouTube
-                        if failure_info[0] == "blocked":
-                            add_url_to_pending_file(video_url)
+                        if should_queue_transcript_pending(failure_info):
+                            add_url_to_pending_file(video_url, video_id)
             file.write(line)
 
     if updated:
@@ -951,14 +980,33 @@ def should_skip_url(url: str, config: dict) -> bool:
     
     return False
 
-def add_url_to_pending_file(url: str) -> None:
+def transcript_exists_on_disk(video_id: str) -> bool:
+    """Return True if a non-empty transcript JSON exists for the video ID."""
+    transcript_path = os.path.join(TRANSCRIPTS_DIR, f"{video_id}.json")
+    if not os.path.exists(transcript_path):
+        return False
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        transcript = data.get("transcript")
+        return isinstance(transcript, str) and bool(transcript.strip())
+    except (json.JSONDecodeError, OSError, TypeError):
+        return False
+
+
+def add_url_to_pending_file(url: str, video_id: Optional[str] = None) -> None:
     """
     Adds a URL to the transcript-pending.md file if it doesn't already exist.
     Prevents duplicate URLs from being added.
-    
+
     Args:
         url (str): The URL to add to the pending file
+        video_id (str, optional): YouTube video ID; skips if transcript already on disk
     """
+    if video_id and transcript_exists_on_disk(video_id):
+        verbose_logger.log(f"Transcript already on disk for {video_id}, skipping pending queue")
+        return
+
     verbose_logger.log(f"Checking if URL exists in pending file: {url}")
     
     # Ensure the file exists
@@ -991,7 +1039,7 @@ def add_url_to_pending_file(url: str) -> None:
             with open(TRANSCRIPT_PENDING_FILE, 'a') as f:
                 f.write(f"{url}\n")
             verbose_logger.log(f"Added URL to pending file: {url}")
-            logging.info(f"Added blocked URL to transcript-pending.md: {url}")
+            logging.info(f"Added URL to transcript-pending.md: {url}")
         except Exception as e:
             verbose_logger.log(f"Error writing to pending file: {e}")
             logging.error(f"Error writing to transcript-pending.md: {e}")
@@ -1070,7 +1118,7 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
     method, message = failure_info
     cleaned_message = ' '.join(str(message).split())
 
-    if method == "blocked":
+    if should_queue_transcript_pending(failure_info):
         return "Transcript unavailable (queued in transcript-pending.md)"
 
     # For Rumble 403/unavailable, store a short placeholder so the reference file stays clean
@@ -1161,11 +1209,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                     return None, failure_info
 
                 failure_info = ("enhanced", str(e))
-                if any(phrase in error_msg for phrase in [
-                    'no transcript available',
-                    'could not retrieve a transcript',
-                    'subtitles are disabled'
-                ]):
+                if any(phrase in error_msg for phrase in _NO_TRANSCRIPT_PHRASES):
                     verbose_logger.log(f"No transcript available for video {video_id}: {e}")
                     logging.info(f"No transcript available for video {video_id} (Enhanced method: {str(e)})")
                     return None, failure_info  # Don't try legacy method if transcript is simply not available
@@ -1648,9 +1692,8 @@ def process_url(url: str, force: bool) -> None:
                                     logging.info(
                                         f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
                                     )
-                                    # Add to pending file if blocked by YouTube
-                                    if failure_info[0] == "blocked":
-                                        add_url_to_pending_file(video_url)
+                                    if should_queue_transcript_pending(failure_info):
+                                        add_url_to_pending_file(video_url, video_id)
                                 else:
                                     logging.info(
                                         f"No transcript available for video {video_id} (common for music videos)"
@@ -1710,9 +1753,8 @@ def process_url(url: str, force: bool) -> None:
                                 logging.info(
                                     f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
                                 )
-                                # Add to pending file if blocked by YouTube
-                                if failure_info[0] == "blocked":
-                                    add_url_to_pending_file(video_url)
+                                if should_queue_transcript_pending(failure_info):
+                                    add_url_to_pending_file(video_url, video_id)
                             else:
                                 logging.info(
                                     f"No transcript available for video {video_id} (common for music videos)"
