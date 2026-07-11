@@ -36,6 +36,8 @@ dynamic = ["version"]
 
 [project.scripts]
 ref = "ref_cli.cli:main"
+ref-fix-x-titles = "ref_cli.fix_x_titles:main"
+ref-fix-reddit-titles = "ref_cli.fix_reddit_titles:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

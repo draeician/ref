@@ -5,14 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.10] - 2026-07-10
+
+### Added
+- Cache X and Reddit oEmbed JSON under `transcripts/ombed` (create on demand); skip the network when a cache file exists, cap live oEmbed calls at 10/minute, use a browser User-Agent, and treat HTTP 429 as a soft failure without JSON-decoding HTML error pages (`src/ref_cli/cli.py`)
+- `ref-fix-x-titles` and `ref-fix-reddit-titles`: scan `references.md`, re-fetch titles, and rewrite only the title field in place on mismatch (dry-run by default; `--apply` / `--limit` / `--file`) (`src/ref_cli/title_fixer.py`, `src/ref_cli/fix_x_titles.py`, `src/ref_cli/fix_reddit_titles.py`)
+- `ref --help` epilog pointing at the title-repair helper scripts
+
 ## [1.6.9] - 2026-07-10
 
 ### Fixed
 - Reddit title capture: reject bot-challenge interstitial titles (`Reddit - Please wait for verification`) and fall back to `https://www.reddit.com/oembed` (including `redd.it` short links) so post titles are recorded correctly (`src/ref_cli/cli.py`)
 - X/Twitter title capture: reject generic profile-card `og:title` / `twitter:title` values such as `Name (@handle) on X`, then use a quoted `<title>` when present or the `publish.twitter.com` oEmbed API so status URLs record the post text instead of the profile label (`src/ref_cli/cli.py`)
-
-### Added
-- Cache X and Reddit oEmbed JSON under `transcripts/ombed` (create on demand); skip the network when a cache file exists, cap live oEmbed calls at 10/minute, use a browser User-Agent, and treat HTTP 429 as a soft failure without JSON-decoding HTML error pages (`src/ref_cli/cli.py`)
 
 ## [1.6.8] - 2026-05-13
 

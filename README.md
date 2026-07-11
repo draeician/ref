@@ -56,10 +56,25 @@ General pages are fetched with `lynx` and parsed for `<title>`, Open Graph, Twit
 
 X and Reddit oEmbed responses are cached under `transcripts/ombed` (created on first use). Cached URLs are never re-fetched. Live oEmbed calls share a 10 requests/minute limit and use a browser `User-Agent`; HTTP 429 responses are handled without attempting JSON parse.
 
+### Repair titles in references.md
+
+Two separate utilities re-check stored titles against a fresh fetch and rewrite **only** the title field in place (same line order and other fields). Both default to dry-run; pass `--apply` to write.
+
+```bash
+ref-fix-x-titles                 # dry-run for x.com / twitter.com
+ref-fix-x-titles --apply         # write updates
+ref-fix-x-titles --limit 10      # process at most 10 matching rows
+
+ref-fix-reddit-titles            # dry-run for reddit.com / redd.it
+ref-fix-reddit-titles --apply
+ref-fix-reddit-titles --file ~/references/references.md --limit 25
+```
+
 ### Other Options
 
 - `ref <url>` - Process a single URL
 - `ref --file <file>` - Process URLs from a file
 - `ref --search <term>` - Search across all fields
 - `ref --transcript <url>` - Update transcript for a YouTube video
+- `ref-fix-x-titles` / `ref-fix-reddit-titles` - Repair stored X or Reddit titles in `references.md` (see above)
 

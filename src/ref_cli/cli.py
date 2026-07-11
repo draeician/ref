@@ -1120,7 +1120,17 @@ def parse_arguments() -> argparse.Namespace:
     Returns:
         argparse.Namespace: The parsed command-line arguments.
     """
-    parser = argparse.ArgumentParser(description="Add or search URL entries in markdown files.")
+    parser = argparse.ArgumentParser(
+        description="Add or search URL entries in markdown files.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Related helper scripts:
+              ref-fix-x-titles       Repair X/Twitter titles in references.md
+                                    (dry-run by default; pass --apply to write)
+              ref-fix-reddit-titles  Repair Reddit titles in references.md
+                                    (dry-run by default; pass --apply to write)
+        """),
+    )
     parser.add_argument("url", nargs='?', default=None, help="URL to be added or YouTube video ID (11 characters).")
     parser.add_argument("-f", "--force", action="store_true", help="Force addition even if URL already exists.")
     parser.add_argument("-e", "--edit", action="store_true", help="Open markdown file for editing.")
