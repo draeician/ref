@@ -16,6 +16,8 @@ import warnings
 import logging
 import yaml
 import json
+import hashlib
+from collections import deque
 from datetime import datetime
 import textwrap
 import fnmatch
@@ -29,7 +31,7 @@ import time
 import select
 from urllib3.exceptions import InsecureRequestWarning
 import importlib.resources
-from typing import Optional, Tuple
+from typing import Deque, Optional, Tuple
 from ref_cli import __version__
 from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
@@ -233,6 +235,14 @@ BASE = os.path.expanduser(config['paths']['references'])
 UNIFIED = os.path.join(BASE, "references.md")
 TRANSCRIPTS_DIR = os.path.expanduser(config['paths']['transcripts'])
 TRANSCRIPT_PENDING_FILE = os.path.join(BASE, "transcripts/transcript-pending.md")
+# Disk cache for X/Reddit oEmbed JSON (avoid re-hitting rate-limited public endpoints)
+OEMBED_CACHE_DIR = os.path.join(TRANSCRIPTS_DIR, "ombed")
+OEMBED_MAX_REQUESTS_PER_MINUTE = 10
+OEMBED_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+_oembed_request_times: Deque[float] = deque()
 
 # Copy all functions from original file
 def ensure_config_exists():
@@ -568,23 +578,113 @@ def _x_title_from_oembed_candidate(cleaned: Optional[str]) -> Optional[str]:
     return cleaned
 
 
+def _ensure_oembed_cache_dir() -> None:
+    """Create ``transcripts/ombed`` if it does not exist."""
+    os.makedirs(OEMBED_CACHE_DIR, exist_ok=True)
+
+
+def _oembed_cache_path(url: str) -> str:
+    """Return the on-disk cache path for a post URL's oEmbed JSON."""
+    digest = hashlib.sha256(url.encode('utf-8')).hexdigest()
+    return os.path.join(OEMBED_CACHE_DIR, f"{digest}.json")
+
+
+def _load_oembed_cache(url: str) -> Optional[dict]:
+    """Load cached oEmbed JSON for ``url``, or ``None`` if missing/unreadable."""
+    path = _oembed_cache_path(url)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            return payload
+    except (OSError, ValueError, TypeError) as e:
+        logging.debug("oEmbed cache read failed for %s: %s", url, e)
+    return None
+
+
+def _save_oembed_cache(url: str, payload: dict) -> None:
+    """Persist oEmbed JSON under ``transcripts/ombed``."""
+    try:
+        _ensure_oembed_cache_dir()
+        with open(_oembed_cache_path(url), 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    except (OSError, TypeError) as e:
+        logging.debug("oEmbed cache write failed for %s: %s", url, e)
+
+
+def _wait_for_oembed_rate_limit() -> None:
+    """Block until an oEmbed request can be made without exceeding 10/min."""
+    now = time.monotonic()
+    while _oembed_request_times and now - _oembed_request_times[0] >= 60.0:
+        _oembed_request_times.popleft()
+    if len(_oembed_request_times) >= OEMBED_MAX_REQUESTS_PER_MINUTE:
+        sleep_for = 60.0 - (now - _oembed_request_times[0]) + 0.05
+        if sleep_for > 0:
+            logging.debug("oEmbed rate limit: sleeping %.2fs before next request", sleep_for)
+            time.sleep(sleep_for)
+        now = time.monotonic()
+        while _oembed_request_times and now - _oembed_request_times[0] >= 60.0:
+            _oembed_request_times.popleft()
+    _oembed_request_times.append(time.monotonic())
+
+
+def _fetch_oembed_json(endpoint: str, url: str, params: dict) -> Optional[dict]:
+    """Return oEmbed JSON for ``url``, using disk cache and a 10 req/min cap.
+
+    Cache hits never hit the network. On miss, waits for the shared rate limit,
+    checks HTTP status before parsing (429 often returns HTML), and caches
+    successful JSON payloads under ``transcripts/ombed``.
+    """
+    cached = _load_oembed_cache(url)
+    if cached is not None:
+        logging.debug("oEmbed cache hit for %s", url)
+        return cached
+
+    _wait_for_oembed_rate_limit()
+    try:
+        response = requests.get(
+            endpoint,
+            params=params,
+            timeout=6,
+            headers={'User-Agent': OEMBED_BROWSER_UA},
+        )
+        if response.status_code == 429:
+            logging.debug("oEmbed rate limited (HTTP 429) for %s", url)
+            return None
+        if response.status_code != 200:
+            logging.debug("oEmbed HTTP %s for %s", response.status_code, url)
+            return None
+        content_type = (response.headers.get('Content-Type') or '').lower()
+        body = response.text.lstrip()
+        if 'json' not in content_type and not body.startswith('{') and not body.startswith('['):
+            logging.debug("oEmbed non-JSON body for %s (Content-Type=%s)", url, content_type)
+            return None
+        payload = response.json()
+        if isinstance(payload, dict):
+            _save_oembed_cache(url, payload)
+            return payload
+    except (requests.RequestException, ValueError, TypeError) as e:
+        logging.debug("oEmbed fetch failed for %s: %s", url, e)
+    return None
+
+
 def _get_x_oembed_title(url: str) -> Optional[str]:
     """Fetch a post title from the Twitter/X publish oEmbed API.
 
     Uses ``https://publish.twitter.com/oembed.json``. Prefers the JSON ``title``
-    field, then blockquote text from the embed HTML.
+    field, then blockquote text from the embed HTML. Results are cached under
+    ``transcripts/ombed``.
     """
+    payload = _fetch_oembed_json(
+        'https://publish.twitter.com/oembed.json',
+        url,
+        {'url': url, 'omit_script': 'true'},
+    )
+    if not payload:
+        return None
     try:
-        response = requests.get(
-            'https://publish.twitter.com/oembed.json',
-            params={'url': url, 'omit_script': 'true'},
-            timeout=6,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
         raw_title = payload.get('title')
         if raw_title:
             cleaned = _clean_x_title(str(raw_title))
@@ -599,7 +699,7 @@ def _get_x_oembed_title(url: str) -> Optional[str]:
                 cleaned = _x_title_from_oembed_candidate(cleaned)
                 if cleaned:
                     return cleaned
-    except (requests.RequestException, ValueError, TypeError) as e:
+    except (ValueError, TypeError) as e:
         logging.debug("oEmbed title unavailable for %s: %s", url, e)
     return None
 
@@ -608,19 +708,17 @@ def _get_reddit_oembed_title(url: str) -> Optional[str]:
     """Fetch a post title from the Reddit oEmbed API.
 
     Uses ``https://www.reddit.com/oembed``. Prefers the JSON ``title`` field,
-    then the first link text inside the embed HTML card.
+    then the first link text inside the embed HTML card. Results are cached
+    under ``transcripts/ombed``.
     """
+    payload = _fetch_oembed_json(
+        'https://www.reddit.com/oembed',
+        url,
+        {'url': url},
+    )
+    if not payload:
+        return None
     try:
-        response = requests.get(
-            'https://www.reddit.com/oembed',
-            params={'url': url},
-            timeout=6,
-            headers={
-                'User-Agent': 'ref-cli:title-fetch:1.0',
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
         raw_title = payload.get('title')
         if raw_title:
             cleaned = _reddit_title_from_html_raw(str(raw_title))
@@ -635,7 +733,7 @@ def _get_reddit_oembed_title(url: str) -> Optional[str]:
                 cleaned = _reddit_title_from_html_raw(link.get_text(separator=' ', strip=True))
                 if cleaned:
                     return cleaned
-    except (requests.RequestException, ValueError, TypeError) as e:
+    except (ValueError, TypeError) as e:
         logging.debug("Reddit oEmbed title unavailable for %s: %s", url, e)
     return None
 
@@ -649,9 +747,10 @@ def get_title_from_url(url: str) -> str:
 
     - Rumble: prefer ``og:title``, then ``h1``.
     - X / Twitter: prefer meta tags, reject noscript and profile-card placeholders,
-      then fall back to the publish.twitter.com oEmbed API.
+      then fall back to the publish.twitter.com oEmbed API (cached under
+      ``transcripts/ombed``, capped at 10 requests/minute).
     - Reddit: reject bot-challenge verification titles, then fall back to the
-      Reddit oEmbed API (``reddit.com`` / ``redd.it``).
+      Reddit oEmbed API (``reddit.com`` / ``redd.it``; same cache and rate limit).
 
     Args:
         url (str): The URL of the webpage.

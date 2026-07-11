@@ -54,6 +54,8 @@ General pages are fetched with `lynx` and parsed for `<title>`, Open Graph, Twit
 - **Reddit** (`reddit.com`, `redd.it`): reject bot-challenge titles such as `Please wait for verification`, then fall back to the Reddit oEmbed API.
 - **Rumble**: prefer `og:title`, then `h1`.
 
+X and Reddit oEmbed responses are cached under `transcripts/ombed` (created on first use). Cached URLs are never re-fetched. Live oEmbed calls share a 10 requests/minute limit and use a browser `User-Agent`; HTTP 429 responses are handled without attempting JSON parse.
+
 ### Other Options
 
 - `ref <url>` - Process a single URL

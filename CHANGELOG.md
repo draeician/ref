@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reddit title capture: reject bot-challenge interstitial titles (`Reddit - Please wait for verification`) and fall back to `https://www.reddit.com/oembed` (including `redd.it` short links) so post titles are recorded correctly (`src/ref_cli/cli.py`)
 - X/Twitter title capture: reject generic profile-card `og:title` / `twitter:title` values such as `Name (@handle) on X`, then use a quoted `<title>` when present or the `publish.twitter.com` oEmbed API so status URLs record the post text instead of the profile label (`src/ref_cli/cli.py`)
 
+### Added
+- Cache X and Reddit oEmbed JSON under `transcripts/ombed` (create on demand); skip the network when a cache file exists, cap live oEmbed calls at 10/minute, use a browser User-Agent, and treat HTTP 429 as a soft failure without JSON-decoding HTML error pages (`src/ref_cli/cli.py`)
+
 ## [1.6.8] - 2026-05-13
 
 ### Fixed

@@ -4,6 +4,8 @@ Covers generic pages, X/Twitter (meta tags, profile/noscript placeholders,
 oEmbed fallback), and Reddit (verification placeholders, oEmbed fallback).
 """
 
+import json
+import os
 import subprocess
 
 import requests
@@ -20,6 +22,14 @@ def _patch_subprocess(monkeypatch, html):
         raise AssertionError('unexpected subprocess.run: %r' % (cmd,))
 
     monkeypatch.setattr(cli.subprocess, 'run', fake_run)
+
+
+def _patch_oembed_cache(monkeypatch, tmp_path):
+    """Point oEmbed disk cache at a temp dir and clear the in-memory rate window."""
+    cache_dir = tmp_path / 'ombed'
+    monkeypatch.setattr(cli, 'OEMBED_CACHE_DIR', str(cache_dir))
+    cli._oembed_request_times.clear()
+    return cache_dir
 
 
 def test_x_com_og_title(monkeypatch):
@@ -73,15 +83,15 @@ def test_generic_example_com_unchanged(monkeypatch):
     assert cli.get_title_from_url('https://example.com/page') == 'Hello'
 
 
-def test_x_com_oembed_fallback_when_html_unusable(monkeypatch):
+def test_x_com_oembed_fallback_when_html_unusable(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>X</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "Title from oEmbed API"}'
 
         def json(self):
             return {'title': 'Title from oEmbed API'}
@@ -95,7 +105,8 @@ def test_x_com_oembed_fallback_when_html_unusable(monkeypatch):
     assert cli.get_title_from_url('https://x.com/user/status/501') == 'Title from oEmbed API'
 
 
-def test_x_com_placeholder_og_title_falls_through_to_oembed(monkeypatch):
+def test_x_com_placeholder_og_title_falls_through_to_oembed(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = (
         '<html><head>'
         '<meta property="og:title" content="(JavaScript is not available.)"/>'
@@ -106,9 +117,8 @@ def test_x_com_placeholder_og_title_falls_through_to_oembed(monkeypatch):
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "Real tweet title"}'
 
         def json(self):
             return {'title': 'Real tweet title'}
@@ -117,7 +127,8 @@ def test_x_com_placeholder_og_title_falls_through_to_oembed(monkeypatch):
     assert cli.get_title_from_url('https://x.com/i/status/2052093277864612168') == 'Real tweet title'
 
 
-def test_x_com_placeholder_only_no_oembed_returns_no_title(monkeypatch):
+def test_x_com_placeholder_only_no_oembed_returns_no_title(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = (
         '<html><head>'
         '<meta property="og:title" content="JavaScript is not available."/>'
@@ -143,15 +154,15 @@ def test_x_com_og_title_skips_oembed(monkeypatch):
     assert cli.get_title_from_url('https://x.com/user/status/502') == 'From HTML'
 
 
-def test_x_com_oembed_empty_title_uses_blockquote_html(monkeypatch):
+def test_x_com_oembed_empty_title_uses_blockquote_html(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>X</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "", "html": "<blockquote>"}'
 
         def json(self):
             return {
@@ -163,16 +174,16 @@ def test_x_com_oembed_empty_title_uses_blockquote_html(monkeypatch):
     assert cli.get_title_from_url('https://x.com/user/status/503') == 'Hello from blockquote'
 
 
-def test_twitter_com_uses_oembed_with_same_url_param(monkeypatch):
+def test_twitter_com_uses_oembed_with_same_url_param(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>X</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
     seen = {}
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "oEmbed ok"}'
 
         def json(self):
             return {'title': 'oEmbed ok'}
@@ -187,7 +198,8 @@ def test_twitter_com_uses_oembed_with_same_url_param(monkeypatch):
     assert seen['tweet_url'] == tweet
 
 
-def test_x_com_oembed_failure_returns_no_title(monkeypatch):
+def test_x_com_oembed_failure_returns_no_title(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>X</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
 
@@ -198,7 +210,8 @@ def test_x_com_oembed_failure_returns_no_title(monkeypatch):
     assert cli.get_title_from_url('https://x.com/user/status/504') == 'No title found'
 
 
-def test_x_com_profile_og_title_falls_through_to_oembed(monkeypatch):
+def test_x_com_profile_og_title_falls_through_to_oembed(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = (
         '<html><head>'
         '<meta property="og:title" content="GitHub Projects Community (@GithubProjects) on X"/>'
@@ -210,9 +223,8 @@ def test_x_com_profile_og_title_falls_through_to_oembed(monkeypatch):
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "CodeNomad"}'
 
         def json(self):
             return {
@@ -269,15 +281,15 @@ def test_reddit_og_title(monkeypatch):
     ) == 'Real Reddit post'
 
 
-def test_reddit_verification_title_falls_through_to_oembed(monkeypatch):
+def test_reddit_verification_title_falls_through_to_oembed(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "New GPT-5.6 Sol reverse engineered its own app"}'
 
         def json(self):
             return {'title': 'New GPT-5.6 Sol reverse engineered its own app'}
@@ -285,6 +297,7 @@ def test_reddit_verification_title_falls_through_to_oembed(monkeypatch):
     def fake_get(url, params=None, **_kwargs):
         assert 'reddit.com/oembed' in url
         assert params.get('url', '').startswith('https://www.reddit.com/')
+        assert 'Mozilla' in _kwargs.get('headers', {}).get('User-Agent', '')
         return Resp()
 
     monkeypatch.setattr(cli.requests, 'get', fake_get)
@@ -293,7 +306,8 @@ def test_reddit_verification_title_falls_through_to_oembed(monkeypatch):
     ) == 'New GPT-5.6 Sol reverse engineered its own app'
 
 
-def test_reddit_verification_placeholder_og_falls_through_to_oembed(monkeypatch):
+def test_reddit_verification_placeholder_og_falls_through_to_oembed(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = (
         '<html><head>'
         '<meta property="og:title" content="Reddit - Please wait for verification"/>'
@@ -304,9 +318,8 @@ def test_reddit_verification_placeholder_og_falls_through_to_oembed(monkeypatch)
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "From oEmbed"}'
 
         def json(self):
             return {'title': 'From oEmbed'}
@@ -317,15 +330,15 @@ def test_reddit_verification_placeholder_og_falls_through_to_oembed(monkeypatch)
     ) == 'From oEmbed'
 
 
-def test_reddit_oembed_empty_title_uses_card_link(monkeypatch):
+def test_reddit_oembed_empty_title_uses_card_link(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": ""}'
 
         def json(self):
             return {
@@ -344,7 +357,8 @@ def test_reddit_oembed_empty_title_uses_card_link(monkeypatch):
     ) == 'Title from card'
 
 
-def test_reddit_oembed_failure_returns_no_title(monkeypatch):
+def test_reddit_oembed_failure_returns_no_title(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
 
@@ -357,16 +371,16 @@ def test_reddit_oembed_failure_returns_no_title(monkeypatch):
     ) == 'No title found'
 
 
-def test_redd_it_short_url_uses_oembed(monkeypatch):
+def test_redd_it_short_url_uses_oembed(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
     html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
     _patch_subprocess(monkeypatch, html)
     seen = {}
 
     class Resp:
         status_code = 200
-
-        def raise_for_status(self):
-            pass
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "Short link title"}'
 
         def json(self):
             return {'title': 'Short link title'}
@@ -379,3 +393,90 @@ def test_redd_it_short_url_uses_oembed(monkeypatch):
     short = 'https://redd.it/1usossd'
     assert cli.get_title_from_url(short) == 'Short link title'
     assert seen['post_url'] == short
+
+
+def test_oembed_cache_hit_skips_network(monkeypatch, tmp_path):
+    cache_dir = _patch_oembed_cache(monkeypatch, tmp_path)
+    html = '<html><head><title>X</title></head><body></body></html>'
+    _patch_subprocess(monkeypatch, html)
+    post = 'https://x.com/user/status/9001'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    with open(cli._oembed_cache_path(post), 'w', encoding='utf-8') as f:
+        json.dump({'title': 'Cached title'}, f)
+
+    def boom(*_a, **_k):
+        raise AssertionError('network must not be used when oEmbed cache exists')
+
+    monkeypatch.setattr(cli.requests, 'get', boom)
+    assert cli.get_title_from_url(post) == 'Cached title'
+
+
+def test_oembed_writes_cache_on_fetch(monkeypatch, tmp_path):
+    cache_dir = _patch_oembed_cache(monkeypatch, tmp_path)
+    html = '<html><head><title>X</title></head><body></body></html>'
+    _patch_subprocess(monkeypatch, html)
+    post = 'https://x.com/user/status/9002'
+
+    class Resp:
+        status_code = 200
+        headers = {'Content-Type': 'application/json'}
+        text = '{"title": "Fresh title"}'
+
+        def json(self):
+            return {'title': 'Fresh title'}
+
+    monkeypatch.setattr(cli.requests, 'get', lambda *_a, **_k: Resp())
+    assert cli.get_title_from_url(post) == 'Fresh title'
+    assert os.path.isdir(str(cache_dir))
+    with open(cli._oembed_cache_path(post), encoding='utf-8') as f:
+        assert json.load(f)['title'] == 'Fresh title'
+
+
+def test_oembed_429_does_not_parse_html(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
+    html = '<html><head><title>Reddit - Please wait for verification</title></head><body></body></html>'
+    _patch_subprocess(monkeypatch, html)
+
+    class Resp:
+        status_code = 429
+        headers = {'Content-Type': 'text/html'}
+        text = (
+            "<html>We're sorry, but you appear to be a bot and we've seen too many "
+            "requests from you lately... please wait 6 second(s) and try again.</html>"
+        )
+
+        def json(self):
+            raise AssertionError('must not JSON-decode 429 HTML body')
+
+    monkeypatch.setattr(cli.requests, 'get', lambda *_a, **_k: Resp())
+    assert cli.get_title_from_url(
+        'https://www.reddit.com/r/test/comments/1/slug/'
+    ) == 'No title found'
+
+
+def test_oembed_rate_limit_waits_before_eleventh_request(monkeypatch, tmp_path):
+    _patch_oembed_cache(monkeypatch, tmp_path)
+    # Simulate 10 requests already made in the current minute.
+    now = 1000.0
+    for i in range(10):
+        cli._oembed_request_times.append(now - 30.0 + i * 0.01)
+
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        # Advance the "clock" past the oldest request so the wait completes.
+        cli._oembed_request_times.clear()
+
+    clock = {'t': now}
+
+    def fake_monotonic():
+        return clock['t']
+
+    monkeypatch.setattr(cli.time, 'sleep', fake_sleep)
+    monkeypatch.setattr(cli.time, 'monotonic', fake_monotonic)
+
+    cli._wait_for_oembed_rate_limit()
+    assert sleeps, 'expected a sleep when 10 requests already recorded'
+    assert sleeps[0] > 0
+    assert len(cli._oembed_request_times) == 1
