@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 from ref_cli.cli import UNIFIED, get_title_from_url
+from ref_cli.completion import enable_argcomplete, files_completer
 from ref_cli.utils.colors import dim, error, info, success, warning
 
 UrlPredicate = Callable[[str], bool]
@@ -194,11 +195,12 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
     from ref_cli import __version__
 
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument(
+    file_arg = parser.add_argument(
         '--file',
         default=UNIFIED,
         help=f'Path to references.md (default: {UNIFIED})',
     )
+    file_arg.completer = files_completer()  # type: ignore[attr-defined]
     parser.add_argument(
         '--apply',
         action='store_true',
@@ -225,6 +227,8 @@ def run_repair_cli(
 ) -> int:
     """Parse args and run a title repair pass. Returns a process exit code."""
     parser = build_arg_parser(description)
+    # Shell tab completion (no-op unless _ARGCOMPLETE is set by the shell)
+    enable_argcomplete(parser)
     args = parser.parse_args(argv)
     path = os.path.expanduser(args.file)
     if not os.path.isfile(path):

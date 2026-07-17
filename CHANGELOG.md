@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `ref-advisors`: scan `references.md` and rank trusted advisors (YouTube channels, X handles, web/blog authors) by save frequency; markdown/json/csv output (`src/ref_cli/advisors.py`)
+- Shell tab completion via `argcomplete` for `ref`, `ref-advisors`, `ref-fix-x-titles`, and `ref-fix-reddit-titles` (options + `FilesCompleter` on path flags). Enable with `eval "$(register-python-argcomplete <cmd)"` in bash/zsh (`src/ref_cli/completion.py`)
+- Versioned `references.md` header (`# ref-references version=2`) with **layered** auto-migrate on `ref` / `ref-enrich` (1→2→…→current; path recorded in header) (`src/ref_cli/references_format.py`)
+- Hybrid enrichment: thin `@meta|category|role|channel_id` on rows + full cards under `enrichment/youtube/videos|channels/*.json`; `ref-enrich` CLI (YouTube API or yt-dlp, link mining; default `--limit 50`) (`src/ref_cli/enrichment.py`, `src/ref_cli/enrich_cli.py`)
+- `ref-advisors --role` / `--exclude-role` using enriched roles (e.g. drop `music`)
+
 ## [1.6.10] - 2026-07-10
 
 ### Added

@@ -4,3 +4,4 @@ beautifulsoup4
 python-dotenv
 colorama>=0.4.6
 youtube-transcript-api
+argcomplete>=2.0.0

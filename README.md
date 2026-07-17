@@ -8,6 +8,60 @@ A command-line tool for recording and managing URL references, with special supp
 pipx install ref-cli
 ```
 
+### Shell tab completion (bash / zsh)
+
+After installing (pipx or editable), enable completion once in your shell — same pattern as `ol` / `od`:
+
+```bash
+# bash — add to ~/.bashrc
+eval "$(register-python-argcomplete ref)"
+eval "$(register-python-argcomplete ref-advisors)"
+eval "$(register-python-argcomplete ref-enrich)"
+eval "$(register-python-argcomplete ref-fix-x-titles)"
+eval "$(register-python-argcomplete ref-fix-reddit-titles)"
+
+# zsh — add to ~/.zshrc (after compinit)
+eval "$(register-python-argcomplete ref)"
+eval "$(register-python-argcomplete ref-advisors)"
+eval "$(register-python-argcomplete ref-enrich)"
+eval "$(register-python-argcomplete ref-fix-x-titles)"
+eval "$(register-python-argcomplete ref-fix-reddit-titles)"
+```
+
+Then reload the shell (or `source` the rc file). Tab completion covers:
+
+- CLI flags and choice values (`--platform`, `--format`, `--debug`, …)
+- Filesystem paths for `--file` / `-o` / `--output`
+
+### Enrichment (YouTube meta cards + categories)
+
+Hybrid storage (A + B):
+
+1. **Thin fields on each row** after `@meta`: `category|role|channel_id`  
+2. **Full cards** under `~/references/enrichment/youtube/videos/<id>.json` and `…/channels/<id>.json`
+
+`references.md` starts with a version header. Running `ref` or `ref-enrich` auto-migrates older files (with a gzipped `.bak-*.gz` backup by default).
+
+```bash
+# Create enrichment dirs if needed, fetch a batch of YouTube cards, stamp @meta
+# Default --limit is 50 (good daily batch). Use --limit 0 for no cap.
+ref-enrich --file ~/references/references.md
+
+# Prefer yt-dlp over YouTube Data API; smaller batch
+ref-enrich --prefer-ytdlp --limit 10
+
+# Dry-run work list
+ref-enrich --dry-run
+
+# Advisors without music libraries (after enrichment)
+ref-advisors --file ~/references/references.md --exclude-role music --min-count 3
+ref-advisors --role advisor --platform youtube
+```
+
+Fetch order: YouTube Data API when `YOUTUBE_API_KEY` is set, otherwise **yt-dlp**. Descriptions are scanned for GitHub, Amazon, music, Patreon, Discord links.
+
+**Format upgrades:** `references.md` is versioned. Unversioned files are treated as v1. On `ref` / `ref-enrich`, migrations run **in order** (1→2→…→current) so an old archive layers every hop. The header records `# migration-path: 1→2; …`. New schema versions only add a step in `MIGRATION_STEPS` (`src/ref_cli/references_format.py`).
+
 ## Configuration
 
 Configuration is stored in `~/.config/ref/config.yaml`. The default configuration includes paths and removable URL parameters. You can customize:
@@ -70,11 +124,32 @@ ref-fix-reddit-titles --apply
 ref-fix-reddit-titles --file ~/references/references.md --limit 25
 ```
 
+### Trusted advisors (YouTube + X + web/blogs)
+
+Scan `references.md` and rank people/channels/sites by how often you saved their content. Streaming parse, so large reference files are fine. Use the list to decide who to pull X/YouTube transcripts or blog archives from for voice modeling.
+
+```bash
+ref-advisors --file ./references.md              # markdown on stdout (min 2 saves)
+ref-advisors --file ./references.md --min-count 5 --top 40
+ref-advisors --file ./references.md --platform youtube -o advisors.md
+ref-advisors --file ./references.md --platform x --format json -o advisors.json
+ref-advisors --file ./references.md --platform web --min-count 2 -o blog-advisors.md
+ref-advisors --file ./references.md --format csv -o advisors.csv
+```
+
+- **YouTube**: groups by channel/uploader name (pipe characters in names are handled).
+- **X**: groups by `@handle` from the URL; display name is taken from titles like `Name on X: "..."`.
+- **Web/blogs**: Medium authors (`@handle`, `author.medium.com`, or `| by Author |` titles), Substack authors, and other sites you return to (by domain). Skips aggregators (Reddit, GitHub, Amazon, arXiv, etc.).
+- Status messages go to stderr; the report body goes to stdout (or `-o`).
+
 ### Other Options
 
 - `ref <url>` - Process a single URL
 - `ref --file <file>` - Process URLs from a file
 - `ref --search <term>` - Search across all fields
 - `ref --transcript <url>` - Update transcript for a YouTube video
+- `ref --backup` - Gzip backup of `references.md` (default); `ref --backup --nocompress` for a plain copy
 - `ref-fix-x-titles` / `ref-fix-reddit-titles` - Repair stored X or Reddit titles in `references.md` (see above)
+- `ref-advisors` - Rank trusted YouTube channels, X handles, and web/blog authors from `references.md`
+- `ref-enrich` - YouTube meta cards + `@meta` categories (migrate backups gzip by default; `--nocompress` for plain)
 

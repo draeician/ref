@@ -30,7 +30,8 @@ dependencies = [
     "setuptools>=45.0.0",
     "colorama>=0.4.6",
     "yt-dlp>=2023.12.30",
-    "youtube-transcript-api>=1.1.0"
+    "youtube-transcript-api>=1.1.0",
+    "argcomplete>=2.0.0",
 ]
 dynamic = ["version"]
 
@@ -38,6 +39,8 @@ dynamic = ["version"]
 ref = "ref_cli.cli:main"
 ref-fix-x-titles = "ref_cli.fix_x_titles:main"
 ref-fix-reddit-titles = "ref_cli.fix_reddit_titles:main"
+ref-advisors = "ref_cli.advisors:main"
+ref-enrich = "ref_cli.enrich_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -1,6 +1,8 @@
 paths:
   references: ~/references
   transcripts: ~/references/transcripts
+  # Full meta cards (YouTube videos/channels, later other platforms)
+  enrichment: ~/references/enrichment
 removable_keys:
   - utm_source
   - utm_medium

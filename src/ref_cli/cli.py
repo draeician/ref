@@ -1120,6 +1120,8 @@ def parse_arguments() -> argparse.Namespace:
     Returns:
         argparse.Namespace: The parsed command-line arguments.
     """
+    from ref_cli.completion import enable_argcomplete, files_completer
+
     parser = argparse.ArgumentParser(
         description="Add or search URL entries in markdown files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1129,6 +1131,8 @@ def parse_arguments() -> argparse.Namespace:
                                     (dry-run by default; pass --apply to write)
               ref-fix-reddit-titles  Repair Reddit titles in references.md
                                     (dry-run by default; pass --apply to write)
+              ref-advisors          Rank trusted YouTube/X/web advisors from references.md
+              ref-enrich            Fetch YouTube meta cards + stamp category/role on rows
         """),
     )
     parser.add_argument("url", nargs='?', default=None, help="URL to be added or YouTube video ID (11 characters).")
@@ -1137,7 +1141,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("-d", "--debug", type=int, choices=[1, 2, 3], help="Set the debug level: 1 for INFO, 2 for WARNING, 3 for DEBUG.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output for detailed operation information.")
     parser.add_argument("--integrity", action="store_true", help="Check the integrity of log files.")
-    parser.add_argument("-b", "--backup", action="store_true", help="Create a backup of the references.md file.")
+    parser.add_argument(
+        "-b", "--backup",
+        action="store_true",
+        help="Create a gzip-compressed backup of references.md (use --nocompress for a plain copy).",
+    )
+    parser.add_argument(
+        "--nocompress",
+        action="store_true",
+        help="With --backup (or format migrate), write an uncompressed backup instead of .gz.",
+    )
     parser.add_argument("--search-url", help="Search entries by URL.")
     parser.add_argument("--search-title", help="Search entries by title.")
     parser.add_argument("--search-date", help="Search entries by date.")
@@ -1145,8 +1158,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--search-uploader", help="Search entries by uploader.")
     parser.add_argument("--search", help="Search entries across all fields (URL, title, date, source, uploader).")
     parser.add_argument("--transcript", action="store_true", help="Update the transcript for an existing YouTube entry.")
-    parser.add_argument("--file", help="Read URLs from a file (one URL per line)")
+    file_arg = parser.add_argument("--file", help="Read URLs from a file (one URL per line)")
+    file_arg.completer = files_completer()  # type: ignore[attr-defined]
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    # Shell tab completion (no-op unless _ARGCOMPLETE is set by the shell)
+    enable_argcomplete(parser)
     args = parser.parse_args()
     if args.edit:
         os.system(f"vim {UNIFIED}")
@@ -2082,29 +2098,48 @@ def reference_has_transcript(url: str) -> bool:
                     return True
     return False
 
-def create_backup(file_path: str) -> None:
+def create_backup(file_path: str, *, compress: bool = True) -> Optional[str]:
     """
-    Creates a backup of the specified file.
-    
+    Create a timestamped backup of ``file_path`` (gzip by default).
+
     Args:
-        file_path (str): The path to the file that needs to be backed up.
+        file_path: Path to back up (typically references.md).
+        compress: If True (default), write ``.gz``; if False, plain copy.
+
+    Returns:
+        Backup path on success, or None on failure.
     """
-    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    backup_file_path = f"{os.path.dirname(file_path)}/{timestamp}_{os.path.basename(file_path)}"
+    from ref_cli.backup_util import backup_file
+
     try:
-        with open(file_path, 'r') as original_file:
-            with open(backup_file_path, 'w') as backup_file:
-                backup_file.write(original_file.read())
-        print(f"Backup created: {backup_file_path}")
-        logging.info(f"Backup created: {backup_file_path}")
+        backup_file_path = backup_file(
+            file_path,
+            compress=compress,
+            style='timestamp_prefix',
+        )
+        kind = 'gzip' if compress else 'plain'
+        print(success(f"Backup created ({kind}): {backup_file_path}"))
+        logging.info("Backup created (%s): %s", kind, backup_file_path)
+        return backup_file_path
     except Exception as e:
-        print(f"Error creating backup: {e}")
+        print(error(f"Error creating backup: {e}"))
         logging.error(f"Error creating backup: {e}")
+        return None
 
 def main():
     """Main function to handle the command-line interface for recording URLs."""
     ensure_path_exists(UNIFIED)
     ensure_path_exists(TRANSCRIPT_PENDING_FILE)
+    # Version header + schema upgrade when references.md is behind.
+    try:
+        from ref_cli.references_format import ensure_references_migrated
+        # Compress migrate backups by default; --nocompress applied after parse below
+        # if we re-migrate is N/A — migrate runs once here with gzip default.
+        migrate_msg = ensure_references_migrated(UNIFIED, backup=True, compress=True)
+        if migrate_msg:
+            print(info(migrate_msg))
+    except Exception as migrate_exc:  # noqa: BLE001 - never block capture
+        logging.warning("references.md migrate skipped: %s", migrate_exc)
     try:
         args = parse_arguments()
         
@@ -2137,7 +2172,7 @@ def main():
             else:
                 print(success("Integrity check passed. Log files are formatted correctly."))
         elif args.backup:
-            create_backup(UNIFIED)
+            create_backup(UNIFIED, compress=not args.nocompress)
         elif args.search:
             search_term = args.search
             all_fields = ["url", "title", "date", "source", "uploader"]
