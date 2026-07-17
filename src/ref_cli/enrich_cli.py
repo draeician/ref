@@ -16,9 +16,11 @@ from typing import List, Optional, Sequence, Tuple
 from ref_cli.completion import enable_argcomplete, files_completer
 from ref_cli.enrichment import (
     append_index,
+    classify_youtube_fetch_failure,
     ensure_enrichment_dirs,
     extract_youtube_video_id,
     fetch_youtube_video,
+    handle_unavailable_youtube_rows,
     load_video_card,
     save_video_card,
     update_channel_card,
@@ -175,12 +177,20 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     work_ids: List[str] = []
     for vid, rows in rows_by_video.items():
         if not args.force:
-            card_exists = os.path.isfile(video_card_path(base, vid))
+            # Already resolved as unavailable — skip re-fetch
+            if all(r.role == 'unavailable' for r in rows):
+                continue
+            card = load_video_card(base, vid)
+            if card and (
+                card.get('role') == 'unavailable'
+                or card.get('source') == 'unavailable'
+            ):
+                continue
+            card_exists = card is not None
             all_have_meta = all(r.has_meta for r in rows)
             if card_exists and all_have_meta:
                 continue
             if card_exists and args.skip_existing_cards:
-                # Still may need to stamp @meta from card
                 if all_have_meta:
                     continue
         work_ids.append(vid)
@@ -196,6 +206,13 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         file=sys.stderr,
     )
+    print(
+        dim(
+            'Unavailable/private videos: keep rows with transcripts '
+            '(@meta unavailable), remove rows without'
+        ),
+        file=sys.stderr,
+    )
 
     if args.dry_run:
         for vid in work_ids[:50]:
@@ -207,14 +224,21 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     fetched = 0
     reused = 0
     failed = 0
+    unavailable = 0
+    removed_rows = 0
+    kept_unavailable = 0
     updates: List[Tuple[int, ReferenceRow]] = []
+    delete_lines: List[int] = []
 
     for i, vid in enumerate(work_ids, start=1):
         print(info(f'[{i}/{len(work_ids)}] {vid}'), file=sys.stderr)
         card = None if args.force else load_video_card(base, vid)
         enrichment = None
+        category = ''
+        role = ''
+        channel_id = ''
 
-        if card and not args.force:
+        if card and not args.force and card.get('source') != 'unavailable':
             reused += 1
             category = card.get('category') or ''
             role = card.get('role') or ''
@@ -248,15 +272,34 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
                     file=sys.stderr,
                 )
             except Exception as exc:  # noqa: BLE001
-                failed += 1
-                append_index(
-                    base,
-                    platform='youtube',
-                    key=vid,
-                    status='error',
-                    detail=str(exc)[:200],
-                )
-                print(error(f'  failed: {exc}'), file=sys.stderr)
+                msg = str(exc)
+                reason = classify_youtube_fetch_failure(msg)
+                if reason:
+                    unavailable += 1
+                    u_updates, u_deletes, summary = handle_unavailable_youtube_rows(
+                        refs_path,
+                        vid,
+                        rows_by_video[vid],
+                        references_base=base,
+                        reason=reason,
+                        detail=msg[:300],
+                    )
+                    if not args.no_write_refs:
+                        updates.extend(u_updates)
+                        delete_lines.extend(u_deletes)
+                        kept_unavailable += len(u_updates)
+                        removed_rows += len(u_deletes)
+                    print(warning(f'  {summary}'), file=sys.stderr)
+                else:
+                    failed += 1
+                    append_index(
+                        base,
+                        platform='youtube',
+                        key=vid,
+                        status='error',
+                        detail=msg[:200],
+                    )
+                    print(error(f'  failed: {exc}'), file=sys.stderr)
                 continue
 
         if args.no_write_refs:
@@ -273,20 +316,32 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
             )
             updates.append((row.line_number, updated))
 
-    if updates and not args.no_write_refs:
-        n = apply_row_updates(refs_path, updates, backup=False)
-        print(success(f'Updated {n} references.md row(s) with @meta'), file=sys.stderr)
+    if (updates or delete_lines) and not args.no_write_refs:
+        n_upd, n_del = apply_row_updates(
+            refs_path,
+            updates,
+            backup=False,
+            delete_line_numbers=delete_lines,
+        )
+        print(
+            success(
+                f'references.md: updated {n_upd} row(s), removed {n_del} dead row(s)'
+            ),
+            file=sys.stderr,
+        )
     elif not args.no_write_refs:
         print(dim('No references.md row updates needed'), file=sys.stderr)
 
     print(
         info(
-            f'Done: fetched={fetched} reused_cards={reused} failed={failed} '
+            f'Done: fetched={fetched} reused_cards={reused} '
+            f'unavailable={unavailable} (kept_with_transcript={kept_unavailable}, '
+            f'removed={removed_rows}) failed={failed} '
             f'(format v{REFERENCES_FORMAT_VERSION})'
         ),
         file=sys.stderr,
     )
-    return 1 if failed and not fetched and not reused else 0
+    return 1 if failed and not fetched and not reused and not unavailable else 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

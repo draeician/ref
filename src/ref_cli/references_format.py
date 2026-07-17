@@ -509,14 +509,27 @@ def apply_row_updates(
     *,
     backup: bool = False,
     compress: bool = True,
-) -> int:
-    """Rewrite ``path`` applying ``(line_number, new_row)`` updates.
+    delete_line_numbers: Optional[Sequence[int]] = None,
+) -> Tuple[int, int]:
+    """Rewrite ``path`` applying row updates and/or deletions.
 
-    Line numbers are 1-based as from :func:`iter_data_rows`. Returns count updated.
+    Line numbers are 1-based file line numbers (as from :func:`iter_data_rows`).
+
+    Args:
+        path: references.md path.
+        updates: ``(line_number, new_row)`` pairs to rewrite in place.
+        backup: Optional gzip/plain backup before rewrite.
+        compress: Backup compression (default True).
+        delete_line_numbers: File line numbers to remove entirely.
+
+    Returns:
+        ``(updated_count, deleted_count)``
     """
-    if not updates:
-        return 0
-    by_line = {ln: row for ln, row in updates}
+    by_line = {ln: row for ln, row in updates} if updates else {}
+    delete_set = set(delete_line_numbers or ())
+    if not by_line and not delete_set:
+        return 0, 0
+
     if backup:
         from ref_cli.backup_util import backup_file
         backup_file(path, compress=compress, style='suffix')
@@ -524,32 +537,50 @@ def apply_row_updates(
     with open(path, 'r', encoding='utf-8', errors='replace') as handle:
         lines = handle.readlines()
 
-    changed = 0
+    new_lines: List[str] = []
+    updated = 0
+    deleted = 0
     for idx, line in enumerate(lines):
         line_no = idx + 1
-        if line_no not in by_line:
+        if line_no in delete_set:
+            deleted += 1
             continue
-        new_line = format_data_line(by_line[line_no]) + '\n'
-        if lines[idx] != new_line:
-            lines[idx] = new_line
-            changed += 1
+        if line_no in by_line:
+            new_line = format_data_line(by_line[line_no]) + '\n'
+            if line != new_line:
+                updated += 1
+            new_lines.append(new_line)
+        else:
+            new_lines.append(line)
 
     with open(path, 'w', encoding='utf-8') as handle:
-        handle.writelines(lines)
-    return changed
+        handle.writelines(new_lines)
+    return updated, deleted
 
 
 def with_meta(
     row: ReferenceRow,
     *,
-    category: str = '',
-    role: str = '',
-    channel_id: str = '',
+    category: Optional[str] = None,
+    role: Optional[str] = None,
+    channel_id: Optional[str] = None,
 ) -> ReferenceRow:
-    """Return a copy of ``row`` with meta fields set."""
+    """Return a copy of ``row`` with meta fields set (None = leave unchanged)."""
     return replace(
         row,
-        category=category or row.category,
-        role=role or row.role,
-        channel_id=channel_id or row.channel_id,
+        category=row.category if category is None else category,
+        role=row.role if role is None else role,
+        channel_id=row.channel_id if channel_id is None else channel_id,
+    )
+
+
+def stamp_unavailable_meta(row: ReferenceRow, *, reason: str = 'unavailable') -> ReferenceRow:
+    """Mark a row whose video is gone but a transcript (or other extra) was kept."""
+    # category = reason (private|unavailable|removed|…); role always 'unavailable'
+    return replace(
+        row,
+        category=reason or 'unavailable',
+        role='unavailable',
+        # keep channel_id if we somehow had one; usually empty
+        channel_id=row.channel_id or '',
     )

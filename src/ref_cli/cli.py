@@ -2120,9 +2120,11 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
             ))
             print(info(f"Meta card: {dim(card)}"))
         else:
-            print(warning(
-                "Enrichment skipped/failed (row saved). "
-                "Run: ref-enrich --file " + UNIFIED
+            # May have been marked unavailable / removed by enrich handler
+            print(dim(
+                "Enrichment: no live metadata "
+                "(private/unavailable videos are stamped or removed; "
+                "see enrichment/youtube/videos/ or re-run ref-enrich)"
             ))
     except Exception as enrich_exc:  # noqa: BLE001 - never fail capture
         logging.warning("Capture-time enrichment failed for %s: %s", video_url, enrich_exc)

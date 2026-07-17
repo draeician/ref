@@ -520,6 +520,115 @@ def update_channel_card(
     return path
 
 
+# Terminal fetch failures: video is gone/private — not a transient network blip.
+_UNAVAILABLE_MARKERS = (
+    'private video',
+    'video unavailable',
+    'this video is unavailable',
+    'this video has been removed',
+    'has been removed',
+    'account associated with this video has been terminated',
+    'violating youtube',
+    'copyright claim',
+    'is not available',
+)
+
+
+def classify_youtube_fetch_failure(message: str) -> Optional[str]:
+    """If ``message`` means the video is gone/private, return a short reason code.
+
+    Returns None for transient/unknown errors (do not delete the reference).
+    """
+    text = (message or '').lower()
+    if 'private video' in text:
+        return 'private'
+    if 'video unavailable' in text or 'this video is unavailable' in text:
+        return 'unavailable'
+    if 'has been removed' in text or 'this video has been removed' in text:
+        return 'removed'
+    if 'terminated' in text and 'account' in text:
+        return 'terminated'
+    if 'no youtube api result' in text:
+        # API empty + yt-dlp also failed with a terminal marker
+        if any(m in text for m in _UNAVAILABLE_MARKERS):
+            if 'private' in text:
+                return 'private'
+            if 'removed' in text or 'terminated' in text:
+                return 'removed' if 'removed' in text else 'terminated'
+            return 'unavailable'
+        # API-only empty without yt-dlp confirmation — still usually dead, but
+        # only treat as terminal when yt-dlp also ran and failed hard.
+        if 'yt-dlp' in text and 'error' in text:
+            return 'unavailable'
+    if any(m in text for m in _UNAVAILABLE_MARKERS):
+        return 'unavailable'
+    return None
+
+
+def row_has_usable_transcript(row: Any, *, check_disk: bool = True) -> bool:
+    """True when ``row.extra`` points at a captured transcript, not a failure note.
+
+    Accepts a :class:`~ref_cli.references_format.ReferenceRow` or any object with
+    an ``extra`` attribute.
+    """
+    extra = (getattr(row, 'extra', None) or '').strip()
+    if not extra:
+        return False
+    lower = extra.lower()
+    failure_phrases = (
+        'no transcript',
+        'transcript unavailable',
+        'transcripts are disabled',
+        'subtitles are disabled',
+        'queued in transcript-pending',
+        'could not retrieve a transcript',
+        'requestblocked',
+        'ipblocked',
+    )
+    if any(p in lower for p in failure_phrases):
+        return False
+    # Path-like transcript references
+    expanded = os.path.expanduser(extra.split('|')[0].strip())
+    if check_disk and os.path.isfile(expanded):
+        return True
+    if expanded.endswith('.json') and ('transcript' in expanded.lower() or '/transcripts/' in expanded):
+        return True
+    if '/transcripts/' in expanded and expanded.endswith(('.json', '.txt', '.vtt', '.srt')):
+        return True
+    return False
+
+
+def save_unavailable_card(
+    references_base: str,
+    video_id: str,
+    *,
+    reason: str = 'unavailable',
+    detail: str = '',
+) -> str:
+    """Write a stub video card so we do not re-fetch a known-dead id."""
+    ensure_enrichment_dirs(references_base, 'youtube')
+    path = video_card_path(references_base, video_id)
+    card = {
+        'schema_version': 1,
+        'platform': 'youtube',
+        'video_id': video_id,
+        'fetched_at': datetime.now().isoformat(timespec='seconds'),
+        'source': 'unavailable',
+        'category': reason,
+        'role': 'unavailable',
+        'channel_id': '',
+        'title': '',
+        'description': '',
+        'tags': [],
+        'links': {},
+        'detail': (detail or '')[:500],
+    }
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(card, handle, indent=2, ensure_ascii=False)
+        handle.write('\n')
+    return path
+
+
 def append_index(
     references_base: str,
     *,
@@ -541,6 +650,56 @@ def append_index(
         handle.write(json.dumps(record, ensure_ascii=False) + '\n')
 
 
+def handle_unavailable_youtube_rows(
+    references_path: str,
+    video_id: str,
+    rows: Sequence[Any],
+    *,
+    references_base: str,
+    reason: str = 'unavailable',
+    detail: str = '',
+) -> Tuple[List[Tuple[int, Any]], List[int], str]:
+    """Decide updates/deletes for rows whose video is private/gone.
+
+    Returns:
+        ``(meta_updates, delete_line_numbers, action_summary)``
+
+        - Rows **with** a usable transcript → stamp ``@meta`` unavailable
+        - Rows **without** → mark for deletion from references.md
+    """
+    from ref_cli.references_format import stamp_unavailable_meta
+
+    updates: List[Tuple[int, Any]] = []
+    deletes: List[int] = []
+    kept = 0
+    removed = 0
+    for row in rows:
+        if row_has_usable_transcript(row):
+            updates.append((row.line_number, stamp_unavailable_meta(row, reason=reason)))
+            kept += 1
+        else:
+            deletes.append(row.line_number)
+            removed += 1
+
+    save_unavailable_card(
+        references_base,
+        video_id,
+        reason=reason,
+        detail=detail,
+    )
+    append_index(
+        references_base,
+        platform='youtube',
+        key=video_id,
+        status='unavailable',
+        detail=f'{reason}|kept_transcript={kept}|removed={removed}|{(detail or "")[:120]}',
+    )
+    summary = (
+        f'{reason}: keep {kept} with transcript, remove {removed} without'
+    )
+    return updates, deletes, summary
+
+
 def enrich_youtube_reference(
     references_path: str,
     video_url: str,
@@ -552,19 +711,13 @@ def enrich_youtube_reference(
 ) -> Optional[VideoEnrichment]:
     """Fetch meta for one YouTube URL, write cards, stamp ``@meta`` on matching rows.
 
-    Safe to call from capture (``ref``): failures return None and leave the
-    reference row as-is. Creates ``enrichment/`` if needed.
+    Safe to call from capture (``ref``). On terminal unavailable/private errors:
+    keep rows that have a transcript (stamp unavailable meta), delete others.
 
-    Args:
-        references_path: Path to references.md.
-        video_url: YouTube watch/shorts/live URL (or any URL containing the id).
-        references_base: Directory for enrichment/ (default: parent of references.md).
-        force: Re-fetch even when a video card already exists.
-        api_key: YouTube Data API key (optional; falls back to yt-dlp).
-        prefer_api: Prefer API over yt-dlp when key is set.
+    Creates ``enrichment/`` if needed.
 
     Returns:
-        :class:`VideoEnrichment` on success, else None.
+        :class:`VideoEnrichment` on success, else None (including handled unavailable).
     """
     from ref_cli.references_format import (
         apply_row_updates,
@@ -583,6 +736,8 @@ def enrich_youtube_reference(
     card = None if force else load_video_card(base, video_id)
 
     if card and not force:
+        if card.get('role') == 'unavailable' or card.get('source') == 'unavailable':
+            return None
         # Rebuild a light enrichment from the cached card for stamping.
         enrichment = VideoEnrichment(
             video_id=video_id,
@@ -607,14 +762,42 @@ def enrich_youtube_reference(
                 api_key=api_key or os.environ.get('YOUTUBE_API_KEY'),
                 prefer_api=prefer_api,
             )
-        except Exception:
-            append_index(
-                base,
-                platform='youtube',
-                key=video_id,
-                status='error',
-                detail='capture-time enrich failed',
-            )
+        except Exception as exc:  # noqa: BLE001
+            reason = classify_youtube_fetch_failure(str(exc))
+            rows = [
+                r for r in iter_data_rows(references_path)
+                if video_id in r.url or video_url in r.url
+            ]
+            if reason and rows:
+                updates, deletes, summary = handle_unavailable_youtube_rows(
+                    references_path,
+                    video_id,
+                    rows,
+                    references_base=base,
+                    reason=reason,
+                    detail=str(exc)[:300],
+                )
+                apply_row_updates(
+                    references_path,
+                    updates,
+                    backup=False,
+                    delete_line_numbers=deletes,
+                )
+                append_index(
+                    base,
+                    platform='youtube',
+                    key=video_id,
+                    status='unavailable',
+                    detail=summary,
+                )
+            else:
+                append_index(
+                    base,
+                    platform='youtube',
+                    key=video_id,
+                    status='error',
+                    detail=str(exc)[:200],
+                )
             return None
         save_video_card(base, enrichment)
         update_channel_card(base, enrichment)
