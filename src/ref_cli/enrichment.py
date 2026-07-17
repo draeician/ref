@@ -17,10 +17,48 @@ import json
 import os
 import re
 import subprocess
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
+
+# ---------------------------------------------------------------------------
+# Rate limiting (client-side, same idea as oEmbed 10/min in cli.py)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RateLimiter:
+    """Sliding-window limiter: at most ``max_per_minute`` calls per 60s.
+
+    ``max_per_minute <= 0`` disables waiting (unlimited).
+    """
+
+    max_per_minute: int = 30
+    _times: Deque[float] = field(default_factory=deque, repr=False)
+
+    def wait(self) -> float:
+        """Block until a request is allowed. Returns seconds slept (0 if none)."""
+        if self.max_per_minute <= 0:
+            return 0.0
+        now = time.monotonic()
+        window = 60.0
+        while self._times and now - self._times[0] >= window:
+            self._times.popleft()
+        slept = 0.0
+        if len(self._times) >= self.max_per_minute:
+            sleep_for = window - (now - self._times[0]) + 0.05
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+                slept = sleep_for
+            now = time.monotonic()
+            while self._times and now - self._times[0] >= window:
+                self._times.popleft()
+        self._times.append(time.monotonic())
+        return slept
+
 
 # ---------------------------------------------------------------------------
 # Paths

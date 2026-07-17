@@ -49,9 +49,14 @@ You should see lines like `Enrichment: Education / advisor` and `Meta card: …`
 Batch backfill (history / failures):
 
 ```bash
-# Default --limit is 50. Use --limit 0 for no cap.
+# Default --limit 50, --rate 30 (live fetches per minute). Cache hits are free.
 ref-enrich --file ~/references/references.md
 
+# Full archive (~23k): no cap, throttled 30/min — safe to leave running
+ref-enrich --limit 0 --rate 30
+
+ref-enrich --limit 0 --rate 60    # faster
+ref-enrich --limit 0 --rate 0     # no client throttle
 ref-enrich --prefer-ytdlp --limit 10
 ref-enrich --dry-run
 

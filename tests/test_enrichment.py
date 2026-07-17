@@ -42,6 +42,38 @@ def test_extract_links_buckets() -> None:
     assert any("example.com" in u for u in links["other"])
 
 
+def test_rate_limiter_waits(monkeypatch) -> None:
+    from ref_cli.enrichment import RateLimiter
+
+    sleeps: list = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("ref_cli.enrichment.time.sleep", fake_sleep)
+    # Fixed clock: first N calls free, then next must sleep
+    times = iter([100.0, 100.1, 100.2, 100.3, 100.4])
+
+    def fake_mono() -> float:
+        try:
+            return next(times)
+        except StopIteration:
+            return 160.0  # after sleep, outside window
+
+    monkeypatch.setattr("ref_cli.enrichment.time.monotonic", fake_mono)
+    limiter = RateLimiter(max_per_minute=3)
+    assert limiter.wait() == 0.0
+    assert limiter.wait() == 0.0
+    assert limiter.wait() == 0.0
+    slept = limiter.wait()  # 4th within window
+    assert slept > 0
+    assert sleeps and sleeps[0] > 0
+
+    unlimited = RateLimiter(max_per_minute=0)
+    assert unlimited.wait() == 0.0
+    assert unlimited.wait() == 0.0
+
+
 def test_classify_unavailable_failures() -> None:
     from ref_cli.enrichment import classify_youtube_fetch_failure
 

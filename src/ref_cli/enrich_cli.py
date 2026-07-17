@@ -15,6 +15,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from ref_cli.completion import enable_argcomplete, files_completer
 from ref_cli.enrichment import (
+    RateLimiter,
     append_index,
     classify_youtube_fetch_failure,
     ensure_enrichment_dirs,
@@ -40,6 +41,12 @@ from ref_cli.utils.colors import dim, error, info, success, warning
 # big archive, small enough to be polite to YouTube / yt-dlp and easy to Ctrl+C.
 # Override with --limit N, or --limit 0 for no cap.
 DEFAULT_ENRICH_LIMIT = 50
+
+# Default live-fetch rate (network calls only; cache reuse is free).
+# 30/min ≈ 2s average spacing → ~12–13h for 23k fresh fetches; stays under
+# typical YouTube Data API daily quotas if split across days with --limit.
+# Use --rate 0 for no client throttle.
+DEFAULT_ENRICH_RATE = 30
 
 
 def _default_paths() -> Tuple[str, str]:
@@ -80,6 +87,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             f'Max videos to fetch this run (default: {DEFAULT_ENRICH_LIMIT}; '
             'use 0 for no cap)'
+        ),
+    )
+    parser.add_argument(
+        '--rate',
+        type=int,
+        default=DEFAULT_ENRICH_RATE,
+        metavar='N',
+        help=(
+            f'Max live network fetches per minute (default: {DEFAULT_ENRICH_RATE}; '
+            '0 = unlimited). Cache hits and skipped rows do not count. '
+            'Same sliding-window idea as oEmbed throttling on title repair.'
         ),
     )
     parser.add_argument(
@@ -144,7 +162,11 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     if args.limit < 0:
         print(error('--limit must be >= 0 (0 = no cap)'), file=sys.stderr)
         return 1
+    if args.rate < 0:
+        print(error('--rate must be >= 0 (0 = unlimited)'), file=sys.stderr)
+        return 1
     limit: Optional[int] = None if args.limit == 0 else args.limit
+    limiter = RateLimiter(max_per_minute=args.rate)
 
     if not args.no_migrate:
         msg = ensure_references_migrated(
@@ -164,6 +186,16 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         print(dim('fetch backend: YouTube Data API (fallback yt-dlp)'), file=sys.stderr)
     else:
         print(dim('fetch backend: yt-dlp'), file=sys.stderr)
+    if args.rate > 0:
+        print(
+            dim(
+                f'rate limit: {args.rate}/min on live fetches '
+                f'(~{60.0 / args.rate:.1f}s min spacing; cache reuse free)'
+            ),
+            file=sys.stderr,
+        )
+    else:
+        print(dim('rate limit: off (--rate 0)'), file=sys.stderr)
 
     # Build work list: one job per unique video_id, track all rows to stamp.
     rows_by_video: dict = {}
@@ -245,6 +277,10 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
             channel_id = card.get('channel_id') or ''
             print(dim(f'  reuse card → {category or "?"} / {role or "?"}'), file=sys.stderr)
         else:
+            # Live network fetch — throttle before calling API / yt-dlp.
+            slept = limiter.wait()
+            if slept > 0.5:
+                print(dim(f'  rate-limit sleep {slept:.1f}s'), file=sys.stderr)
             try:
                 enrichment = fetch_youtube_video(
                     vid,
