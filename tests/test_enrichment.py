@@ -56,6 +56,58 @@ def test_infer_role_music_and_advisor() -> None:
     ) == "music"
 
 
+def test_enrich_youtube_reference_stamps_meta(tmp_path: Path, monkeypatch) -> None:
+    from ref_cli.enrichment import VideoEnrichment, enrich_youtube_reference
+    from ref_cli.references_format import parse_data_line
+
+    base = tmp_path
+    refs = base / "references.md"
+    refs.write_text(
+        "# ref-references version=2\n"
+        "2026-07-17T15:49:01|[https://www.youtube.com/watch?v=PqtggjVAi8M]|"
+        "(How Are Memories Stored Inside Your Brain)|Kurzgesagt|YouTube|"
+        f"{base}/transcripts/PqtggjVAi8M.json\n",
+        encoding="utf-8",
+    )
+
+    fake = VideoEnrichment(
+        video_id="PqtggjVAi8M",
+        title="How Are Memories Stored Inside Your Brain",
+        channel_id="UCsXVk37bltHxD1rDPwtNM8Q",
+        channel_title="Kurzgesagt",
+        category_id="27",
+        category="Education",
+        role="advisor",
+        source="test",
+    )
+
+    def fake_fetch(video_id, **kwargs):
+        assert video_id == "PqtggjVAi8M"
+        return fake
+
+    monkeypatch.setattr(
+        "ref_cli.enrichment.fetch_youtube_video",
+        fake_fetch,
+    )
+
+    result = enrich_youtube_reference(
+        str(refs),
+        "https://www.youtube.com/watch?v=PqtggjVAi8M",
+        references_base=str(base),
+    )
+    assert result is not None
+    assert result.role == "advisor"
+    assert (base / "enrichment" / "youtube" / "videos" / "PqtggjVAi8M.json").is_file()
+
+    line = refs.read_text(encoding="utf-8").strip().splitlines()[-1]
+    row = parse_data_line(line)
+    assert row is not None
+    assert row.role == "advisor"
+    assert row.category == "Education"
+    assert row.channel_id == "UCsXVk37bltHxD1rDPwtNM8Q"
+    assert "PqtggjVAi8M.json" in row.extra
+
+
 def test_save_video_and_channel_cards(tmp_path: Path) -> None:
     base = str(tmp_path)
     paths = ensure_enrichment_dirs(base, "youtube")

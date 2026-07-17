@@ -42,19 +42,21 @@ Hybrid storage (A + B):
 
 `references.md` starts with a version header. Running `ref` or `ref-enrich` auto-migrates older files (with a gzipped `.bak-*.gz` backup by default).
 
+**On each new YouTube save**, `ref` now also enriches that video (best-effort): writes
+`enrichment/youtube/videos/<id>.json` and stamps `|@meta|category|role|channel_id` on the row.
+You should see lines like `Enrichment: Education / advisor` and `Meta card: …` after the transcript line.
+
+Batch backfill (history / failures):
+
 ```bash
-# Create enrichment dirs if needed, fetch a batch of YouTube cards, stamp @meta
-# Default --limit is 50 (good daily batch). Use --limit 0 for no cap.
+# Default --limit is 50. Use --limit 0 for no cap.
 ref-enrich --file ~/references/references.md
 
-# Prefer yt-dlp over YouTube Data API; smaller batch
 ref-enrich --prefer-ytdlp --limit 10
-
-# Dry-run work list
 ref-enrich --dry-run
 
 # Advisors without music libraries (after enrichment)
-ref-advisors --file ~/references/references.md --exclude-role music --min-count 3
+ref-advisors --exclude-role music --min-count 3
 ref-advisors --role advisor --platform youtube
 ```
 

@@ -539,3 +539,110 @@ def append_index(
     }
     with open(index_path(references_base), 'a', encoding='utf-8') as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+
+def enrich_youtube_reference(
+    references_path: str,
+    video_url: str,
+    *,
+    references_base: Optional[str] = None,
+    force: bool = False,
+    api_key: Optional[str] = None,
+    prefer_api: bool = True,
+) -> Optional[VideoEnrichment]:
+    """Fetch meta for one YouTube URL, write cards, stamp ``@meta`` on matching rows.
+
+    Safe to call from capture (``ref``): failures return None and leave the
+    reference row as-is. Creates ``enrichment/`` if needed.
+
+    Args:
+        references_path: Path to references.md.
+        video_url: YouTube watch/shorts/live URL (or any URL containing the id).
+        references_base: Directory for enrichment/ (default: parent of references.md).
+        force: Re-fetch even when a video card already exists.
+        api_key: YouTube Data API key (optional; falls back to yt-dlp).
+        prefer_api: Prefer API over yt-dlp when key is set.
+
+    Returns:
+        :class:`VideoEnrichment` on success, else None.
+    """
+    from ref_cli.references_format import (
+        apply_row_updates,
+        iter_data_rows,
+        with_meta,
+    )
+
+    video_id = extract_youtube_video_id(video_url)
+    if not video_id:
+        return None
+
+    base = references_base or os.path.dirname(os.path.abspath(references_path)) or '.'
+    ensure_enrichment_dirs(base, 'youtube')
+
+    enrichment: Optional[VideoEnrichment] = None
+    card = None if force else load_video_card(base, video_id)
+
+    if card and not force:
+        # Rebuild a light enrichment from the cached card for stamping.
+        enrichment = VideoEnrichment(
+            video_id=video_id,
+            title=card.get('title') or '',
+            channel_id=card.get('channel_id') or '',
+            channel_title=card.get('channel_title') or '',
+            category_id=str(card.get('category_id') or ''),
+            category=card.get('category') or '',
+            description=card.get('description') or '',
+            tags=list(card.get('tags') or []),
+            duration_sec=card.get('duration_sec'),
+            published_at=card.get('published_at') or '',
+            links=card.get('links') or {},
+            role=card.get('role') or 'unknown',
+            source=card.get('source') or 'cache',
+            raw={},
+        )
+    else:
+        try:
+            enrichment = fetch_youtube_video(
+                video_id,
+                api_key=api_key or os.environ.get('YOUTUBE_API_KEY'),
+                prefer_api=prefer_api,
+            )
+        except Exception:
+            append_index(
+                base,
+                platform='youtube',
+                key=video_id,
+                status='error',
+                detail='capture-time enrich failed',
+            )
+            return None
+        save_video_card(base, enrichment)
+        update_channel_card(base, enrichment)
+        append_index(
+            base,
+            platform='youtube',
+            key=video_id,
+            status='ok',
+            detail=f'{enrichment.category}|{enrichment.role}|capture',
+        )
+
+    updates = []
+    for row in iter_data_rows(references_path):
+        if video_id not in row.url and video_url not in row.url:
+            continue
+        if row.has_meta and not force:
+            # Still refresh empty pieces if card has better data
+            if row.category and row.role and row.channel_id:
+                continue
+        updates.append((
+            row.line_number,
+            with_meta(
+                row,
+                category=enrichment.category,
+                role=enrichment.role,
+                channel_id=enrichment.channel_id,
+            ),
+        ))
+    if updates:
+        apply_row_updates(references_path, updates, backup=False)
+    return enrichment

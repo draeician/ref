@@ -2050,7 +2050,13 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
     """
     Updates or adds a YouTube video entry in the references.md file with the transcript file reference.
     When updating an existing line, also updates the title so re-running a URL refreshes the stored title.
+    After write, runs YouTube enrichment (meta card + ``@meta`` on the row) best-effort.
     """
+    from ref_cli.references_format import (
+        format_data_line,
+        parse_data_line,
+    )
+
     updated = False
     with open(UNIFIED, 'r') as file:
         lines = file.readlines()
@@ -2058,27 +2064,72 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
     with open(UNIFIED, 'w') as file:
         for line in lines:
             if video_url in line:
-                parts = line.rstrip().split('|')
-                if len(parts) >= 6:
-                    parts[2] = f"({video_title})"
-                    parts[-1] = transcript_file
-                    line = "|".join(parts) + "\n"
+                row = parse_data_line(line)
+                if row is not None:
+                    row.title = video_title
+                    if uploader:
+                        row.uploader = uploader
+                    row.source = row.source or 'YouTube'
+                    # Transcript / status lives in extra (do not clobber @meta).
+                    row.extra = transcript_file or row.extra
+                    line = format_data_line(row) + '\n'
                 else:
-                    if line.strip().endswith("|None"):
-                        line = line.replace("|None", f"|{transcript_file}")
-                    elif not line.strip().endswith(f"|{transcript_file}"):
-                        line = line.rstrip() + f"|{transcript_file}\n"
+                    # Fallback for unparseable legacy lines
+                    parts = line.rstrip().split('|')
+                    if len(parts) >= 6:
+                        parts[2] = f"({video_title})"
+                        # Prefer replacing a trailing non-meta field only
+                        parts[-1] = transcript_file
+                        line = "|".join(parts) + "\n"
+                    else:
+                        if line.strip().endswith("|None"):
+                            line = line.replace("|None", f"|{transcript_file}")
+                        elif not line.strip().endswith(f"|{transcript_file}"):
+                            line = line.rstrip() + f"|{transcript_file}\n"
                 updated = True
             file.write(line)
 
     if not updated:
-        entry = f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|[{video_url}]|({video_title})|{uploader}|YouTube|{transcript_file}\n"
+        entry = (
+            f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|"
+            f"[{video_url}]|({video_title})|{uploader}|YouTube|{transcript_file}\n"
+        )
         append_to_file(UNIFIED, entry)
 
     logging.info(f"Updated reference entry for URL: {video_url} with transcript file: {transcript_file}")
     print(success(f"Updated reference entry for {url(video_url)}"))
     print(info(f"Title: {title(video_title)}"))
     print(info(f"Transcript: {dim(transcript_file)}"))
+
+    # Capture-time enrichment: full card under enrichment/youtube/ + @meta on row.
+    try:
+        from ref_cli.enrichment import enrich_youtube_reference, video_card_path
+
+        enrichment = enrich_youtube_reference(
+            UNIFIED,
+            video_url,
+            references_base=BASE,
+            force=False,
+            api_key=os.environ.get('YOUTUBE_API_KEY'),
+        )
+        if enrichment is not None:
+            card = video_card_path(BASE, enrichment.video_id)
+            print(info(
+                f"Enrichment: {enrichment.category or '?'} / {enrichment.role or '?'} "
+                f"(channel {enrichment.channel_id or '-'})"
+            ))
+            print(info(f"Meta card: {dim(card)}"))
+        else:
+            print(warning(
+                "Enrichment skipped/failed (row saved). "
+                "Run: ref-enrich --file " + UNIFIED
+            ))
+    except Exception as enrich_exc:  # noqa: BLE001 - never fail capture
+        logging.warning("Capture-time enrichment failed for %s: %s", video_url, enrich_exc)
+        print(warning(
+            f"Enrichment error (row saved): {enrich_exc}. "
+            f"Later: ref-enrich --file {UNIFIED}"
+        ))
 
 def reference_has_transcript(url: str) -> bool:
     """
