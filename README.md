@@ -49,7 +49,11 @@ You should see lines like `Enrichment: Education / advisor` and `Meta card: …`
 Batch backfill (history / failures):
 
 ```bash
-# Default --limit 50, --rate 30 (live fetches per minute). Cache hits are free.
+# Single video (URL or 11-char id); refreshes card + matching references.md row
+ref-enrich "https://www.youtube.com/watch?v=PqtggjVAi8M"
+ref-enrich PqtggjVAi8M --force          # re-fetch even if already enriched
+
+# Default bulk: --limit 50, --rate 30 (live fetches per minute). Cache hits free.
 ref-enrich --file ~/references/references.md
 
 # Full archive (~23k): no cap, throttled 30/min — safe to leave running

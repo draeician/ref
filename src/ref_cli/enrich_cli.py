@@ -65,7 +65,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             'Enrich references.md with source categories and store full meta '
-            'cards under enrichment/<platform>/ (YouTube supported now).'
+            'cards under enrichment/<platform>/ (YouTube supported now). '
+            'Pass optional YouTube URLs or video IDs to process only those.'
+        ),
+    )
+    parser.add_argument(
+        'targets',
+        nargs='*',
+        metavar='URL_OR_ID',
+        help=(
+            'Optional YouTube URL(s) or 11-char video ID(s). '
+            'When set, only these are enriched (still stamps matching rows in '
+            'references.md). Example: ref-enrich '
+            '"https://www.youtube.com/watch?v=PqtggjVAi8M"'
         ),
     )
     file_arg = parser.add_argument(
@@ -147,6 +159,29 @@ def _youtube_api_key() -> Optional[str]:
     return os.environ.get('YOUTUBE_API_KEY') or None
 
 
+def _resolve_target_ids(targets: Sequence[str]) -> Tuple[List[str], List[str]]:
+    """Return (video_ids, errors) from URL or bare id arguments."""
+    import re
+
+    ids: List[str] = []
+    errors: List[str] = []
+    seen = set()
+    for raw in targets:
+        text = (raw or '').strip()
+        if not text:
+            continue
+        vid = extract_youtube_video_id(text)
+        if not vid and re.fullmatch(r'[\w-]{11}', text):
+            vid = text
+        if not vid:
+            errors.append(text)
+            continue
+        if vid not in seen:
+            seen.add(vid)
+            ids.append(vid)
+    return ids, errors
+
+
 def _main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_arg_parser()
     enable_argcomplete(parser)
@@ -197,7 +232,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         print(dim('rate limit: off (--rate 0)'), file=sys.stderr)
 
-    # Build work list: one job per unique video_id, track all rows to stamp.
+    # Build map of all youtube rows; optionally filter to CLI targets.
     rows_by_video: dict = {}
     for row in iter_data_rows(refs_path):
         if args.platform == 'youtube':
@@ -206,35 +241,74 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
                 continue
             rows_by_video.setdefault(vid, []).append(row)
 
+    target_ids: Optional[List[str]] = None
+    if args.targets:
+        target_ids, bad_targets = _resolve_target_ids(args.targets)
+        for bad in bad_targets:
+            print(error(f'Not a YouTube URL or video id: {bad}'), file=sys.stderr)
+        if not target_ids:
+            return 1
+        for vid in target_ids:
+            rows_by_video.setdefault(vid, [])  # allow enrich card even if no row yet
+        print(
+            info(f'Target mode: {len(target_ids)} id(s) → {", ".join(target_ids)}'),
+            file=sys.stderr,
+        )
+
     work_ids: List[str] = []
-    for vid, rows in rows_by_video.items():
+    candidate_ids = target_ids if target_ids is not None else list(rows_by_video.keys())
+    for vid in candidate_ids:
+        rows = rows_by_video.get(vid, [])
         if not args.force:
             # Already resolved as unavailable — skip re-fetch
-            if all(r.role == 'unavailable' for r in rows):
+            if rows and all(r.role == 'unavailable' for r in rows):
+                if target_ids is not None:
+                    print(dim(f'  skip {vid}: already @meta unavailable'), file=sys.stderr)
                 continue
             card = load_video_card(base, vid)
             if card and (
                 card.get('role') == 'unavailable'
                 or card.get('source') == 'unavailable'
             ):
+                if target_ids is not None:
+                    print(dim(f'  skip {vid}: unavailable card on disk'), file=sys.stderr)
                 continue
             card_exists = card is not None
-            all_have_meta = all(r.has_meta for r in rows)
-            if card_exists and all_have_meta:
-                continue
-            if card_exists and args.skip_existing_cards:
+            all_have_meta = bool(rows) and all(r.has_meta for r in rows)
+            # Explicit targets: if card exists and rows stamped, skip unless --force
+            if card_exists and (all_have_meta or not rows):
+                if target_ids is not None and not rows:
+                    # Card-only target already fetched
+                    print(dim(f'  skip {vid}: card exists (use --force to refresh)'), file=sys.stderr)
+                    continue
                 if all_have_meta:
+                    if target_ids is not None:
+                        print(
+                            dim(f'  skip {vid}: already enriched (use --force)'),
+                            file=sys.stderr,
+                        )
+                    continue
+            if card_exists and args.skip_existing_cards:
+                if all_have_meta or not rows:
                     continue
         work_ids.append(vid)
 
-    if limit is not None:
+    # --limit applies to bulk scans; with explicit targets, process all targets
+    # (still allow --limit to cap a multi-URL invocation if set deliberately).
+    if limit is not None and target_ids is None:
+        work_ids = work_ids[:limit]
+    elif limit is not None and target_ids is not None and len(work_ids) > limit:
         work_ids = work_ids[:limit]
 
     print(
         info(
-            f'YouTube videos in file: {len(rows_by_video)}; '
+            f'YouTube videos in file: {len([v for v, rs in rows_by_video.items() if rs])}; '
             f'to process: {len(work_ids)}'
-            + (f' (limit={limit})' if limit is not None else ' (no limit)')
+            + (
+                f' (targets={len(target_ids)})'
+                if target_ids is not None
+                else (f' (limit={limit})' if limit is not None else ' (no limit)')
+            )
         ),
         file=sys.stderr,
     )
@@ -341,7 +415,13 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         if args.no_write_refs:
             continue
 
-        for row in rows_by_video[vid]:
+        rows = rows_by_video.get(vid, [])
+        if not rows:
+            print(
+                dim(f'  no matching row in references.md (card only)'),
+                file=sys.stderr,
+            )
+        for row in rows:
             if row.has_meta and not args.force:
                 continue
             updated = with_meta(

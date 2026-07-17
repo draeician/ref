@@ -42,6 +42,19 @@ def test_extract_links_buckets() -> None:
     assert any("example.com" in u for u in links["other"])
 
 
+def test_resolve_target_ids() -> None:
+    from ref_cli.enrich_cli import _resolve_target_ids
+
+    ids, errs = _resolve_target_ids([
+        "https://www.youtube.com/watch?v=PqtggjVAi8M",
+        "PqtggjVAi8M",
+        "nope",
+        "https://youtu.be/j6ttTK8x8ZA",
+    ])
+    assert ids == ["PqtggjVAi8M", "j6ttTK8x8ZA"]
+    assert errs == ["nope"]
+
+
 def test_rate_limiter_waits(monkeypatch) -> None:
     from ref_cli.enrichment import RateLimiter
 
