@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.11] - 2026-07-17
+
 ### Added
-- `ref-advisors`: scan `references.md` and rank trusted advisors (YouTube channels, X handles, web/blog authors) by save frequency; markdown/json/csv output (`src/ref_cli/advisors.py`)
-- Shell tab completion via `argcomplete` for `ref`, `ref-advisors`, `ref-fix-x-titles`, and `ref-fix-reddit-titles` (options + `FilesCompleter` on path flags). Enable with `eval "$(register-python-argcomplete <cmd)"` in bash/zsh (`src/ref_cli/completion.py`)
-- Versioned `references.md` header (`# ref-references version=2`) with **layered** auto-migrate on `ref` / `ref-enrich` (1→2→…→current; path recorded in header) (`src/ref_cli/references_format.py`)
-- Hybrid enrichment: thin `@meta|category|role|channel_id` on rows + full cards under `enrichment/youtube/videos|channels/*.json`; `ref-enrich` CLI (YouTube API or yt-dlp, link mining; default `--limit 50`) (`src/ref_cli/enrichment.py`, `src/ref_cli/enrich_cli.py`)
-- `ref-advisors --role` / `--exclude-role` using enriched roles (e.g. drop `music`)
+- `ref-advisors`: scan `references.md` and rank trusted advisors (YouTube channels, X handles, web/blog authors) by save frequency; markdown/json/csv output; `--role` / `--exclude-role` (`src/ref_cli/advisors.py`)
+- Shell tab completion via `argcomplete` for `ref`, `ref-advisors`, `ref-enrich`, and title-repair CLIs (`src/ref_cli/completion.py`)
+- Versioned `references.md` header (`# ref-references version=2`) with layered auto-migrate 1→2→… (`src/ref_cli/references_format.py`)
+- Hybrid enrichment: `@meta|category|role|channel_id` on rows + meta cards under `enrichment/youtube/videos|channels/*.json`; `ref-enrich` batch CLI (default limit 50) (`src/ref_cli/enrichment.py`, `src/ref_cli/enrich_cli.py`)
+- Capture-time YouTube enrichment on `ref` save (best-effort card + `@meta` stamp)
+- Gzip backups by default for `ref --backup` and format migrate; `--nocompress` for plain copies (`src/ref_cli/backup_util.py`)
 
 ## [1.6.10] - 2026-07-10
 
