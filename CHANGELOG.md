@@ -9,9 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `ref-enrich --rate N`: sliding-window throttle for live network fetches (default **30/min**; `0` = unlimited). Cache reuse does not count (`src/ref_cli/enrich_cli.py`, `RateLimiter` in `enrichment.py`)
+- `ref-enrich` positional YouTube URL/video IDs for single-target enrich
+- Firefox/LibreWolf extension package: `./scripts/build-firefox.sh` → `dist/ref-copy-tab-urls-firefox-v*.xpi`; install notes in `extension/LIBREWOLF-INSTALL.md`
 
 ### Changed
 - On enrich, private/unavailable YouTube videos: **remove** reference rows without a usable transcript; **keep** rows that have a transcript and stamp `@meta|…|unavailable` plus a stub card under `enrichment/youtube/videos/` so they are not re-fetched
+- Extension manifest **v1.1.0** with `browser_specific_settings.gecko` for Firefox/LibreWolf
 
 ## [1.6.11] - 2026-07-17
 
