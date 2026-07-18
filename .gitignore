@@ -7,6 +7,10 @@ venv/*
 .venv/*
 build/*
 dist/
+# Keep Firefox/LibreWolf release XPI packages under dist/
+!dist/
+dist/*
+!dist/*.xpi
 ref.spec
 r_and_d/*
 ref2

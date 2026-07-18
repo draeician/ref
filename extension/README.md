@@ -20,11 +20,21 @@ The "Copy Tab URLs" browser extension allows users to quickly copy the URLs of a
 3. Enable "Developer mode" by toggling the switch in the top right corner.
 4. Click on "Load unpacked" and select the folder containing the extension files.
 
-### Firefox
+### Firefox / LibreWolf
 
-1. Clone or download this repository.
-2. Open Firefox and go to `about:debugging#/runtime/this-firefox`.
-3. Click on "Load Temporary Add-on" and select the `manifest.json` file in the extension folder.
+**Packaged XPI (recommended):**
+
+```bash
+./scripts/build-firefox.sh
+# → dist/ref-copy-tab-urls-firefox-v<version>.xpi
+```
+
+See [LIBREWOLF-INSTALL.md](LIBREWOLF-INSTALL.md) for temporary and permanent install steps.
+
+**Unpacked (temporary):**
+
+1. Open Firefox/LibreWolf → `about:debugging#/runtime/this-firefox`
+2. Load Temporary Add-on → select `extension/manifest.json`
 
 ## Usage
 
