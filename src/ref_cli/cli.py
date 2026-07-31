@@ -18,7 +18,9 @@ import yaml
 import json
 import hashlib
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 import textwrap
 import fnmatch
 from googleapiclient.discovery import build
@@ -26,6 +28,7 @@ from googleapiclient.errors import HttpError
 from dotenv import load_dotenv, set_key
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+import shutil
 import subprocess
 import time
 import select
@@ -151,10 +154,34 @@ def is_no_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> bool:
 
 
 def should_queue_transcript_pending(failure_info: Optional[Tuple[str, str]]) -> bool:
-    """Return True when a failed fetch should be queued in transcript-pending.md."""
+    """Return True when a failed fetch should be enqueued for local transcription."""
     if not failure_info:
         return False
     return failure_info[0] == "blocked" or is_no_transcript_failure(failure_info)
+
+
+@dataclass
+class PendingQueueResult:
+    """Outcome of enqueueing a URL for local-transcribe (or pending-file fallback)."""
+
+    action: str  # enqueued | existing_active | already_completed | requires_force | pending_file | skipped_on_disk
+    message: str
+    execution_id: Optional[str] = None
+    source_key: Optional[str] = None
+
+
+LOCAL_TRANSCRIBE_GIT = "git+https://github.com/draeician/local_transcribe.git"
+LOCAL_TRANSCRIBE_INSTALL_HINT = (
+    "local-transcribe is not available to ref (needed to enqueue transcription).\n"
+    "Install the lt CLI once — ref will call it; no pipx inject required:\n"
+    f"  pipx install {LOCAL_TRANSCRIBE_GIT}\n"
+    "Or inject into the ref-cli environment (in-process API; pulls heavy deps):\n"
+    f"  pipx inject ref-cli {LOCAL_TRANSCRIBE_GIT}\n"
+    "Also ensure ~/.config/local-transcribe/config.yaml points at the shared queue.\n"
+    "See docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md"
+)
+
+_local_transcribe_missing_notified = False
 
 # Custom verbose logger
 class VerboseLogger:
@@ -1090,7 +1117,9 @@ def update_transcript(video_url: str) -> None:
                     logging.info(f"Transcript updated for URL: {video_url}")
                 else:
                     verbose_logger.log("Failed to fetch transcript")
-                    formatted_failure = format_transcript_failure(failure_info)
+                    formatted_failure = resolve_transcript_failure_placeholder(
+                        failure_info, video_url, video_id
+                    )
                     line = line.replace("|None", f"|{formatted_failure}")
                     failure_recorded = True
                     print(warning(f"{formatted_failure} for {url(video_url)}"))
@@ -1099,8 +1128,6 @@ def update_transcript(video_url: str) -> None:
                         logging.info(
                             f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
                         )
-                        if should_queue_transcript_pending(failure_info):
-                            add_url_to_pending_file(video_url, video_id)
             file.write(line)
 
     if updated:
@@ -1241,35 +1268,62 @@ def transcript_exists_on_disk(video_id: str) -> bool:
         return False
 
 
-def add_url_to_pending_file(url: str, video_id: Optional[str] = None) -> None:
-    """
-    Adds a URL to the transcript-pending.md file if it doesn't already exist.
-    Prevents duplicate URLs from being added.
+def format_queue_enqueue_message(outcome) -> str:
+    """Build a user-facing transcript placeholder from a SafeEnqueueOutcome."""
+    if outcome.fell_back_to_pending:
+        err = outcome.error or "queue unavailable"
+        return (
+            f"Transcript unavailable (queue offline: {err}; "
+            f"recorded in transcript-pending.md)"
+        )
+    result = outcome.result
+    if result is None:
+        return "Transcript unavailable (queue enqueue failed)"
 
-    Args:
-        url (str): The URL to add to the pending file
-        video_id (str, optional): YouTube video ID; skips if transcript already on disk
-    """
-    if video_id and transcript_exists_on_disk(video_id):
-        verbose_logger.log(f"Transcript already on disk for {video_id}, skipping pending queue")
-        return
+    ex = result.execution
+    eid = ex.execution_id if ex else "?"
+    status = ex.status if ex else "?"
 
+    if result.kind == "enqueued":
+        return (
+            f"Transcript unavailable (queued for local-transcribe worker; "
+            f"execution {eid})"
+        )
+    if result.kind == "existing_active":
+        if status and status != "?":
+            detail = f"{status}, execution {eid}"
+        else:
+            detail = f"execution {eid}"
+        return (
+            f"Transcript unavailable (already in transcription queue: {detail})"
+        )
+    if result.kind == "already_completed":
+        path = result.transcript_path or "on disk"
+        return f"Transcript already completed ({path})"
+    if result.kind == "requires_force":
+        return (
+            "Transcript unavailable (queue has a failed/cancelled job for this "
+            "source; use lt queue retry or force re-enqueue)"
+        )
+    return f"Transcript unavailable (queue: {result.kind})"
+
+
+def _append_url_to_pending_file(url: str) -> None:
+    """Append URL to transcript-pending.md if not already present (legacy fallback)."""
     verbose_logger.log(f"Checking if URL exists in pending file: {url}")
-    
-    # Ensure the file exists
     os.makedirs(os.path.dirname(TRANSCRIPT_PENDING_FILE), exist_ok=True)
-    
-    # Check if URL already exists in the file
+
     url_exists = False
     if os.path.exists(TRANSCRIPT_PENDING_FILE):
         try:
             with open(TRANSCRIPT_PENDING_FILE, 'r') as f:
                 for line in f:
                     line_url = line.strip()
-                    # Skip empty lines and comments
                     if not line_url or line_url.startswith('#'):
                         continue
-                    # Compare simplified URLs to catch duplicates
+                    # Lines may be bare URLs or markdown list items ("- url")
+                    if line_url.startswith("- "):
+                        line_url = line_url[2:].strip()
                     simplified_input_url = simplify_url(url)
                     simplified_existing_url = simplify_url(line_url)
                     if simplified_input_url == simplified_existing_url:
@@ -1279,8 +1333,7 @@ def add_url_to_pending_file(url: str, video_id: Optional[str] = None) -> None:
         except Exception as e:
             verbose_logger.log(f"Error reading pending file: {e}")
             logging.warning(f"Error reading transcript-pending.md: {e}")
-    
-    # Add URL if it doesn't exist
+
     if not url_exists:
         try:
             with open(TRANSCRIPT_PENDING_FILE, 'a') as f:
@@ -1290,6 +1343,206 @@ def add_url_to_pending_file(url: str, video_id: Optional[str] = None) -> None:
         except Exception as e:
             verbose_logger.log(f"Error writing to pending file: {e}")
             logging.error(f"Error writing to transcript-pending.md: {e}")
+
+
+def _notify_local_transcribe_missing() -> None:
+    """Print install instructions once per process when queue tooling is absent."""
+    global _local_transcribe_missing_notified
+    if _local_transcribe_missing_notified:
+        return
+    _local_transcribe_missing_notified = True
+    print(warning(LOCAL_TRANSCRIBE_INSTALL_HINT))
+    logging.warning(LOCAL_TRANSCRIBE_INSTALL_HINT.replace("\n", " | "))
+
+
+def _parse_lt_queue_add_output(stdout: str) -> Optional[PendingQueueResult]:
+    """Parse ``lt queue add`` stdout into a PendingQueueResult."""
+    kind = None
+    eid = None
+    source_key = None
+    for raw in (stdout or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("execution_id="):
+            eid = line.split("=", 1)[1].strip()
+            continue
+        if line.startswith("source_key="):
+            source_key = line.split("=", 1)[1].strip()
+            continue
+        if kind is None and ":" in line:
+            kind, _, rest = line.partition(":")
+            kind = kind.strip()
+            rest = rest.strip()
+            if rest.startswith(("youtube:", "local:")):
+                source_key = source_key or rest
+
+    known = {"enqueued", "existing_active", "already_completed", "requires_force"}
+    if kind not in known:
+        return None
+
+    execution = None
+    if eid:
+        execution = type("E", (), {"execution_id": eid, "status": "?"})()
+    result = type(
+        "R",
+        (),
+        {
+            "kind": kind,
+            "source_key": source_key,
+            "execution": execution,
+            "transcript_path": None,
+        },
+    )()
+    outcome = type(
+        "O",
+        (),
+        {"fell_back_to_pending": False, "result": result, "error": None},
+    )()
+    return PendingQueueResult(
+        action=kind,
+        message=format_queue_enqueue_message(outcome),
+        execution_id=eid,
+        source_key=source_key,
+    )
+
+
+def _enqueue_via_lt_cli(url: str) -> Optional[PendingQueueResult]:
+    """Enqueue via ``lt queue add`` when the Python package isn't importable.
+
+    This avoids ``pipx inject``: a normal ``pipx install local-transcribe`` puts
+    ``lt`` on PATH for any producer host.
+    """
+    lt_bin = shutil.which("lt")
+    if not lt_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [lt_bin, "queue", "add", url, "--origin", "ref", "--priority", "20"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logging.warning("lt queue add failed for %s: %s", url, exc)
+        return None
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        logging.warning(
+            "lt queue add exited %s for %s: %s",
+            proc.returncode,
+            url,
+            err or "(no output)",
+        )
+        return None
+    parsed = _parse_lt_queue_add_output(proc.stdout or "")
+    if parsed is None:
+        logging.warning("Could not parse lt queue add output for %s: %r", url, proc.stdout)
+    return parsed
+
+
+def _pending_file_fallback_result(url: str, *, reason: str) -> PendingQueueResult:
+    """Append to transcript-pending.md and return a pending_file result."""
+    _append_url_to_pending_file(url)
+    return PendingQueueResult(
+        action="pending_file",
+        message=(
+            f"Transcript unavailable ({reason}; recorded in transcript-pending.md)"
+        ),
+    )
+
+
+def add_url_to_pending_file(url: str, video_id: Optional[str] = None) -> PendingQueueResult:
+    """
+    Enqueue a URL for local-transcribe; fall back to transcript-pending.md.
+
+    Order: in-process ``enqueue_youtube_safe`` → ``lt queue add`` on PATH →
+    pending file. Capture never fails solely because the queue/NFS is down.
+    Does not start the worker.
+    """
+    if video_id and transcript_exists_on_disk(video_id):
+        verbose_logger.log(f"Transcript already on disk for {video_id}, skipping pending queue")
+        return PendingQueueResult(
+            action="skipped_on_disk",
+            message=f"Transcript already on disk for {video_id}",
+        )
+
+    try:
+        from local_transcribe.queue_api import enqueue_youtube_safe
+    except ImportError:
+        if shutil.which("lt"):
+            cli_result = _enqueue_via_lt_cli(url)
+            if cli_result is not None:
+                verbose_logger.log(
+                    f"Queued via lt CLI ({cli_result.action}): {url}"
+                )
+                logging.info(
+                    "Transcript queue outcome kind=%s execution_id=%s "
+                    "source_key=%s url=%s via=lt-cli",
+                    cli_result.action,
+                    cli_result.execution_id,
+                    cli_result.source_key,
+                    url,
+                )
+                return cli_result
+            verbose_logger.log(
+                "lt queue add failed; falling back to transcript-pending.md"
+            )
+            return _pending_file_fallback_result(
+                url,
+                reason="lt queue add failed / queue unavailable",
+            )
+
+        verbose_logger.log(
+            "local_transcribe not importable and lt CLI unavailable; "
+            "using transcript-pending.md"
+        )
+        _notify_local_transcribe_missing()
+        return _pending_file_fallback_result(
+            url,
+            reason="local-transcribe not installed",
+        )
+
+    outcome = enqueue_youtube_safe(
+        url,
+        origin="ref",
+        priority=20,
+        pending_fallback=Path(TRANSCRIPT_PENDING_FILE),
+    )
+    msg = format_queue_enqueue_message(outcome)
+    if outcome.fell_back_to_pending:
+        action = "pending_file"
+        eid = None
+        source_key = None
+    elif outcome.result is None:
+        action = "pending_file"
+        eid = None
+        source_key = None
+    else:
+        action = outcome.result.kind
+        eid = (
+            outcome.result.execution.execution_id
+            if outcome.result.execution
+            else None
+        )
+        source_key = outcome.result.source_key
+
+    verbose_logger.log(f"Queue enqueue ({action}): {url} -> {msg}")
+    logging.info(
+        "Transcript queue outcome kind=%s execution_id=%s source_key=%s url=%s",
+        action,
+        eid,
+        source_key,
+        url,
+    )
+    return PendingQueueResult(
+        action=action,
+        message=msg,
+        execution_id=eid,
+        source_key=source_key,
+    )
+
 
 def read_urls_from_file(file_path: str, force: bool = False) -> None:
     """
@@ -1356,8 +1609,15 @@ def read_urls_from_file(file_path: str, force: bool = False) -> None:
         print(f"Error reading file: {e}")
         logging.error(f"Error reading file {file_path}: {e}")
 
-def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
-    """Create a human-readable explanation for a transcript retrieval failure."""
+def format_transcript_failure(
+    failure_info: Optional[Tuple[str, str]],
+    queue_message: Optional[str] = None,
+) -> str:
+    """Create a human-readable explanation for a transcript retrieval failure.
+
+    When the failure should be queued, prefer ``queue_message`` from
+    :func:`add_url_to_pending_file` / :func:`format_queue_enqueue_message`.
+    """
 
     if not failure_info:
         return "No transcript available"
@@ -1366,7 +1626,9 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
     cleaned_message = ' '.join(str(message).split())
 
     if should_queue_transcript_pending(failure_info):
-        return "Transcript unavailable (queued in transcript-pending.md)"
+        if queue_message:
+            return queue_message
+        return "Transcript unavailable (queued for local-transcribe)"
 
     # For Rumble 403/unavailable, store a short placeholder so the reference file stays clean
     if method.startswith("rumble") and _is_rumble_transcript_unavailable_error(message):
@@ -1374,6 +1636,17 @@ def format_transcript_failure(failure_info: Optional[Tuple[str, str]]) -> str:
 
     method_display = method.replace('_', ' ').title()
     return f"No transcript available ({method_display} method: {cleaned_message})"
+
+
+def resolve_transcript_failure_placeholder(
+    failure_info: Optional[Tuple[str, str]],
+    video_url: Optional[str] = None,
+    video_id: Optional[str] = None,
+) -> str:
+    """Format failure text, enqueueing for local-transcribe when appropriate."""
+    if video_url and should_queue_transcript_pending(failure_info):
+        return add_url_to_pending_file(video_url, video_id).message
+    return format_transcript_failure(failure_info)
 
 
 def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Optional[str], Optional[Tuple[str, str]]]:
@@ -1933,14 +2206,14 @@ def process_url(url: str, force: bool) -> None:
                             }
                             transcript_file, failure_info = fetch_youtube_transcript(video_id, metadata=video_metadata)
                             if transcript_file is None:
-                                transcript_file = format_transcript_failure(failure_info)
+                                transcript_file = resolve_transcript_failure_placeholder(
+                                    failure_info, video_url, video_id
+                                )
                                 if failure_info:
                                     method_display = failure_info[0].replace('_', ' ').title()
                                     logging.info(
                                         f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
                                     )
-                                    if should_queue_transcript_pending(failure_info):
-                                        add_url_to_pending_file(video_url, video_id)
                                 else:
                                     logging.info(
                                         f"No transcript available for video {video_id} (common for music videos)"
@@ -1994,14 +2267,14 @@ def process_url(url: str, force: bool) -> None:
                         }
                         transcript_file, failure_info = fetch_youtube_transcript(video_id, metadata=video_metadata)
                         if transcript_file is None:
-                            transcript_file = format_transcript_failure(failure_info)
+                            transcript_file = resolve_transcript_failure_placeholder(
+                                failure_info, video_url, video_id
+                            )
                             if failure_info:
                                 method_display = failure_info[0].replace('_', ' ').title()
                                 logging.info(
                                     f"No transcript available for video {video_id} ({method_display} method: {failure_info[1]})"
                                 )
-                                if should_queue_transcript_pending(failure_info):
-                                    add_url_to_pending_file(video_url, video_id)
                             else:
                                 logging.info(
                                     f"No transcript available for video {video_id} (common for music videos)"

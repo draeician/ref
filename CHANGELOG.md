@@ -11,10 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ref-enrich --rate N`: sliding-window throttle for live network fetches (default **30/min**; `0` = unlimited). Cache reuse does not count (`src/ref_cli/enrich_cli.py`, `RateLimiter` in `enrichment.py`)
 - `ref-enrich` positional YouTube URL/video IDs for single-target enrich
 - Firefox/LibreWolf extension package: `./scripts/build-firefox.sh` → `dist/ref-copy-tab-urls-firefox-v*.xpi`; install notes in `extension/LIBREWOLF-INSTALL.md`
+- Queue-first transcript fallback via `local_transcribe.queue_api.enqueue_youtube_safe` (origin `ref`, priority 20); distinct user messages for newly enqueued, already-in-queue, and `transcript-pending.md` fallback (`docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`)
+- If the Python package isn't importable, `ref` shells out to `lt queue add` when `lt` is on `PATH` (no `pipx inject` required); if neither is available, prints one-time install instructions and records the URL in `transcript-pending.md`
 
 ### Changed
 - On enrich, private/unavailable YouTube videos: **remove** reference rows without a usable transcript; **keep** rows that have a transcript and stamp `@meta|…|unavailable` plus a stub card under `enrichment/youtube/videos/` so they are not re-fetched
 - Extension manifest **v1.1.0** with `browser_specific_settings.gecko` for Firefox/LibreWolf
+- Blocked / no-caption YouTube failures no longer always claim “queued in transcript-pending.md”; messaging follows local-transcribe enqueue outcomes (requires `pipx inject ref-cli local-transcribe`)
 
 ## [1.6.11] - 2026-07-17
 

@@ -109,12 +109,22 @@ def test_row_has_usable_transcript(tmp_path: Path) -> None:
     good = parse_data_line(
         f"2026-07-17T15:49:01|[https://youtu.be/abcdefghijk]|(T)|Ch|YouTube|{transcript}"
     )
-    bad = parse_data_line(
+    bad_pending = parse_data_line(
         "2026-07-17T15:49:01|[https://youtu.be/abcdefghijk]|(T)|Ch|YouTube|"
         "Transcript unavailable (queued in transcript-pending.md)"
     )
+    bad_worker = parse_data_line(
+        "2026-07-17T15:49:01|[https://youtu.be/abcdefghijk]|(T)|Ch|YouTube|"
+        "Transcript unavailable (queued for local-transcribe worker; execution abc)"
+    )
+    bad_active = parse_data_line(
+        "2026-07-17T15:49:01|[https://youtu.be/abcdefghijk]|(T)|Ch|YouTube|"
+        "Transcript unavailable (already in transcription queue: pending, execution xyz)"
+    )
     assert good is not None and row_has_usable_transcript(good)
-    assert bad is not None and not row_has_usable_transcript(bad)
+    assert bad_pending is not None and not row_has_usable_transcript(bad_pending)
+    assert bad_worker is not None and not row_has_usable_transcript(bad_worker)
+    assert bad_active is not None and not row_has_usable_transcript(bad_active)
 
 
 def test_unavailable_removes_without_transcript_keeps_with(
