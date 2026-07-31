@@ -170,19 +170,6 @@ class PendingQueueResult:
     source_key: Optional[str] = None
 
 
-LOCAL_TRANSCRIBE_GIT = "git+https://github.com/draeician/local_transcribe.git"
-LOCAL_TRANSCRIBE_INSTALL_HINT = (
-    "local-transcribe is not available to ref (needed to enqueue transcription).\n"
-    "Install the lt CLI once — ref will call it; no pipx inject required:\n"
-    f"  pipx install {LOCAL_TRANSCRIBE_GIT}\n"
-    "Or inject into the ref-cli environment (in-process API; pulls heavy deps):\n"
-    f"  pipx inject ref-cli {LOCAL_TRANSCRIBE_GIT}\n"
-    "Also ensure ~/.config/local-transcribe/config.yaml points at the shared queue.\n"
-    "See docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md"
-)
-
-_local_transcribe_missing_notified = False
-
 # Custom verbose logger
 class VerboseLogger:
     def __init__(self, enabled=False):
@@ -1345,16 +1332,6 @@ def _append_url_to_pending_file(url: str) -> None:
             logging.error(f"Error writing to transcript-pending.md: {e}")
 
 
-def _notify_local_transcribe_missing() -> None:
-    """Print install instructions once per process when queue tooling is absent."""
-    global _local_transcribe_missing_notified
-    if _local_transcribe_missing_notified:
-        return
-    _local_transcribe_missing_notified = True
-    print(warning(LOCAL_TRANSCRIBE_INSTALL_HINT))
-    logging.warning(LOCAL_TRANSCRIBE_INSTALL_HINT.replace("\n", " | "))
-
-
 def _parse_lt_queue_add_output(stdout: str) -> Optional[PendingQueueResult]:
     """Parse ``lt queue add`` stdout into a PendingQueueResult."""
     kind = None
@@ -1442,15 +1419,18 @@ def _enqueue_via_lt_cli(url: str) -> Optional[PendingQueueResult]:
     return parsed
 
 
-def _pending_file_fallback_result(url: str, *, reason: str) -> PendingQueueResult:
+def _pending_file_fallback_result(
+    url: str,
+    *,
+    reason: Optional[str] = None,
+) -> PendingQueueResult:
     """Append to transcript-pending.md and return a pending_file result."""
     _append_url_to_pending_file(url)
-    return PendingQueueResult(
-        action="pending_file",
-        message=(
-            f"Transcript unavailable ({reason}; recorded in transcript-pending.md)"
-        ),
-    )
+    if reason:
+        message = f"Transcript unavailable ({reason})"
+    else:
+        message = "Transcript unavailable (queued in transcript-pending.md)"
+    return PendingQueueResult(action="pending_file", message=message)
 
 
 def add_url_to_pending_file(url: str, video_id: Optional[str] = None) -> PendingQueueResult:
@@ -1491,18 +1471,15 @@ def add_url_to_pending_file(url: str, video_id: Optional[str] = None) -> Pending
             )
             return _pending_file_fallback_result(
                 url,
-                reason="lt queue add failed / queue unavailable",
+                reason="lt queue add failed / queue unavailable; "
+                "recorded in transcript-pending.md",
             )
 
         verbose_logger.log(
             "local_transcribe not importable and lt CLI unavailable; "
             "using transcript-pending.md"
         )
-        _notify_local_transcribe_missing()
-        return _pending_file_fallback_result(
-            url,
-            reason="local-transcribe not installed",
-        )
+        return _pending_file_fallback_result(url)
 
     outcome = enqueue_youtube_safe(
         url,

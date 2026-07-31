@@ -225,19 +225,18 @@ def test_add_url_to_pending_appends_new_url_when_api_missing(monkeypatch, tmp_pa
 
     monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
     monkeypatch.setattr(cli, "TRANSCRIPT_PENDING_FILE", str(pending_file))
-    monkeypatch.setattr(cli, "_local_transcribe_missing_notified", False)
     _block_local_transcribe(monkeypatch)
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
 
     outcome = cli.add_url_to_pending_file(video_url, video_id)
 
     assert outcome.action == "pending_file"
-    assert "local-transcribe not installed" in outcome.message
-    assert "recorded in transcript-pending.md" in outcome.message
+    assert outcome.message == "Transcript unavailable (queued in transcript-pending.md)"
     assert pending_file.read_text().strip() == video_url
     printed = capsys.readouterr().out
-    assert "pipx install" in printed
-    assert "local_transcribe.git" in printed
+    assert "pipx install" not in printed
+    assert "pipx inject" not in printed
+    assert "not available to ref" not in printed
 
 
 def test_add_url_to_pending_via_lt_cli_when_import_missing(monkeypatch, tmp_path):

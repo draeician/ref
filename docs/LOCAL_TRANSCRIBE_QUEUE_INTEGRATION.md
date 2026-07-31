@@ -55,15 +55,24 @@ local_transcribe.queue_api.enqueue_youtube_safe(url, origin="ref", …)
         └─ queue unavailable ──► append transcript-pending.md ──► report fallback
 ```
 
-### Prerequisites on each producer host
-1. Either:
-   - `lt` on `PATH` (`pipx install git+https://github.com/draeician/local_transcribe.git`) — **preferred**; ref shells out to `lt queue add`, or
-   - `local-transcribe` **0.5.0+** importable in the same environment as `ref`  
-     (`pipx inject ref-cli git+https://github.com/draeician/local_transcribe.git` — pulls heavy deps into ref’s venv).
-2. `~/.config/local-transcribe/config.yaml` with the same `queue.path` + `expected_uuid` as the worker host (written by `lt queue init` on the worker, then copied/synced to producer hosts).
-3. Shared NFS mount for that queue path (and transcripts root, if shared).
+### Recommended path: pending file only (no local-transcribe in ref)
 
-If neither the import nor `lt` is available, ref falls back to `transcript-pending.md` and prints install instructions once.
+ref can keep appending URLs to:
+
+`~/references/transcripts/transcript-pending.md`
+
+The **GPU worker** watches that file and auto-imports into the durable queue
+(`queue.watch_legacy_pending: true`, default). Ref does **not** need
+`local-transcribe` installed or `pipx inject`.
+
+### Optional: direct enqueue from ref
+
+1. Either `lt` on `PATH`, or `local-transcribe` importable / inject into ref.
+2. Same `~/.config/local-transcribe/config.yaml` (`queue.path` + UUID) as the worker.
+3. Shared NFS mount for the queue path.
+
+If direct enqueue is unavailable, ref falls back to `transcript-pending.md`
+(and the worker imports it).
 
 ref does **not** start the worker. The GPU host runs:
 

@@ -10,27 +10,11 @@ pipx install ref-cli
 
 ### Local transcription queue (optional)
 
-When YouTube captions are unavailable, `ref` enqueues the URL for
-[local-transcribe](https://github.com/draeician/local_transcribe) (≥ 0.5.0)
-instead of only appending `transcript-pending.md`.
-
-pipx isolates each app: installing `lt` does **not** put `local_transcribe` on
-`ref`'s Python import path. You do **not** need `pipx inject` — if `lt` is on
-your `PATH`, `ref` shells out to `lt queue add`.
-
-```bash
-# Recommended (producer hosts): install the CLI once
-pipx install git+https://github.com/draeician/local_transcribe.git
-
-# Optional: in-process API inside ref's venv (pulls torch and other heavy deps)
-pipx inject ref-cli git+https://github.com/draeician/local_transcribe.git
-```
-
-Also configure `~/.config/local-transcribe/config.yaml` with the same
-`queue.path` / `expected_uuid` as the worker host. `ref` is a producer only —
-it does not start the transcription worker. If neither the import nor `lt` is
-available, `ref` records the URL in `transcript-pending.md` and prints install
-instructions once. See `docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`.
+When YouTube captions are unavailable, `ref` records the URL in
+`transcript-pending.md` (the GPU worker can auto-import that file into the
+durable queue). If [local-transcribe](https://github.com/draeician/local_transcribe)
+(≥ 0.5.0) is available, `ref` may also enqueue directly. No install prompt is
+shown when it is missing. See `docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`.
 
 ### Shell tab completion (bash / zsh)
 
