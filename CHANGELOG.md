@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - If the Python package isn't importable, `ref` shells out to `lt queue add` when `lt` is on `PATH`; if neither is available, silently records the URL in `transcript-pending.md`
 
 ### Changed
+- `get_transcript.py`: compatible with `youtube-transcript-api` 1.2.0+ `FetchedTranscript`/`FetchedTranscriptSnippet` objects while still reading legacy dict segments; duration rounded (not truncated) to the nearest second; `get_video_metadata` returns a stable `id`/`title`/`channel`/`published_at` schema on every path
 - On enrich, private/unavailable YouTube videos: **remove** reference rows without a usable transcript; **keep** rows that have a transcript and stamp `@meta|…|unavailable` plus a stub card under `enrichment/youtube/videos/` so they are not re-fetched
 - Extension manifest **v1.1.0** with `browser_specific_settings.gecko` for Firefox/LibreWolf
 - Blocked / no-caption YouTube failures no longer always claim “queued in transcript-pending.md”; messaging follows local-transcribe enqueue outcomes (requires `pipx inject ref-cli local-transcribe`)
