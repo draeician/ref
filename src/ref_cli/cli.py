@@ -1124,6 +1124,7 @@ def parse_arguments() -> argparse.Namespace:
         epilog=textwrap.dedent("""\
             Remote ref-api (optional):
               Set api_url in ~/.config/ref/config.yaml, or run on the archive host:
+              ref --status                  Health-check configured ref-api (api_url)
               ref --install-server          User systemd service + config template
               ref --server-status           systemctl --user status ref-api
               ref --uninstall-server        Remove the systemd unit
@@ -1136,6 +1137,11 @@ def parse_arguments() -> argparse.Namespace:
               ref-advisors          Rank trusted YouTube/X/web advisors from references.md
               ref-enrich            Fetch YouTube meta cards + stamp category/role on rows
         """),
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Check connectivity to the configured ref-api (GET /health via api_url).",
     )
     parser.add_argument(
         "--install-server",
@@ -2545,6 +2551,10 @@ def main():
     try:
         args = parse_arguments()
 
+        if args.status:
+            from ref_cli.api_client import report_api_status
+
+            sys.exit(report_api_status(load_config()))
         if args.install_server:
             from ref_cli.server_install import install_server
 

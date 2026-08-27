@@ -69,3 +69,28 @@ def test_run_transcript_uses_api_when_configured(monkeypatch):
         "http://127.0.0.1:8000",
         "https://www.youtube.com/watch?v=abcd1234567",
     )
+
+
+def test_status_flag_exits_via_report(monkeypatch):
+    args = type(
+        "Args",
+        (),
+        {
+            "status": True,
+            "install_server": False,
+            "uninstall_server": False,
+            "server_status": False,
+            "server_host": "0.0.0.0",
+            "server_port": 8000,
+            "verbose": False,
+            "debug": None,
+            "edit": False,
+        },
+    )()
+    monkeypatch.setattr(cli, "parse_arguments", lambda: args)
+    monkeypatch.setattr(cli, "load_config", lambda: {"api_url": "http://minion:8000"})
+    with patch("ref_cli.api_client.report_api_status", return_value=0) as mock_status:
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+    assert exc.value.code == 0
+    mock_status.assert_called_once_with({"api_url": "http://minion:8000"})

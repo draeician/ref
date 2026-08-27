@@ -5,14 +5,16 @@ from __future__ import annotations
 import os
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 
-from ref_cli.utils.colors import error, success, url, warning
+from ref_cli.utils.colors import error, info, success, url, warning
 
 DEFAULT_INGEST_TIMEOUT = 300
 DEFAULT_SEARCH_TIMEOUT = 30
 DEFAULT_BACKUP_TIMEOUT = 120
+DEFAULT_HEALTH_TIMEOUT = 5
 
 
 class ApiError(Exception):
@@ -34,6 +36,125 @@ def get_api_base_url(config: dict) -> Optional[str]:
     return text.rstrip("/")
 
 
+def _endpoint_label(base_url: str) -> str:
+    """Human-readable host:port from api_url for error messages."""
+    parsed = urlparse(base_url)
+    host = parsed.hostname or base_url
+    if parsed.port is not None:
+        return f"{host}:{parsed.port}"
+    if parsed.scheme == "https":
+        return f"{host}:443"
+    if parsed.scheme == "http":
+        return f"{host}:80"
+    return host
+
+
+def _looks_like_html(text: str, content_type: str = "") -> bool:
+    ctype = (content_type or "").lower()
+    if "text/html" in ctype:
+        return True
+    sample = (text or "")[:200].lstrip().lower()
+    return sample.startswith("<!doctype html") or sample.startswith("<html")
+
+
+def _short_body_snippet(text: str, limit: int = 120) -> str:
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1] + "…"
+
+
+def _format_connection_error(base_url: str, exc: Exception) -> str:
+    """Explain why the client could not reach ref-api (host/port oriented)."""
+    label = _endpoint_label(base_url)
+    hint = (
+        f"Check api_url in ~/.config/ref/config.yaml (or REF_API_URL). "
+        f"Expected a running ref-api, e.g. http://minion:8000 — currently {base_url}"
+    )
+
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return (
+            f"Could not connect to ref API at {label}: connection timed out. {hint}"
+        )
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        return (
+            f"ref API at {label} did not respond in time (read timeout). "
+            f"The server may be busy; try again or raise the timeout."
+        )
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        cause = str(exc).lower()
+        if "name or service not known" in cause or "nodename nor servname" in cause:
+            return (
+                f"Could not resolve host for ref API ({label}). "
+                f"Check the hostname in api_url ({base_url})."
+            )
+        if "connection refused" in cause or "actively refused" in cause:
+            return (
+                f"Connection refused to ref API at {label} "
+                f"(nothing accepting connections on that host/port). {hint}"
+            )
+        if "network is unreachable" in cause:
+            return (
+                f"Network unreachable to ref API at {label}. "
+                f"Check LAN/VPN routing to that host."
+            )
+        return f"Could not connect to ref API at {label}: {exc}. {hint}"
+
+    return f"Could not reach ref API at {label} ({base_url}): {exc}. {hint}"
+
+
+def _format_http_error(base_url: str, response: requests.Response) -> str:
+    """Explain HTTP failures without dumping HTML error pages."""
+    label = _endpoint_label(base_url)
+    code = response.status_code
+    body = response.text or ""
+    content_type = response.headers.get("content-type", "")
+    hint = (
+        f"Check api_url in ~/.config/ref/config.yaml (or REF_API_URL); "
+        f"it should point at the ref-api host (currently {base_url})."
+    )
+
+    if _looks_like_html(body, content_type):
+        # Wrong host / reverse proxy / non-ref service answering this port.
+        if code == 403:
+            return (
+                f"ref API at {label} returned HTTP 403 Forbidden with an HTML page "
+                f"(not a ref-api JSON response). Something else is answering on that "
+                f"host/port, or a proxy is blocking the request. {hint}"
+            )
+        if code == 404:
+            return (
+                f"ref API at {label} returned HTTP 404 with an HTML page "
+                f"(not ref-api). Wrong host/port or path? {hint}"
+            )
+        return (
+            f"ref API at {label} returned HTTP {code} with an HTML page "
+            f"(not a ref-api JSON response). Wrong host/port? {hint}"
+        )
+
+    # Prefer FastAPI-style JSON detail when present.
+    try:
+        payload = response.json()
+        detail = payload.get("detail", payload)
+        if isinstance(detail, list):
+            detail = "; ".join(str(item) for item in detail)
+        detail_text = str(detail)
+    except ValueError:
+        detail_text = _short_body_snippet(body) or response.reason or "no body"
+
+    if code == 403:
+        return (
+            f"ref API at {label} returned HTTP 403 Forbidden: {detail_text}. {hint}"
+        )
+    if code == 404:
+        return (
+            f"ref API at {label} returned HTTP 404 Not Found: {detail_text}. "
+            f"Is ref-api running and up to date on that host?"
+        )
+
+    return f"ref API at {label} returned HTTP {code}: {detail_text}"
+
+
 def _request_json(
     method: str,
     base_url: str,
@@ -53,19 +174,75 @@ def _request_json(
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise ApiError(f"Could not reach ref API at {base_url}: {exc}") from exc
+        raise ApiError(_format_connection_error(base_url, exc)) from exc
 
     if response.status_code >= 400:
-        detail = response.text.strip() or response.reason
         raise ApiError(
-            f"ref API error ({response.status_code}): {detail}",
+            _format_http_error(base_url, response),
             status_code=response.status_code,
         )
 
     try:
         return response.json()
     except ValueError as exc:
-        raise ApiError(f"ref API returned invalid JSON from {url_path}") from exc
+        label = _endpoint_label(base_url)
+        raise ApiError(
+            f"ref API at {label} returned non-JSON from {url_path} "
+            f"(is api_url pointing at ref-api? currently {base_url})"
+        ) from exc
+
+
+def check_health(
+    base_url: str,
+    *,
+    timeout: float = DEFAULT_HEALTH_TIMEOUT,
+) -> Dict[str, Any]:
+    """GET /health and return the JSON body."""
+    return _request_json(
+        "GET",
+        base_url,
+        "/health",
+        timeout=timeout,
+    )
+
+
+def report_api_status(config: Optional[dict] = None) -> int:
+    """
+    Print client mode and ref-api connectivity.
+
+    Exit 0 when healthy (or local-only with no api_url).
+    Exit 1 when api_url is set but the health check fails.
+    """
+    cfg = config if config is not None else {}
+    base_url = get_api_base_url(cfg)
+    if not base_url:
+        print(info("Mode: local (api_url not set)"))
+        print(
+            info(
+                "ref uses local files only. Set api_url in ~/.config/ref/config.yaml "
+                "(or REF_API_URL) to use a remote ref-api."
+            )
+        )
+        return 0
+
+    label = _endpoint_label(base_url)
+    print(info(f"Mode: remote"))
+    print(info(f"api_url: {base_url} ({label})"))
+    try:
+        health = check_health(base_url)
+    except ApiError as exc:
+        print(error(f"Status: unreachable"))
+        print(error(str(exc)))
+        return 1
+
+    status = health.get("status", "unknown")
+    version = health.get("version", "unknown")
+    if status == "ok":
+        print(success(f"Status: ok (version {version})"))
+        return 0
+
+    print(warning(f"Status: {status} (version {version})"))
+    return 1
 
 
 def ingest_urls(
@@ -200,12 +377,19 @@ def download_backup(
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise ApiError(f"Could not reach ref API at {base_url}: {exc}") from exc
+        raise ApiError(_format_connection_error(base_url, exc)) from exc
 
     if response.status_code >= 400:
-        detail = response.text.strip() or response.reason
+        # Drain a small prefix so error formatting can inspect HTML bodies
+        # when the response was requested with stream=True.
+        try:
+            peek = next(response.iter_content(chunk_size=4096), b"")
+            if peek and not getattr(response, "_content", None):
+                response._content = peek
+        except Exception:  # noqa: BLE001
+            pass
         raise ApiError(
-            f"ref API error ({response.status_code}): {detail}",
+            _format_http_error(base_url, response),
             status_code=response.status_code,
         )
 

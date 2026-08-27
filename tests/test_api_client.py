@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from ref_cli import api_client
 
@@ -82,11 +83,119 @@ def test_print_search_results(capsys):
     assert "-Hit Type: Title" in out
 
 
-def test_ingest_via_api_connection_error(capsys):
-    with patch("ref_cli.api_client.ingest_urls", side_effect=api_client.ApiError("down")):
-        code = api_client.ingest_via_api("http://127.0.0.1:8000", "https://example.com")
+def test_format_http_error_html_403_no_html_dump():
+    response = MagicMock()
+    response.status_code = 403
+    response.headers = {"content-type": "text/html"}
+    response.text = (
+        "<!DOCTYPE html><html><body><pre>Forbidden</pre></body></html>"
+    )
+    response.reason = "Forbidden"
+    response.json.side_effect = ValueError("no json")
+
+    message = api_client._format_http_error("http://nomnom:8000", response)
+    assert "nomnom:8000" in message
+    assert "403" in message
+    assert "HTML" in message
+    assert "api_url" in message
+    assert "<!DOCTYPE" not in message
+    assert "Forbidden</pre>" not in message
+
+
+def test_format_connection_refused():
+    exc = requests.exceptions.ConnectionError(
+        "HTTPConnectionPool(host='minion', port=8000): "
+        "Max retries exceeded with url: /urls "
+        "(Caused by NewConnectionError("
+        "\"<urllib3.connection.HTTPConnection object>: "
+        "Failed to establish a new connection: [Errno 111] Connection refused\"))"
+    )
+    message = api_client._format_connection_error("http://minion:8000", exc)
+    assert "minion:8000" in message
+    assert "Connection refused" in message or "connection refused" in message.lower()
+    assert "api_url" in message
+
+
+def test_format_dns_failure():
+    exc = requests.exceptions.ConnectionError(
+        "Failed to resolve 'badhost' ([Errno -2] Name or service not known)"
+    )
+    message = api_client._format_connection_error("http://badhost:8000", exc)
+    assert "badhost:8000" in message
+    assert "resolve" in message.lower()
+
+
+def test_request_json_uses_friendly_http_error():
+    response = MagicMock()
+    response.status_code = 403
+    response.headers = {"content-type": "text/html"}
+    response.text = "<html>Forbidden</html>"
+    response.reason = "Forbidden"
+    response.json.side_effect = ValueError("no json")
+
+    with patch("ref_cli.api_client.requests.request", return_value=response):
+        with pytest.raises(api_client.ApiError) as excinfo:
+            api_client._request_json(
+                "POST",
+                "http://nomnom:8000",
+                "/urls",
+                timeout=5,
+                json_body={"url": "https://example.com"},
+            )
+    assert "nomnom:8000" in str(excinfo.value)
+    assert "<html>" not in str(excinfo.value)
+
+
+def test_report_api_status_local_mode(capsys):
+    code = api_client.report_api_status({})
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "local" in out.lower()
+    assert "api_url not set" in out
+
+
+def test_report_api_status_healthy(capsys):
+    with patch(
+        "ref_cli.api_client.check_health",
+        return_value={"status": "ok", "version": "1.6.12"},
+    ):
+        code = api_client.report_api_status({"api_url": "http://minion:8000"})
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "remote" in out.lower()
+    assert "minion:8000" in out
+    assert "ok" in out.lower()
+    assert "1.6.12" in out
+
+
+def test_report_api_status_unreachable(capsys):
+    with patch(
+        "ref_cli.api_client.check_health",
+        side_effect=api_client.ApiError(
+            "Connection refused to ref API at nomnom:8000 "
+            "(nothing accepting connections on that host/port)."
+        ),
+    ):
+        code = api_client.report_api_status({"api_url": "http://nomnom:8000"})
+    out = capsys.readouterr().out
     assert code == 1
-    assert "down" in capsys.readouterr().out
+    assert "unreachable" in out.lower()
+    assert "nomnom:8000" in out
+
+
+def test_check_health_calls_endpoint():
+    with patch(
+        "ref_cli.api_client._request_json",
+        return_value={"status": "ok", "version": "1.0"},
+    ) as mock_req:
+        body = api_client.check_health("http://minion:8000")
+    assert body["status"] == "ok"
+    mock_req.assert_called_once_with(
+        "GET",
+        "http://minion:8000",
+        "/health",
+        timeout=api_client.DEFAULT_HEALTH_TIMEOUT,
+    )
 
 
 def test_search_via_api_success(capsys):

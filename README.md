@@ -8,6 +8,16 @@ A command-line tool for recording and managing URL references, with special supp
 pipx install ref-cli
 ```
 
+The optional FastAPI / `ref-api` server and client mode (`api_url`) landed **after** git tag **`v1.6.12-beta`** (commit `9088af3`, the last revision before that work). To stay on local-only `ref` without the API stack:
+
+```bash
+# Exact last pre-API commit (recommended if you want everything through the beta tag)
+pipx install 'git+https://github.com/draeician/ref.git@v1.6.12-beta'
+
+# Or the last PyPI release before that line of work
+pipx install 'ref-cli==1.6.11'
+```
+
 ### Local transcription queue (optional)
 
 When YouTube captions are unavailable, `ref` records the URL in
@@ -85,8 +95,11 @@ When `api_url` is set:
 - `ref --backup` downloads a server-side backup into your local `paths.references` directory (respects `--nocompress`)
 - `ref --file urls.txt` POSTs each URL to `/urls` (file is read/written locally; archive updates happen on the server)
 - `ref --transcript <url>` calls `POST /transcript` on the server
+- `ref --status` GETs `/health` and reports connectivity (exit 1 if unreachable)
 
 Other commands (`--integrity`, etc.) still run locally on the machine where you invoke `ref`.
+
+`ref --server-status` is different: it shows **local** `systemctl --user status ref-api` on the archive host.
 
 ### Shell tab completion (bash / zsh)
 
