@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`ref-api`** optional HTTP server (`pip install 'ref-cli[api]'`): `POST /urls`, `GET /search`, `POST /backup`, `POST /transcript`, `GET /health`
+- **`ref --install-server`** / **`--uninstall-server`** / **`--server-status`**: user systemd unit, pipx `[api]` inject, documented `~/.config/ref/config.yaml` template bootstrap
+- **Client mode**: `api_url` in config (or `REF_API_URL`) routes `ref <url>`, search, `--file`, `--backup`, and `--transcript` through ref-api
 - `ref-enrich --rate N`: sliding-window throttle for live network fetches (default **30/min**; `0` = unlimited). Cache reuse does not count (`src/ref_cli/enrich_cli.py`, `RateLimiter` in `enrichment.py`)
 - `ref-enrich` positional YouTube URL/video IDs for single-target enrich
 - Firefox/LibreWolf extension package: `./scripts/build-firefox.sh` → `dist/ref-copy-tab-urls-firefox-v*.xpi`; install notes in `extension/LIBREWOLF-INSTALL.md`

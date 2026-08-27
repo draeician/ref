@@ -1,0 +1,61 @@
+# ref configuration (~/.config/ref/config.yaml)
+#
+# Copy created by `ref --install-server` on first setup, or on first `ref` run when
+# the config directory did not exist yet. Edit this file to match your machine.
+#
+# Environment overrides:
+#   REF_API_URL       — remote ref-api base URL (overrides api_url below)
+#   REF_API_HOST      — bind address for ref-api (systemd / ref-api CLI)
+#   REF_API_PORT      — port for ref-api (systemd / ref-api CLI)
+#   YOUTUBE_API_KEY   — YouTube Data API key (also ~/.env or ref-api.env)
+
+# ---------------------------------------------------------------------------
+# ref-api client mode (optional)
+# ---------------------------------------------------------------------------
+# When set, `ref <url>`, `ref --search`, `ref --file`, `ref --backup`, and
+# `ref --transcript` talk to a ref-api server instead of local ~/references.
+#
+# Server machine (same box as ref-api): leave as http://127.0.0.1:8000 after
+# `ref --install-server`, or set null and use local files only.
+#
+# Other machines: set to your server's LAN URL, e.g. http://192.168.1.10:8000
+#
+# Client-only installs need `pipx install ref-cli` (no [api] extra).
+api_url: null
+
+# ---------------------------------------------------------------------------
+# Archive paths (server-side; clients may keep defaults for --file / --backup)
+# ---------------------------------------------------------------------------
+paths:
+  references: ~/references
+  transcripts: ~/references/transcripts
+  enrichment: ~/references/enrichment
+
+# ---------------------------------------------------------------------------
+# URL normalization — query params stripped when saving references
+# ---------------------------------------------------------------------------
+removable_keys:
+  - utm_source
+  - utm_medium
+  - utm_campaign
+  - utm_term
+  - utm_content
+  - fbclid
+  - gclid
+  - _ga
+
+# ---------------------------------------------------------------------------
+# Rumble / yt-dlp (optional)
+# ---------------------------------------------------------------------------
+# Browser name whose cookies yt-dlp should use when Rumble returns 403.
+# Env override: REF_RUMBLE_COOKIES_BROWSER
+rumble_cookies_from_browser: null
+
+# ---------------------------------------------------------------------------
+# Skip patterns — URLs matching these are not recorded
+# ---------------------------------------------------------------------------
+# Exact match or glob (*). Checked locally for `ref --file`; also on the server
+# when using ref-api ingest.
+skip_patterns:
+  # - https://mail.google.com/*
+  # - https://mail.google.com/mail/u/0

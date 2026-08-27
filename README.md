@@ -16,6 +16,78 @@ durable queue). If [local-transcribe](https://github.com/draeician/local_transcr
 (≥ 0.5.0) is available, `ref` may also enqueue directly. No install prompt is
 shown when it is missing. See `docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`.
 
+### HTTP API (`ref-api`, optional)
+
+Run a LAN-facing archive server, or point `ref` at an existing one.
+
+**Archive host (this machine owns `~/references`):**
+
+```bash
+pipx install ref-cli
+ref --install-server              # pipx inject [api], config template, user systemd unit
+ref --server-status
+ref --uninstall-server
+
+# Manual alternative:
+pipx inject ref-cli 'ref-cli[api]'
+ref-api                           # foreground, 0.0.0.0:8000
+```
+
+`ref --install-server` creates `~/.config/ref/config.yaml` from a documented template when missing, adds `ref-api.env`, enables `ref-api.service` under **user systemd**, and sets `api_url: http://127.0.0.1:8000` when still unset. For boot without login: `loginctl enable-linger $USER`.
+
+**Other machines (clients only):**
+
+```bash
+pipx install ref-cli              # no [api] extra required
+```
+
+Set `api_url` in `~/.config/ref/config.yaml` to the server URL.
+
+Requires **Python 3.8+** on the host running `ref-api`. **No authentication** yet — bind only on trusted networks.
+
+```bash
+pip install 'ref-cli[api]'
+# or: pipx inject ref-cli 'ref-cli[api]'
+# or: pip install -e '.[api]'
+
+ref-api --host 127.0.0.1 --port 8080
+# or: REF_API_HOST / REF_API_PORT
+```
+
+```bash
+curl -sS http://127.0.0.1:8000/health
+
+# Special characters (?, &, #, spaces, unicode) belong in the JSON body
+curl -sS -X POST http://127.0.0.1:8000/urls \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/search?q=hello world&x=1#frag-üñîçødé","force":false}'
+
+curl -sS -X POST http://127.0.0.1:8000/urls \
+  -H 'Content-Type: application/json' \
+  -d '{"urls":["https://one.example/","https://two.example/"],"force":false}'
+```
+
+Response shape: `{"results":[{"input":"…","url":"…","status":"added|exists|skipped|error","message":"…","output":"…"}]}`.
+
+### Using `ref` as an API client
+
+Point the CLI at a running `ref-api` server by setting `api_url` in `~/.config/ref/config.yaml` (or `REF_API_URL` in the environment):
+
+```yaml
+api_url: http://192.168.1.10:8000
+```
+
+When `api_url` is set:
+
+- `ref <url>` POSTs to `/urls` and prints the same stdout-style lines as local mode
+- `ref --search` (and `--search-url`, `--search-title`, etc.) call `GET /search` and render `-Hit Type:` lines as before
+- Exit code `1` when ingest returns `error` or the API is unreachable; `0` for added, exists, or skipped
+- `ref --backup` downloads a server-side backup into your local `paths.references` directory (respects `--nocompress`)
+- `ref --file urls.txt` POSTs each URL to `/urls` (file is read/written locally; archive updates happen on the server)
+- `ref --transcript <url>` calls `POST /transcript` on the server
+
+Other commands (`--integrity`, etc.) still run locally on the machine where you invoke `ref`.
+
 ### Shell tab completion (bash / zsh)
 
 After installing (pipx or editable), enable completion once in your shell — same pattern as `ol` / `od`:
@@ -83,7 +155,18 @@ Fetch order: YouTube Data API when `YOUTUBE_API_KEY` is set, otherwise **yt-dlp*
 
 ## Configuration
 
-Configuration is stored in `~/.config/ref/config.yaml`. The default configuration includes paths and removable URL parameters. You can customize:
+Configuration lives in `~/.config/ref/config.yaml`. On first run, or when you run `ref --install-server` on a machine without that directory, a **documented template** is copied into place. Optional server env vars: `~/.config/ref/ref-api.env` (see `ref-api.env.template`).
+
+Key settings:
+
+```yaml
+api_url: null                    # set to http://host:8000 for client mode
+paths:
+  references: ~/references
+skip_patterns: []                # glob or exact URL skips
+```
+
+See the template file after bootstrap for full comments. Override client URL with `REF_API_URL`.
 
 ### Skip Patterns
 

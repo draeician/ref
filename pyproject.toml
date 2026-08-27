@@ -35,16 +35,26 @@ dependencies = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+]
+
 [project.scripts]
 ref = "ref_cli.cli:main"
 ref-fix-x-titles = "ref_cli.fix_x_titles:main"
 ref-fix-reddit-titles = "ref_cli.fix_reddit_titles:main"
 ref-advisors = "ref_cli.advisors:main"
 ref-enrich = "ref_cli.enrich_cli:main"
+ref-api = "ref_api.server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["ref_cli", "ref_cli.utils"]
+packages = ["ref_cli", "ref_cli.utils", "ref_api"]
+
+[tool.setuptools.package-data]
+ref_cli = ["config/*.yaml", "config/*.template"]
 
 [tool.setuptools_scm]
 write_to = "src/ref_cli/_version.py" 

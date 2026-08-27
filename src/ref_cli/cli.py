@@ -261,27 +261,9 @@ _oembed_request_times: Deque[float] = deque()
 # Copy all functions from original file
 def ensure_config_exists():
     """Ensures that the configuration directory and file exist."""
-    if not os.path.exists(CONFIG_DIR):
-        os.makedirs(CONFIG_DIR)
-    if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'w') as file:
-            yaml.dump(get_default_config(), file)
-    else:
-        # Merge missing keys from default config (e.g., skip_patterns)
-        default_config = get_default_config()
-        with open(CONFIG_FILE, 'r') as file:
-            user_config = yaml.safe_load(file) or {}
-        
-        # Merge missing keys
-        updated = False
-        for key, value in default_config.items():
-            if key not in user_config:
-                user_config[key] = value
-                updated = True
-        
-        if updated:
-            with open(CONFIG_FILE, 'w') as file:
-                yaml.dump(user_config, file)
+    from ref_cli.server_install import bootstrap_config_dir
+
+    bootstrap_config_dir()
 
 def load_config() -> dict:
     """Loads the configuration from the YAML file."""
@@ -1140,6 +1122,12 @@ def parse_arguments() -> argparse.Namespace:
         description="Add or search URL entries in markdown files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
+            Remote ref-api (optional):
+              Set api_url in ~/.config/ref/config.yaml, or run on the archive host:
+              ref --install-server          User systemd service + config template
+              ref --server-status           systemctl --user status ref-api
+              ref --uninstall-server        Remove the systemd unit
+
             Related helper scripts:
               ref-fix-x-titles       Repair X/Twitter titles in references.md
                                     (dry-run by default; pass --apply to write)
@@ -1148,6 +1136,32 @@ def parse_arguments() -> argparse.Namespace:
               ref-advisors          Rank trusted YouTube/X/web advisors from references.md
               ref-enrich            Fetch YouTube meta cards + stamp category/role on rows
         """),
+    )
+    parser.add_argument(
+        "--install-server",
+        action="store_true",
+        help="Install ref-api as a user systemd service (pipx inject [api], config template, enable unit).",
+    )
+    parser.add_argument(
+        "--uninstall-server",
+        action="store_true",
+        help="Disable and remove the user systemd ref-api service.",
+    )
+    parser.add_argument(
+        "--server-status",
+        action="store_true",
+        help="Show systemctl --user status for ref-api.",
+    )
+    parser.add_argument(
+        "--server-host",
+        default=os.environ.get("REF_API_HOST", "0.0.0.0"),
+        help="Bind address for --install-server (default: 0.0.0.0 or REF_API_HOST).",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=int(os.environ.get("REF_API_PORT", "8000")),
+        help="Port for --install-server (default: 8000 or REF_API_PORT).",
     )
     parser.add_argument("url", nargs='?', default=None, help="URL to be added or YouTube video ID (11 characters).")
     parser.add_argument("-f", "--force", action="store_true", help="Force addition even if URL already exists.")
@@ -2429,23 +2443,132 @@ def create_backup(file_path: str, *, compress: bool = True) -> Optional[str]:
         logging.error(f"Error creating backup: {e}")
         return None
 
+def configured_api_base_url() -> Optional[str]:
+    """Return ref-api base URL from config/env, or None for local mode."""
+    from ref_cli.api_client import get_api_base_url
+
+    return get_api_base_url(load_config())
+
+
+def _print_search_results(results: dict) -> None:
+    for line, hit_types in results.items():
+        unique_hit_types = list(set(hit_types))
+        print(line.strip())
+        for hit_type in unique_hit_types:
+            print(f"-Hit Type: {hit_type}")
+
+
+def run_search(search_term: str, field: str = "all") -> None:
+    """Search locally or via ref-api; exits the process when using the API."""
+    api_base = configured_api_base_url()
+    if api_base:
+        from ref_cli.api_client import search_via_api
+
+        sys.exit(search_via_api(api_base, search_term, field=field))
+
+    if field == "all":
+        all_fields = ["url", "title", "date", "source", "uploader"]
+        results = {}
+        for search_field in all_fields:
+            field_results = search_entries(search_term, search_field, UNIFIED)
+            for line, hit_types in field_results.items():
+                if line not in results:
+                    results[line] = hit_types
+                else:
+                    results[line].extend(hit_types)
+        _print_search_results(results)
+        return
+
+    results = search_entries(search_term, field, UNIFIED)
+    _print_search_results(results)
+
+
+def run_backup(*, compress: bool = True) -> None:
+    """Create or download a references.md backup; exits when using the API."""
+    api_base = configured_api_base_url()
+    if api_base:
+        from ref_cli.api_client import backup_via_api
+
+        config = load_config()
+        dest = os.path.expanduser(config["paths"]["references"])
+        sys.exit(backup_via_api(api_base, dest, compress=compress))
+
+    create_backup(UNIFIED, compress=compress)
+
+
+def run_file_ingest(file_path: str, force: bool = False) -> None:
+    """Process URLs from a file locally or via ref-api (one POST per URL)."""
+    api_base = configured_api_base_url()
+    if api_base:
+        from ref_cli.api_client import ingest_file_via_api
+
+        ingest_file_via_api(api_base, file_path, force=force)
+        return
+
+    read_urls_from_file(file_path, force)
+
+
+def run_transcript(video_url: str) -> None:
+    """Update a YouTube transcript locally or on ref-api; exits when using the API."""
+    api_base = configured_api_base_url()
+    if api_base:
+        from ref_cli.api_client import update_transcript_via_api
+
+        sys.exit(update_transcript_via_api(api_base, video_url))
+
+    update_transcript(video_url)
+
+
+def run_ingest(raw_input: str, force: bool = False) -> None:
+    """Record a URL locally or via ref-api; exits the process when using the API."""
+    api_base = configured_api_base_url()
+    if api_base:
+        from ref_cli.api_client import ingest_via_api
+
+        if is_youtube_video_id(raw_input):
+            print(info(f"Detected YouTube video ID: {highlight(raw_input)}"))
+            youtube_url = convert_video_id_to_url(raw_input)
+            print(info(f"Converting to URL: {url(youtube_url)}"))
+        sys.exit(ingest_via_api(api_base, raw_input, force=force))
+
+    if is_youtube_video_id(raw_input):
+        print(info(f"Detected YouTube video ID: {highlight(raw_input)}"))
+        youtube_url = convert_video_id_to_url(raw_input)
+        print(info(f"Converting to URL: {url(youtube_url)}"))
+        process_url(youtube_url, force)
+    else:
+        process_url(raw_input, force)
+
+
 def main():
     """Main function to handle the command-line interface for recording URLs."""
-    ensure_path_exists(UNIFIED)
-    ensure_path_exists(TRANSCRIPT_PENDING_FILE)
-    # Version header + schema upgrade when references.md is behind.
-    try:
-        from ref_cli.references_format import ensure_references_migrated
-        # Compress migrate backups by default; --nocompress applied after parse below
-        # if we re-migrate is N/A — migrate runs once here with gzip default.
-        migrate_msg = ensure_references_migrated(UNIFIED, backup=True, compress=True)
-        if migrate_msg:
-            print(info(migrate_msg))
-    except Exception as migrate_exc:  # noqa: BLE001 - never block capture
-        logging.warning("references.md migrate skipped: %s", migrate_exc)
     try:
         args = parse_arguments()
-        
+
+        if args.install_server:
+            from ref_cli.server_install import install_server
+
+            sys.exit(install_server(host=args.server_host, port=args.server_port))
+        if args.uninstall_server:
+            from ref_cli.server_install import uninstall_server
+
+            sys.exit(uninstall_server())
+        if args.server_status:
+            from ref_cli.server_install import server_status
+
+            sys.exit(server_status())
+
+        ensure_path_exists(UNIFIED)
+        ensure_path_exists(TRANSCRIPT_PENDING_FILE)
+        # Version header + schema upgrade when references.md is behind.
+        try:
+            from ref_cli.references_format import ensure_references_migrated
+            migrate_msg = ensure_references_migrated(UNIFIED, backup=True, compress=True)
+            if migrate_msg:
+                print(info(migrate_msg))
+        except Exception as migrate_exc:  # noqa: BLE001 - never block capture
+            logging.warning("references.md migrate skipped: %s", migrate_exc)
+
         # Enable verbose logging if flag is set
         verbose_logger.enabled = args.verbose
         verbose_logger.log("Verbose logging enabled")
@@ -2475,71 +2598,25 @@ def main():
             else:
                 print(success("Integrity check passed. Log files are formatted correctly."))
         elif args.backup:
-            create_backup(UNIFIED, compress=not args.nocompress)
+            run_backup(compress=not args.nocompress)
         elif args.search:
-            search_term = args.search
-            all_fields = ["url", "title", "date", "source", "uploader"]
-            results = {}
-            for field in all_fields:
-                field_results = search_entries(search_term, field, UNIFIED)
-                for line, hit_types in field_results.items():
-                    if line not in results:
-                        results[line] = hit_types
-                    else:
-                        results[line].extend(hit_types)
-            for line, hit_types in results.items():
-                unique_hit_types = list(set(hit_types))
-                print(line.strip())
-                for hit_type in unique_hit_types:
-                    print(f"-Hit Type: {hit_type}")
+            run_search(args.search, field="all")
         elif args.search_url:
-            results = search_entries(args.search_url, "url", UNIFIED)
-            for line, hit_types in results.items():
-                unique_hit_types = list(set(hit_types))
-                print(line.strip())
-                for hit_type in unique_hit_types:
-                    print(f"-Hit Type: {hit_type}")
+            run_search(args.search_url, field="url")
         elif args.search_title:
-            results = search_entries(args.search_title, "title", UNIFIED)
-            for line, hit_types in results.items():
-                unique_hit_types = list(set(hit_types))
-                print(line.strip())
-                for hit_type in unique_hit_types:
-                    print(f"-Hit Type: {hit_type}")
+            run_search(args.search_title, field="title")
         elif args.search_date:
-            results = search_entries(args.search_date, "date", UNIFIED)
-            for line, hit_types in results.items():
-                unique_hit_types = list(set(hit_types))
-                print(line.strip())
-                for hit_type in unique_hit_types:
-                    print(f"-Hit Type: {hit_type}")
+            run_search(args.search_date, field="date")
         elif args.search_source:
-            results = search_entries(args.search_source, "source", UNIFIED)
-            for line, hit_types in results.items():
-                unique_hit_types = list(set(hit_types))
-                print(line.strip())
-                for hit_type in unique_hit_types:
-                    print(f"-Hit Type: {hit_type}")
+            run_search(args.search_source, field="source")
         elif args.search_uploader:
-            results = search_entries(args.search_uploader, "uploader", UNIFIED)
-            for line, hit_types in results.items():
-                unique_hit_types = list(set(hit_types))
-                print(line.strip())
-                for hit_type in unique_hit_types:
-                    print(f"-Hit Type: {hit_type}")
+            run_search(args.search_uploader, field="uploader")
         elif args.transcript and args.url:
-            update_transcript(args.url)
+            run_transcript(args.url)
         elif args.file:
-            read_urls_from_file(args.file, args.force)
+            run_file_ingest(args.file, args.force)
         elif args.url:
-            # Check if the provided argument is a YouTube video ID
-            if is_youtube_video_id(args.url):
-                print(info(f"Detected YouTube video ID: {highlight(args.url)}"))
-                youtube_url = convert_video_id_to_url(args.url)
-                print(info(f"Converting to URL: {url(youtube_url)}"))
-                process_url(youtube_url, args.force)
-            else:
-                process_url(args.url, args.force)
+            run_ingest(args.url, force=args.force)
         else:
             # Load config for skip patterns
             user_config = load_config()
@@ -2574,11 +2651,25 @@ def main():
                         continue
                     
                     force = False
+                    api_base = configured_api_base_url()
                     # Process each URL
                     for user_input in urls_to_process:
                         if not user_input:
                             continue
-                        
+
+                        if api_base:
+                            from ref_cli.api_client import ingest_via_api
+
+                            if is_youtube_video_id(user_input):
+                                print(info(f"Detected YouTube video ID: {highlight(user_input)}"))
+                                youtube_url = convert_video_id_to_url(user_input)
+                                print(info(f"Converting to URL: {url(youtube_url)}"))
+                            exit_code = ingest_via_api(api_base, user_input, force=force)
+                            if exit_code != 0:
+                                logging.error("API ingest failed for %s (exit %s)", user_input, exit_code)
+                            time.sleep(1)
+                            continue
+
                         # Check if URL should be skipped
                         if should_skip_url(user_input, user_config):
                             print(warning(f"Skipping URL (matches skip pattern): {url(user_input)}"))
