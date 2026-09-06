@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Queue-first transcript fallback via `local_transcribe.queue_api.enqueue_youtube_safe` (origin `ref`, priority 20); distinct user messages for newly enqueued, already-in-queue, and `transcript-pending.md` fallback (`docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`)
 - If the Python package isn't importable, `ref` shells out to `lt queue add` when `lt` is on `PATH`; if neither is available, silently records the URL in `transcript-pending.md`
 
+### Fixed
+- Rumble capture no longer aborts when `yt-dlp` is missing from `PATH`: resolve via PATH, the pipx/venv sibling binary, or `python -m yt_dlp`, and still record the reference with `No transcript available` on failure (`src/ref_cli/cli.py`)
+- Rumble rows now store channel as uploader and `Rumble` as source (`|{channel}|Rumble|{status}`), scraping `.media-heading-name` from the page via lynx
+
 ### Changed
 - `get_transcript.py`: compatible with `youtube-transcript-api` 1.2.0+ `FetchedTranscript`/`FetchedTranscriptSnippet` objects while still reading legacy dict segments; duration rounded (not truncated) to the nearest second; `get_video_metadata` returns a stable `id`/`title`/`channel`/`published_at` schema on every path
 - On enrich, private/unavailable YouTube videos: **remove** reference rows without a usable transcript; **keep** rows that have a transcript and stamp `@meta|…|unavailable` plus a stub card under `enrichment/youtube/videos/` so they are not re-fetched

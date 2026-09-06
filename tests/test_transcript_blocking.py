@@ -351,10 +351,13 @@ def test_rumble_403_transcript_failure_records_without_error_logs(monkeypatch, t
     monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
     monkeypatch.setattr(cli, "resolve_redirect", lambda url: url)
     monkeypatch.setattr(cli, "load_config", lambda: {})
+    monkeypatch.setattr(cli, "_yt_dlp_command", lambda: ["yt-dlp"])
 
     html = (
         '<html><head><meta property="og:title" '
-        'content="The Human Antenna Documentary"/></head><body></body></html>'
+        'content="The Human Antenna Documentary"/></head>'
+        '<body><div class="media-heading-name">Human Antenna Channel</div>'
+        '</body></html>'
     )
     stderr = (
         "ERROR: [Rumble] v765j42-the-human-antenna-doco: "
@@ -376,14 +379,95 @@ def test_rumble_403_transcript_failure_records_without_error_logs(monkeypatch, t
     cli.process_url(rumble_url, force=False)
 
     output = capsys.readouterr().out
-    assert "|(The Human Antenna Documentary)|Rumble|General|No transcript available" in output
-    assert "|(The Human Antenna Documentary)|Rumble|General|No transcript available" in references_file.read_text()
+    expected = "|(The Human Antenna Documentary)|Human Antenna Channel|Rumble|No transcript available"
+    assert expected in output
+    assert expected in references_file.read_text()
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_rumble_missing_ytdlp_still_records_reference(monkeypatch, tmp_path, caplog, capsys):
+    rumble_url = "https://rumble.com/v79p2k0-example-video.html"
+    references_file = tmp_path / "references.md"
+    references_file.write_text("")
+
+    monkeypatch.setattr(cli, "UNIFIED", str(references_file))
+    monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(cli, "resolve_redirect", lambda url: url)
+    monkeypatch.setattr(cli, "load_config", lambda: {})
+    monkeypatch.setattr(cli, "_yt_dlp_command", lambda: ["yt-dlp"])
+
+    html = (
+        '<html><head><meta property="og:title" content="Kick Your Week Off"/></head>'
+        '<body><div class="media-heading-name">Steven Crowder</div></body></html>'
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[:2] == ["which", "lynx"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if isinstance(cmd, str) and "lynx" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, html, "")
+        if isinstance(cmd, list) and cmd and cmd[0] == "yt-dlp":
+            raise FileNotFoundError(2, "No such file or directory", "yt-dlp")
+        raise AssertionError(f"unexpected subprocess.run: {cmd!r}")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    caplog.set_level(logging.DEBUG)
+
+    cli.process_url(rumble_url, force=False)
+
+    output = capsys.readouterr().out
+    expected = "|(Kick Your Week Off)|Steven Crowder|Rumble|No transcript available"
+    assert expected in output
+    assert expected in references_file.read_text()
+    assert "Failed to process Rumble URL" not in output
+
+
+def test_yt_dlp_command_prefers_venv_sibling(monkeypatch, tmp_path):
+    fake_bin = tmp_path / "yt-dlp"
+    fake_bin.write_text("#!/bin/sh\n")
+    fake_bin.chmod(0o755)
+    fake_python = tmp_path / "python"
+    fake_python.write_text("#!/bin/sh\n")
+    fake_python.chmod(0o755)
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+    monkeypatch.setattr(cli.sys, "executable", str(fake_python))
+
+    assert cli._yt_dlp_command() == [str(fake_bin)]
+
+
+def test_yt_dlp_command_ignores_symlinked_system_python(monkeypatch, tmp_path):
+    """pipx links venv/bin/python → /usr/bin/python3; must still use venv yt-dlp."""
+    venv_bin = tmp_path / "bin"
+    venv_bin.mkdir()
+    venv_yt = venv_bin / "yt-dlp"
+    venv_yt.write_text("#!/bin/sh\n")
+    venv_yt.chmod(0o755)
+    # Symlink like pipx: venv/bin/python -> /usr/bin/python3
+    venv_python = venv_bin / "python"
+    venv_python.symlink_to("/usr/bin/python3")
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+    monkeypatch.setattr(cli.sys, "executable", str(venv_python))
+
+    assert cli._yt_dlp_command() == [str(venv_yt)]
+
+
+def test_yt_dlp_command_falls_back_to_path(monkeypatch, tmp_path):
+    fake_python = tmp_path / "python"
+    fake_python.write_text("#!/bin/sh\n")
+    fake_python.chmod(0o755)
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+    monkeypatch.setattr(cli.sys, "executable", str(fake_python))
+
+    assert cli._yt_dlp_command() == ["/usr/bin/yt-dlp"]
 
 
 def test_unexpected_rumble_video_info_failure_still_logs_error(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
     monkeypatch.setattr(cli, "load_config", lambda: {})
+    monkeypatch.setattr(cli, "_yt_dlp_command", lambda: ["yt-dlp"])
 
     def fake_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and cmd and cmd[0] == "yt-dlp" and "--dump-json" in cmd:

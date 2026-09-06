@@ -221,7 +221,7 @@ General pages are fetched with `lynx` and parsed for `<title>`, Open Graph, Twit
 
 - **X / Twitter** (`x.com`, `twitter.com`): prefer `og:title` / `twitter:title`, strip branding suffixes, reject noscript and profile-card placeholders (for example `Name (@handle) on X`), then fall back to the `publish.twitter.com` oEmbed API.
 - **Reddit** (`reddit.com`, `redd.it`): reject bot-challenge titles such as `Please wait for verification`, then fall back to the Reddit oEmbed API.
-- **Rumble**: prefer `og:title`, then `h1`.
+- **Rumble**: prefer `og:title`, then `h1`; channel from `.media-heading-name`. Rows are `|{channel}|Rumble|{transcript status}`. Transcripts via `yt-dlp` (PATH, pipx/venv sibling, or `python -m yt_dlp`); on failure the URL is still recorded with `No transcript available`.
 
 X and Reddit oEmbed responses are cached under `transcripts/ombed` (created on first use). Cached URLs are never re-fetched. Live oEmbed calls share a 10 requests/minute limit and use a browser `User-Agent`; HTTP 429 responses are handled without attempting JSON parse.
 

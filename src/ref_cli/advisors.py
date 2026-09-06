@@ -117,7 +117,7 @@ _WEB_SKIP_HOSTS = frozenset({
     'search.app',
     'nyaa.si',
     'arxiv.org',  # paper repo, not a blog voice
-    'rumble.com',  # video host; no reliable channel field in General rows
+    'rumble.com',  # video host; channel scraped into uploader when available
     'doi.org',
     'npmjs.com',
     'pypi.org',

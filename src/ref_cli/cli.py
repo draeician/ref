@@ -81,6 +81,26 @@ RUMBLE_YT_DLP_HEADERS = [
 ]
 
 
+def _yt_dlp_command() -> list:
+    """Return argv prefix to invoke yt-dlp.
+
+    Prefer the binary next to ``sys.executable`` (pipx/venv install of ref-cli
+    ships ``yt-dlp`` there, but that directory is often absent from ``PATH`` for
+    subprocesses). Then PATH, then ``python -m yt_dlp``.
+
+    Do not ``Path.resolve()`` the interpreter path — pipx links ``python`` to
+    ``/usr/bin/python3``, which would wrongly look for yt-dlp under ``/usr/bin``.
+    """
+    bin_dir = Path(sys.executable).expanduser().absolute().parent
+    sibling = bin_dir / "yt-dlp"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return [str(sibling)]
+    found = shutil.which("yt-dlp")
+    if found:
+        return [found]
+    return [sys.executable, "-m", "yt_dlp"]
+
+
 def _filter_yt_dlp_stderr(stderr: str) -> str:
     """Drop WARNING lines from yt-dlp stderr; prefer ERROR line(s) for cleaner failure messages."""
     if not (stderr and stderr.strip()):
@@ -99,7 +119,80 @@ def _is_rumble_transcript_unavailable_error(message: str) -> bool:
         "forbidden",
         "unable to download webpage",
         "did not produce subtitle files",
+        "yt-dlp not found",
+        "no module named yt_dlp",
     ])
+
+
+def _rumble_channel_from_soup(soup: BeautifulSoup) -> str:
+    """Extract the uploading channel name from a Rumble video page."""
+    name_el = soup.select_one(".media-heading-name")
+    if name_el:
+        name = name_el.get_text(" ", strip=True)
+        if name:
+            return name
+
+    author = soup.select_one('a.media-by--a[rel="author"], a[rel="author"][href*="/c/"]')
+    if author:
+        nested = author.select_one(".media-heading-name")
+        if nested:
+            name = nested.get_text(" ", strip=True)
+            if name:
+                return name
+        text = author.get_text(" ", strip=True)
+        text = re.sub(r"Verified.*$", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"[\d.]+\s*[KMB]?\s*followers.*$", "", text, flags=re.IGNORECASE).strip()
+        if text:
+            return text
+    return ""
+
+
+def get_rumble_title_and_channel(url: str) -> Tuple[str, str]:
+    """Fetch Rumble video title and channel via one lynx HTML dump.
+
+    Returns:
+        Tuple[str, str]: ``(title, channel)``. Title may be an error string
+        (same conventions as :func:`get_title_from_url`); channel may be empty.
+    """
+    try:
+        subprocess.run(["which", "lynx"], capture_output=True, check=True)
+    except subprocess.CalledProcessError:
+        return (
+            "Error: 'lynx' is not installed. Please install it to fetch webpage titles.",
+            "",
+        )
+
+    lynx_command = (
+        "lynx -dump -nolist -force_html -hiddenlinks=ignore "
+        "-display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines "
+        f'-dont_wrap_pre -source "{url}"'
+    )
+    try:
+        result = subprocess.run(
+            lynx_command, shell=True, capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return f"Error: Lynx command failed with return code {result.returncode}", ""
+
+        soup = BeautifulSoup(result.stdout, "html.parser")
+        title = ""
+        og_title = soup.find("meta", property="og:title")
+        if og_title:
+            title = (og_title.get("content") or "").strip()
+        if not title:
+            h1 = soup.find("h1")
+            if h1:
+                title = h1.get_text().strip()
+        channel = _rumble_channel_from_soup(soup)
+        if title:
+            return title, channel
+        return "No title found", channel
+    except subprocess.TimeoutExpired:
+        return "Error: Request timed out", ""
+    except subprocess.SubprocessError as e:
+        return f"Error: Subprocess error - {e}", ""
+    except Exception as e:
+        return f"Error: Unexpected error - {e}", ""
 
 
 def is_request_blocked_error(error: Exception) -> bool:
@@ -1904,9 +1997,11 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
         if rumble_cookies_browser:
             rumble_extra.extend(["--cookies-from-browser", str(rumble_cookies_browser)])
 
+        yt_dlp = _yt_dlp_command()
+
         # First, check video info
         info_command = [
-            "yt-dlp",
+            *yt_dlp,
             *rumble_extra,
             "--dump-json",
             rumble_url
@@ -1922,7 +2017,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
             approaches = [
                 # Try with auto-generated subtitles
                 [
-                    "yt-dlp",
+                    *yt_dlp,
                     *rumble_extra,
                     "--skip-download",
                     "--write-auto-subs",
@@ -1933,7 +2028,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 ],
                 # Try with manual subtitles
                 [
-                    "yt-dlp",
+                    *yt_dlp,
                     *rumble_extra,
                     "--skip-download",
                     "--write-subs",
@@ -1944,7 +2039,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 ],
                 # Try with all available subtitles
                 [
-                    "yt-dlp",
+                    *yt_dlp,
                     *rumble_extra,
                     "--skip-download",
                     "--write-subs",
@@ -1974,6 +2069,9 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
 
                     logging.warning(f"Failed to get subtitles with current approach")
                     failure_info = (f"rumble approach {index}", "yt-dlp did not produce subtitle files")
+                except FileNotFoundError as e:
+                    failure_info = ("rumble", f"yt-dlp not found: {e}")
+                    break
                 except subprocess.CalledProcessError as e:
                     filtered_stderr = _filter_yt_dlp_stderr(e.stderr or "") or str(e)
                     if _is_rumble_transcript_unavailable_error(filtered_stderr):
@@ -1996,6 +2094,13 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
             )
             return None, failure_info
 
+        except FileNotFoundError as e:
+            failure_info = ("rumble", f"yt-dlp not found: {e}")
+            logging.warning(f"yt-dlp not available for Rumble transcript fetch: {e}")
+            logging.info(
+                f"Failed to get transcript for {rumble_url} ({failure_info[0].replace('_', ' ').title()} method: {failure_info[1]})"
+            )
+            return None, failure_info
         except subprocess.CalledProcessError as e:
             filtered_stderr = _filter_yt_dlp_stderr(e.stderr or "") or str(e)
             if _is_rumble_transcript_unavailable_error(filtered_stderr):
@@ -2091,7 +2196,7 @@ def process_url(url: str, force: bool) -> None:
             else:
                 video_id = simplified_url
             safe_video_id = re.sub(r"[^\w\-_.]", "_", video_id)
-            title = get_title_from_url(simplified_url)
+            title, channel = get_rumble_title_and_channel(simplified_url)
             if title.startswith("Error: 'lynx' is not installed"):
                 print(title)
                 print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
@@ -2137,14 +2242,19 @@ def process_url(url: str, force: bool) -> None:
                     else:
                         logging.info(f"No transcript available for Rumble video {video_id}")
             
-            # Add or update the reference entry
+            # Add or update the reference entry (uploader=channel, source=Rumble)
             if not url_exists_in_file(simplified_url, UNIFIED) or force:
-                append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|Rumble|General|{transcript_file}\n")
-                print(f"{current_time}|[{simplified_url}]|({title})|Rumble|General|{transcript_file}")
+                append_to_file(
+                    UNIFIED,
+                    f"{current_time}|[{simplified_url}]|({title})|{channel}|Rumble|{transcript_file}\n",
+                )
+                print(f"{current_time}|[{simplified_url}]|({title})|{channel}|Rumble|{transcript_file}")
                 logging.info(f"Added Rumble URL: {simplified_url}")
             else:
-                # Update existing entry with transcript if needed
-                update_reference_entry(simplified_url, title, "Rumble", transcript_file)
+                # Update existing entry with transcript / channel if needed
+                update_reference_entry(
+                    simplified_url, title, channel, transcript_file, source="Rumble"
+                )
         except Exception as e:
             error_message = f"Failed to process Rumble URL: {e}"
             log_error("Rumble Processing", simplified_url, error_message)
@@ -2316,17 +2426,25 @@ def process_url(url: str, force: bool) -> None:
             log_error("URL Processing", simplified_url, f"Invalid URL with title: {title}")
             print("Invalid URL")
 
-def update_reference_entry(video_url: str, video_title: str, uploader: str, transcript_file: str) -> None:
+def update_reference_entry(
+    video_url: str,
+    video_title: str,
+    uploader: str,
+    transcript_file: str,
+    source: str = "YouTube",
+) -> None:
     """
-    Updates or adds a YouTube video entry in the references.md file with the transcript file reference.
+    Updates or adds a video entry in the references.md file with the transcript file reference.
     When updating an existing line, also updates the title so re-running a URL refreshes the stored title.
-    After write, runs YouTube enrichment (meta card + ``@meta`` on the row) best-effort.
+    After write, runs YouTube enrichment (meta card + ``@meta`` on the row) best-effort when
+    ``source`` is YouTube.
     """
     from ref_cli.references_format import (
         format_data_line,
         parse_data_line,
     )
 
+    source = source or "YouTube"
     updated = False
     with open(UNIFIED, 'r') as file:
         lines = file.readlines()
@@ -2339,7 +2457,7 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
                     row.title = video_title
                     if uploader:
                         row.uploader = uploader
-                    row.source = row.source or 'YouTube'
+                    row.source = source or row.source or 'YouTube'
                     # Transcript / status lives in extra (do not clobber @meta).
                     row.extra = transcript_file or row.extra
                     line = format_data_line(row) + '\n'
@@ -2362,7 +2480,7 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
     if not updated:
         entry = (
             f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|"
-            f"[{video_url}]|({video_title})|{uploader}|YouTube|{transcript_file}\n"
+            f"[{video_url}]|({video_title})|{uploader}|{source}|{transcript_file}\n"
         )
         append_to_file(UNIFIED, entry)
 
@@ -2370,6 +2488,9 @@ def update_reference_entry(video_url: str, video_title: str, uploader: str, tran
     print(success(f"Updated reference entry for {url(video_url)}"))
     print(info(f"Title: {title(video_title)}"))
     print(info(f"Transcript: {dim(transcript_file)}"))
+
+    if source != "YouTube":
+        return
 
     # Capture-time enrichment: full card under enrichment/youtube/ + @meta on row.
     try:
