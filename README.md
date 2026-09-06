@@ -92,7 +92,7 @@ When `api_url` is set:
 - `ref <url>` POSTs to `/urls` and prints the same stdout-style lines as local mode
 - `ref --search` (and `--search-url`, `--search-title`, etc.) call `GET /search` and render `-Hit Type:` lines as before
 - Exit code `1` when ingest returns `error` or the API is unreachable; `0` for added, exists, or skipped
-- `ref --backup` downloads a server-side backup into your local `paths.references` directory (respects `--nocompress`)
+- `ref --backup` downloads a server-side backup into your local `paths.references` directory (respects `--nocompress`). On the archive host itself (loopback / local hostname `api_url`), it backs up the local file directly instead of HTTP self-download.
 - `ref --file urls.txt` POSTs each URL to `/urls` (file is read/written locally; archive updates happen on the server)
 - `ref --transcript <url>` calls `POST /transcript` on the server
 - `ref --status` GETs `/health` and reports connectivity (exit 1 if unreachable)
