@@ -223,6 +223,13 @@ def test_download_backup_writes_file(tmp_path):
 
     assert path.endswith("20260101T120000_references.md.gz")
     assert (tmp_path / "20260101T120000_references.md.gz").read_bytes() == b"backup-bytes"
+    assert not (tmp_path / "20260101T120000_references.md.gz.partial").exists()
+
+
+def test_api_base_is_local_loopback():
+    assert api_client.api_base_is_local("http://127.0.0.1:8000")
+    assert api_client.api_base_is_local("http://localhost:8000")
+    assert not api_client.api_base_is_local("http://archive.example:8000")
 
 
 def test_backup_via_api_success(capsys, tmp_path):

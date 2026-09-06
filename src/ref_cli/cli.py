@@ -2611,14 +2611,20 @@ def run_search(search_term: str, field: str = "all") -> None:
 
 
 def run_backup(*, compress: bool = True) -> None:
-    """Create or download a references.md backup; exits when using the API."""
+    """Create or download a references.md backup; exits when using the API.
+
+    When ``api_url`` points at this machine (loopback / local hostname), back up
+    the local archive file directly — HTTP download would write into the same
+    path the server is streaming and truncate it mid-transfer.
+    """
     api_base = configured_api_base_url()
     if api_base:
-        from ref_cli.api_client import backup_via_api
+        from ref_cli.api_client import api_base_is_local, backup_via_api
 
-        config = load_config()
-        dest = os.path.expanduser(config["paths"]["references"])
-        sys.exit(backup_via_api(api_base, dest, compress=compress))
+        if not api_base_is_local(api_base):
+            config = load_config()
+            dest = os.path.expanduser(config["paths"]["references"])
+            sys.exit(backup_via_api(api_base, dest, compress=compress))
 
     create_backup(UNIFIED, compress=compress)
 

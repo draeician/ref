@@ -36,6 +36,26 @@ def get_api_base_url(config: dict) -> Optional[str]:
     return text.rstrip("/")
 
 
+def api_base_is_local(base_url: str) -> bool:
+    """True when ``api_url`` targets this machine (loopback or local hostname).
+
+    Used so archive-host commands like ``ref --backup`` can use the local file
+    instead of HTTP-round-tripping to the co-located ref-api.
+    """
+    host = (urlparse(base_url).hostname or "").lower()
+    if not host:
+        return False
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        return True
+    try:
+        import socket
+
+        local_names = {socket.gethostname().lower(), socket.getfqdn().lower()}
+    except OSError:
+        return False
+    return host in local_names
+
+
 def _endpoint_label(base_url: str) -> str:
     """Human-readable host:port from api_url for error messages."""
     parsed = urlparse(base_url)
@@ -400,10 +420,24 @@ def download_backup(
         filename = "references.md.gz" if compress else "references.md"
 
     local_path = os.path.join(dest_dir, os.path.basename(filename))
-    with open(local_path, "wb") as handle:
-        for chunk in response.iter_content(chunk_size=65536):
-            if chunk:
-                handle.write(chunk)
+    # Write to a sibling temp path first. On the archive host, dest_dir is the
+    # same directory the API just wrote the backup into; opening local_path for
+    # write would truncate the file mid-stream (IncompleteRead /
+    # Content-Length mismatch).
+    tmp_path = f"{local_path}.partial"
+    try:
+        with open(tmp_path, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=65536):
+                if chunk:
+                    handle.write(chunk)
+        os.replace(tmp_path, local_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
 
     return local_path
 

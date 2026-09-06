@@ -38,8 +38,8 @@ def test_run_ingest_local_when_api_not_configured(monkeypatch):
     mock_process.assert_called_once_with("https://example.com", False)
 
 
-def test_run_backup_uses_api_when_configured(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli, "configured_api_base_url", lambda: "http://127.0.0.1:8000")
+def test_run_backup_uses_api_when_remote(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "configured_api_base_url", lambda: "http://archive.example:8000")
     monkeypatch.setattr(
         cli,
         "load_config",
@@ -49,7 +49,20 @@ def test_run_backup_uses_api_when_configured(monkeypatch, tmp_path):
         with pytest.raises(SystemExit) as exc:
             cli.run_backup(compress=True)
     assert exc.value.code == 0
-    mock_backup.assert_called_once_with("http://127.0.0.1:8000", str(tmp_path), compress=True)
+    mock_backup.assert_called_once_with(
+        "http://archive.example:8000", str(tmp_path), compress=True
+    )
+
+
+def test_run_backup_local_when_api_is_loopback(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "configured_api_base_url", lambda: "http://127.0.0.1:8000")
+    monkeypatch.setattr(cli, "UNIFIED", str(tmp_path / "references.md"))
+    (tmp_path / "references.md").write_text("row\n", encoding="utf-8")
+    with patch("ref_cli.api_client.backup_via_api") as mock_backup:
+        with patch("ref_cli.cli.create_backup", return_value="ok") as mock_local:
+            cli.run_backup(compress=True)
+    mock_backup.assert_not_called()
+    mock_local.assert_called_once_with(str(tmp_path / "references.md"), compress=True)
 
 
 def test_run_file_ingest_uses_api_when_configured(monkeypatch):
