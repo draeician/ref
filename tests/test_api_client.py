@@ -206,6 +206,48 @@ def test_search_via_api_success(capsys):
     assert "-Hit Type: Title" in capsys.readouterr().out
 
 
+def test_list_via_api_success(capsys):
+    with patch(
+        "ref_cli.api_client.list_refs",
+        return_value=["https://example.com/a", "https://example.com/b"],
+    ) as mock_list:
+        code = api_client.list_via_api("http://127.0.0.1:8000", limit=2)
+    assert code == 0
+    mock_list.assert_called_once_with(
+        "http://127.0.0.1:8000", limit=2, since=None
+    )
+    assert capsys.readouterr().out.strip().splitlines() == [
+        "https://example.com/a",
+        "https://example.com/b",
+    ]
+
+
+def test_list_via_api_error(capsys):
+    with patch(
+        "ref_cli.api_client.list_refs",
+        side_effect=api_client.ApiError("bad duration", status_code=400),
+    ):
+        code = api_client.list_via_api("http://127.0.0.1:8000", since="fortnight")
+    assert code == 1
+    assert "bad duration" in capsys.readouterr().out
+
+
+def test_list_refs_calls_endpoint():
+    with patch(
+        "ref_cli.api_client._request_json",
+        return_value={"urls": ["https://example.com"]},
+    ) as mock_req:
+        urls = api_client.list_refs("http://minion:8000", since="5 min")
+    assert urls == ["https://example.com"]
+    mock_req.assert_called_once_with(
+        "GET",
+        "http://minion:8000",
+        "/list",
+        timeout=api_client.DEFAULT_SEARCH_TIMEOUT,
+        params={"since": "5 min"},
+    )
+
+
 def test_download_backup_writes_file(tmp_path):
     mock_response = MagicMock()
     mock_response.status_code = 200

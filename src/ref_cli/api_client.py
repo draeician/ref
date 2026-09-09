@@ -305,6 +305,29 @@ def search_refs(
     return data.get("results", [])
 
 
+def list_refs(
+    base_url: str,
+    *,
+    limit: Optional[int] = None,
+    since: Optional[str] = None,
+    timeout: float = DEFAULT_SEARCH_TIMEOUT,
+) -> List[str]:
+    params: Dict[str, Any] = {}
+    if limit is not None:
+        params["limit"] = limit
+    if since is not None:
+        params["since"] = since
+    data = _request_json(
+        "GET",
+        base_url,
+        "/list",
+        timeout=timeout,
+        params=params,
+    )
+    urls = data.get("urls", [])
+    return [str(u) for u in urls]
+
+
 def print_ingest_results(results: List[Dict[str, Any]]) -> int:
     """Render ingest results like local ``ref``; return shell exit code."""
     exit_code = 0
@@ -367,6 +390,22 @@ def search_via_api(
         print(error(str(exc)))
         return 1
     print_search_results(results)
+    return 0
+
+
+def list_via_api(
+    base_url: str,
+    *,
+    limit: Optional[int] = None,
+    since: Optional[str] = None,
+) -> int:
+    try:
+        urls = list_refs(base_url, limit=limit, since=since)
+    except ApiError as exc:
+        print(error(str(exc)))
+        return 1
+    for entry_url in urls:
+        print(entry_url)
     return 0
 
 

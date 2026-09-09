@@ -75,6 +75,10 @@ class SearchResponse(BaseModel):
     results: List[SearchHit]
 
 
+class ListResponse(BaseModel):
+    urls: List[str]
+
+
 TranscriptStatus = Literal["updated", "failure_recorded", "not_found", "error"]
 
 

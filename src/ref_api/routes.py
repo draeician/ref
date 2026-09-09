@@ -5,7 +5,10 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 
+from typing import Optional
+
 from ref_api.schemas import (
+    ListResponse,
     SearchField,
     SearchResponse,
     TranscriptRequest,
@@ -81,6 +84,37 @@ def search_refs(
             detail=str(exc),
         ) from exc
     return SearchResponse(results=results)
+
+
+@router.get(
+    "/list",
+    response_model=ListResponse,
+    summary="List recent reference URLs",
+    description=(
+        "Return URLs from references.md. Provide exactly one of ``limit`` "
+        '(last N added) or ``since`` (duration window, e.g. "1 hour", "5 min"). '
+        "Matches ``ref --list``."
+    ),
+)
+def list_refs(
+    limit: Optional[int] = None,
+    since: Optional[str] = None,
+    _auth: None = Depends(require_auth),
+) -> ListResponse:
+    since_value = (since or "").strip() or None
+    if (limit is None) == (since_value is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide exactly one of query parameters 'limit' or 'since'",
+        )
+    try:
+        urls = service.list_archive(limit=limit, since=since_value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    return ListResponse(urls=urls)
 
 
 @router.post(

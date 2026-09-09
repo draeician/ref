@@ -176,6 +176,55 @@ def test_search_empty_query_returns_400(client: TestClient) -> None:
     assert response.status_code == 400
 
 
+def test_list_by_limit(client: TestClient) -> None:
+    with patch(
+        "ref_api.service.list_archive",
+        return_value=[
+            "https://example.com/newest",
+            "https://example.com/new",
+        ],
+    ) as mock_list:
+        response = client.get("/list", params={"limit": 2})
+
+    assert response.status_code == 200
+    mock_list.assert_called_once_with(limit=2, since=None)
+    assert response.json()["urls"] == [
+        "https://example.com/newest",
+        "https://example.com/new",
+    ]
+
+
+def test_list_by_since(client: TestClient) -> None:
+    with patch(
+        "ref_api.service.list_archive",
+        return_value=["https://example.com/newest"],
+    ) as mock_list:
+        response = client.get("/list", params={"since": "1 hour"})
+
+    assert response.status_code == 200
+    mock_list.assert_called_once_with(limit=None, since="1 hour")
+    assert response.json()["urls"] == ["https://example.com/newest"]
+
+
+def test_list_missing_params_returns_400(client: TestClient) -> None:
+    response = client.get("/list")
+    assert response.status_code == 400
+
+
+def test_list_both_params_returns_400(client: TestClient) -> None:
+    response = client.get("/list", params={"limit": 2, "since": "1 hour"})
+    assert response.status_code == 400
+
+
+def test_list_invalid_duration_returns_400(client: TestClient) -> None:
+    with patch(
+        "ref_api.service.list_archive",
+        side_effect=ValueError("Invalid list duration 'fortnight'."),
+    ):
+        response = client.get("/list", params={"since": "fortnight"})
+    assert response.status_code == 400
+
+
 def test_backup_download(client: TestClient, tmp_path) -> None:
     backup_file = tmp_path / "20260101T120000_references.md.gz"
     backup_file.write_bytes(b"gzipped-content")

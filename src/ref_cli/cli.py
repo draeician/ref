@@ -34,7 +34,7 @@ import time
 import select
 from urllib3.exceptions import InsecureRequestWarning
 import importlib.resources
-from typing import Deque, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 from ref_cli import __version__
 from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
@@ -1237,6 +1237,11 @@ def parse_arguments() -> argparse.Namespace:
         help="Check connectivity to the configured ref-api (GET /health via api_url).",
     )
     parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="Show how to upgrade this ref-cli install (pipx source detected).",
+    )
+    parser.add_argument(
         "--install-server",
         action="store_true",
         help="Install ref-api as a user systemd service (pipx inject [api], config template, enable unit).",
@@ -1284,6 +1289,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--search-source", help="Search entries by source.")
     parser.add_argument("--search-uploader", help="Search entries by uploader.")
     parser.add_argument("--search", help="Search entries across all fields (URL, title, date, source, uploader).")
+    parser.add_argument(
+        "--list",
+        nargs="+",
+        metavar="SPEC",
+        help='List URLs: last N ("100") or duration ("1 hour", "5 min").',
+    )
     parser.add_argument("--transcript", action="store_true", help="Update the transcript for an existing YouTube entry.")
     file_arg = parser.add_argument("--file", help="Read URLs from a file (one URL per line)")
     file_arg.completer = files_completer()  # type: ignore[attr-defined]
@@ -2585,6 +2596,25 @@ def _print_search_results(results: dict) -> None:
             print(f"-Hit Type: {hit_type}")
 
 
+def run_list(spec_tokens: List[str]) -> None:
+    """List URLs via ref-api (required); exits the process."""
+    api_base = configured_api_base_url()
+    if not api_base:
+        print(
+            error(
+                "--list requires api_url in ~/.config/ref/config.yaml "
+                "(or REF_API_URL)."
+            )
+        )
+        sys.exit(1)
+
+    from ref_cli.api_client import list_via_api
+
+    if len(spec_tokens) == 1 and spec_tokens[0].isdigit():
+        sys.exit(list_via_api(api_base, limit=int(spec_tokens[0])))
+    sys.exit(list_via_api(api_base, since=" ".join(spec_tokens)))
+
+
 def run_search(search_term: str, field: str = "all") -> None:
     """Search locally or via ref-api; exits the process when using the API."""
     api_base = configured_api_base_url()
@@ -2682,6 +2712,10 @@ def main():
             from ref_cli.api_client import report_api_status
 
             sys.exit(report_api_status(load_config()))
+        if args.upgrade:
+            from ref_cli.upgrade import report_upgrade_instructions
+
+            sys.exit(report_upgrade_instructions())
         if args.install_server:
             from ref_cli.server_install import install_server
 
@@ -2736,6 +2770,8 @@ def main():
                 print(success("Integrity check passed. Log files are formatted correctly."))
         elif args.backup:
             run_backup(compress=not args.nocompress)
+        elif args.list:
+            run_list(args.list)
         elif args.search:
             run_search(args.search, field="all")
         elif args.search_url:

@@ -142,6 +142,28 @@ def search_archive(term: str, field: str = "all") -> List[SearchHit]:
     ]
 
 
+def list_archive(
+    *,
+    limit: int | None = None,
+    since: str | None = None,
+) -> List[str]:
+    """List URLs from references.md: last ``limit`` or within ``since`` duration."""
+    from ref_api.listing import list_urls, parse_list_duration
+
+    if (limit is None) == (since is None):
+        raise ValueError("Provide exactly one of 'limit' or 'since'")
+
+    since_delta = None
+    if since is not None:
+        since_delta = parse_list_duration(since)
+
+    return list_urls(
+        limit=limit,
+        since=since_delta,
+        file_path=ref_cli.UNIFIED,
+    )
+
+
 def create_references_backup(*, compress: bool = True) -> str:
     """Create a timestamped backup of references.md on the server."""
     from ref_cli.backup_util import backup_file

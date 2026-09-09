@@ -31,6 +31,34 @@ def test_run_search_uses_api_when_configured(monkeypatch):
     )
 
 
+def test_run_list_uses_api_even_for_loopback(monkeypatch):
+    monkeypatch.setattr(cli, "configured_api_base_url", lambda: "http://127.0.0.1:8000")
+    with patch("ref_cli.api_client.list_via_api", return_value=0) as mock_list:
+        with pytest.raises(SystemExit) as exc:
+            cli.run_list(["100"])
+    assert exc.value.code == 0
+    mock_list.assert_called_once_with("http://127.0.0.1:8000", limit=100)
+
+
+def test_run_list_duration_uses_api(monkeypatch):
+    monkeypatch.setattr(cli, "configured_api_base_url", lambda: "http://archive.example:8000")
+    with patch("ref_cli.api_client.list_via_api", return_value=0) as mock_list:
+        with pytest.raises(SystemExit) as exc:
+            cli.run_list(["1", "hour"])
+    assert exc.value.code == 0
+    mock_list.assert_called_once_with(
+        "http://archive.example:8000", since="1 hour"
+    )
+
+
+def test_run_list_requires_api_url(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "configured_api_base_url", lambda: None)
+    with pytest.raises(SystemExit) as exc:
+        cli.run_list(["2"])
+    assert exc.value.code == 1
+    assert "requires api_url" in capsys.readouterr().out
+
+
 def test_run_ingest_local_when_api_not_configured(monkeypatch):
     monkeypatch.setattr(cli, "configured_api_base_url", lambda: None)
     with patch("ref_cli.cli.process_url") as mock_process:
@@ -90,6 +118,7 @@ def test_status_flag_exits_via_report(monkeypatch):
         (),
         {
             "status": True,
+            "upgrade": False,
             "install_server": False,
             "uninstall_server": False,
             "server_status": False,
