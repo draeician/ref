@@ -975,6 +975,20 @@ def set_developer_key():
     set_key(env_path, 'YOUTUBE_API_KEY', key)
     print("YOUTUBE_API_KEY set successfully!")
 
+def _is_youtube_radio_mix(query_params: dict) -> bool:
+    """True when a YouTube watch URL is a radio/mix link, not a real playlist.
+
+    YouTube "radio"/"mix" links share a single video inside an auto-generated
+    mix and carry ``list=RD...`` (often with ``start_radio=1``) next to ``v=``.
+    The ``RD`` list is an auto-generated mix seeded by that one video, not a
+    user playlist, so it must not be fetched as a playlist.
+    """
+    if 'start_radio' in query_params:
+        return True
+    list_ids = query_params.get('list') or []
+    return bool(list_ids) and str(list_ids[0]).startswith('RD')
+
+
 def get_youtube_data(url: str) -> tuple:
     """
     Fetches YouTube video or playlist data using the YouTube Data API.
@@ -994,7 +1008,7 @@ def get_youtube_data(url: str) -> tuple:
     parsed_url = urlparse(url)
     query_params = parse_qs(parsed_url.query)
     
-    if 'list' in query_params:
+    if 'list' in query_params and not _is_youtube_radio_mix(query_params):
         verbose_logger.log("Detected playlist URL")
         return get_youtube_playlist_data(query_params['list'][0], youtube)
     
