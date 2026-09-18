@@ -2439,6 +2439,9 @@ def process_url(url: str, force: bool) -> None:
         elif title.startswith("Error: Unexpected error"):
             log_error("URL Processing", simplified_url, title)
             print("Error: An unexpected error occurred.")
+        elif title.startswith("Error: Lynx command failed") or title.startswith("Error: Subprocess error"):
+            log_error("URL Processing", simplified_url, title)
+            print(f"Error: Could not fetch {simplified_url} ({title}).")
         elif title and not title.startswith("Error"):
             if url_exists_in_file(simplified_url, UNIFIED) and not force:
                 print(f"URL {simplified_url} already recorded.")
@@ -2447,6 +2450,9 @@ def process_url(url: str, force: bool) -> None:
                 append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|General|General\n")
                 print(f"{current_time}|[{simplified_url}]|({title})|General|General")
                 logging.info(f"Added URL: {simplified_url}")
+        elif title.startswith("Error"):
+            log_error("URL Processing", simplified_url, title)
+            print(f"Error: {simplified_url} returned: {title}")
         else:
             log_error("URL Processing", simplified_url, f"Invalid URL with title: {title}")
             print("Invalid URL")
