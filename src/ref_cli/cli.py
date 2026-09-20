@@ -998,6 +998,86 @@ def _is_youtube_community_post(url: str) -> bool:
     return urlparse(url).path.startswith('/post/')
 
 
+def _collect_video_ids(node) -> List[str]:
+    """Recursively collect YouTube video IDs from an innertube renderer node."""
+    ids: List[str] = []
+    if isinstance(node, dict):
+        video_id = node.get('videoId')
+        if isinstance(video_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            ids.append(video_id)
+        for value in node.values():
+            ids.extend(_collect_video_ids(value))
+    elif isinstance(node, list):
+        for item in node:
+            ids.extend(_collect_video_ids(item))
+    return ids
+
+
+def _find_backstage_post(node):
+    """Return the first ``backstagePostRenderer`` dict in an innertube node."""
+    if isinstance(node, dict):
+        if 'backstagePostRenderer' in node:
+            return node['backstagePostRenderer']
+        for value in node.values():
+            found = _find_backstage_post(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_backstage_post(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_youtube_video_urls_from_community_post(url: str) -> List[str]:
+    """Return the YouTube video URLs embedded or linked in a community post.
+
+    Community posts can carry an attached video or contain text links to videos,
+    and the YouTube Data API has no endpoint for them. We scrape the rendered
+    ``ytInitialData`` JSON (limited to the post renderer) and fall back to a
+    regex over the raw HTML for explicit watch/shorts/embed/youtu.be links.
+    """
+    try:
+        response = requests.get(
+            url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        html = response.text
+    except requests.RequestException as exc:
+        verbose_logger.log(f"Failed to fetch community post HTML: {exc}")
+        return []
+
+    video_ids: List[str] = []
+
+    match = re.search(r'ytInitialData\s*=\s*(\{.*?\});', html)
+    if match:
+        try:
+            initial_data = json.loads(match.group(1))
+            post = _find_backstage_post(initial_data)
+            if post is not None:
+                video_ids.extend(_collect_video_ids(post))
+        except (json.JSONDecodeError, TypeError):
+            verbose_logger.log("Failed to parse ytInitialData JSON for community post")
+
+    for candidate in re.findall(
+        r'(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})',
+        html,
+    ):
+        if candidate not in video_ids:
+            video_ids.append(candidate)
+
+    unique: List[str] = []
+    for video_id in video_ids:
+        if video_id not in unique:
+            unique.append(video_id)
+    return [convert_video_id_to_url(video_id) for video_id in unique]
+
+
 def get_youtube_data(url: str) -> tuple:
     """
     Fetches YouTube video or playlist data using the YouTube Data API.
@@ -2184,6 +2264,44 @@ def translate_arxiv_url(url: str) -> str:
         return article_url
     return url
 
+def _record_general_url(simplified_url: str, force: bool, current_time: str) -> None:
+    """Record a non-video URL by fetching its title and appending a General entry."""
+    title = get_title_from_url(simplified_url)
+    logging.debug(f"Fetched title: {title}")
+    if title.startswith("Error: 'lynx' is not installed"):
+        print(title)
+        print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
+        return
+    elif title == "Dead link":
+        log_error("URL Processing", simplified_url, "Dead link detected")
+        print(f"Error: The URL {simplified_url} is a dead link.")
+    elif title in ("Timeout error", "Error: Request timed out"):
+        log_error("URL Processing", simplified_url, "Request timed out")
+        print(f"Error: The request to {simplified_url} timed out.")
+    elif title == "Too many redirects":
+        log_error("URL Processing", simplified_url, "Too many redirects")
+        print(f"Error: The URL {simplified_url} has too many redirects.")
+    elif title.startswith("Error: Unexpected error"):
+        log_error("URL Processing", simplified_url, title)
+        print("Error: An unexpected error occurred.")
+    elif title.startswith("Error: Lynx command failed") or title.startswith("Error: Subprocess error"):
+        log_error("URL Processing", simplified_url, title)
+        print(f"Error: Could not fetch {simplified_url} ({title}).")
+    elif title and not title.startswith("Error"):
+        if url_exists_in_file(simplified_url, UNIFIED) and not force:
+            print(f"URL {simplified_url} already recorded.")
+            logging.info(f"Duplicate URL: {simplified_url}")
+        else:
+            append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|General|General\n")
+            print(f"{current_time}|[{simplified_url}]|({title})|General|General")
+            logging.info(f"Added URL: {simplified_url}")
+    elif title.startswith("Error"):
+        log_error("URL Processing", simplified_url, title)
+        print(f"Error: {simplified_url} returned: {title}")
+    else:
+        log_error("URL Processing", simplified_url, f"Invalid URL with title: {title}")
+        print("Invalid URL")
+
 def process_url(url: str, force: bool) -> None:
     """
     Processes a given URL to extract and record relevant information.
@@ -2293,10 +2411,18 @@ def process_url(url: str, force: bool) -> None:
             error_message = f"Failed to process Rumble URL: {e}"
             log_error("Rumble Processing", simplified_url, error_message)
             print(f"Error: {error_message}")
+    elif _is_youtube_community_post(simplified_url):
+        _record_general_url(simplified_url, force, current_time)
+        for video_url in _extract_youtube_video_urls_from_community_post(simplified_url):
+            print(f"Found linked video in post: {video_url}")
+            try:
+                process_url(video_url, force)
+            except Exception as e:
+                log_error("Community Post Video", video_url, str(e))
+                print(f"Error: Failed to process linked video {video_url}: {e}")
     elif (
         "youtube.com" in simplified_url
         and not simplified_url.startswith('https://www.youtube.com/redirect')
-        and not _is_youtube_community_post(simplified_url)
     ):
         try:
             result = get_youtube_data(simplified_url)
@@ -2434,41 +2560,7 @@ def process_url(url: str, force: bool) -> None:
             log_error("YouTube Processing", simplified_url, error_message)
             print(f"Error: {error_message}")
     else:
-        title = get_title_from_url(simplified_url)
-        logging.debug(f"Fetched title: {title}")
-        if title.startswith("Error: 'lynx' is not installed"):
-            print(title)
-            print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
-            return
-        elif title == "Dead link":
-            log_error("URL Processing", simplified_url, "Dead link detected")
-            print(f"Error: The URL {simplified_url} is a dead link.")
-        elif title in ("Timeout error", "Error: Request timed out"):
-            log_error("URL Processing", simplified_url, "Request timed out")
-            print(f"Error: The request to {simplified_url} timed out.")
-        elif title == "Too many redirects":
-            log_error("URL Processing", simplified_url, "Too many redirects")
-            print(f"Error: The URL {simplified_url} has too many redirects.")
-        elif title.startswith("Error: Unexpected error"):
-            log_error("URL Processing", simplified_url, title)
-            print("Error: An unexpected error occurred.")
-        elif title.startswith("Error: Lynx command failed") or title.startswith("Error: Subprocess error"):
-            log_error("URL Processing", simplified_url, title)
-            print(f"Error: Could not fetch {simplified_url} ({title}).")
-        elif title and not title.startswith("Error"):
-            if url_exists_in_file(simplified_url, UNIFIED) and not force:
-                print(f"URL {simplified_url} already recorded.")
-                logging.info(f"Duplicate URL: {simplified_url}")
-            else:
-                append_to_file(UNIFIED, f"{current_time}|[{simplified_url}]|({title})|General|General\n")
-                print(f"{current_time}|[{simplified_url}]|({title})|General|General")
-                logging.info(f"Added URL: {simplified_url}")
-        elif title.startswith("Error"):
-            log_error("URL Processing", simplified_url, title)
-            print(f"Error: {simplified_url} returned: {title}")
-        else:
-            log_error("URL Processing", simplified_url, f"Invalid URL with title: {title}")
-            print("Invalid URL")
+        _record_general_url(simplified_url, force, current_time)
 
 def update_reference_entry(
     video_url: str,
