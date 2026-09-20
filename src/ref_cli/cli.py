@@ -989,6 +989,15 @@ def _is_youtube_radio_mix(query_params: dict) -> bool:
     return bool(list_ids) and str(list_ids[0]).startswith('RD')
 
 
+def _is_youtube_community_post(url: str) -> bool:
+    """True when a YouTube URL points at a community post rather than a video.
+
+    Community posts use ``/post/<id>`` URLs and are not backed by the YouTube
+    Data API, so they must be handled as general web pages instead of videos.
+    """
+    return urlparse(url).path.startswith('/post/')
+
+
 def get_youtube_data(url: str) -> tuple:
     """
     Fetches YouTube video or playlist data using the YouTube Data API.
@@ -2284,7 +2293,11 @@ def process_url(url: str, force: bool) -> None:
             error_message = f"Failed to process Rumble URL: {e}"
             log_error("Rumble Processing", simplified_url, error_message)
             print(f"Error: {error_message}")
-    elif "youtube.com" in simplified_url and not simplified_url.startswith('https://www.youtube.com/redirect'):
+    elif (
+        "youtube.com" in simplified_url
+        and not simplified_url.startswith('https://www.youtube.com/redirect')
+        and not _is_youtube_community_post(simplified_url)
+    ):
         try:
             result = get_youtube_data(simplified_url)
             if isinstance(result, tuple) and len(result) >= 3 and isinstance(result[2], list):  # Playlist

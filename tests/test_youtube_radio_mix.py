@@ -28,3 +28,18 @@ def test_single_video_is_not_radio_mix():
 def test_no_list_param_is_not_radio_mix():
     qs = parse_qs("t=30")
     assert cli._is_youtube_radio_mix(qs) is False
+
+
+def test_community_post_url_is_detected():
+    url = "https://www.youtube.com/post/UgkxGyRu959b87V-_rlu_E4vABcggpj4__M6"
+    assert cli._is_youtube_community_post(url) is True
+
+
+def test_watch_url_is_not_community_post():
+    url = "https://www.youtube.com/watch?v=YfZ1b_PreUE"
+    assert cli._is_youtube_community_post(url) is False
+
+
+def test_playlist_url_is_not_community_post():
+    url = "https://www.youtube.com/playlist?list=PLABC123def"
+    assert cli._is_youtube_community_post(url) is False
