@@ -9,7 +9,9 @@ CLI semantics:
   - Dry-run by default: fetch + report discovered links, write nothing.
   - ``--apply``: ingest each discovered link through the normal capture path
     (``ref_cli.cli.process_url``), which writes references.md.
-  - ``--no-write-refs``: never write references.md, even with ``--apply``.
+  - ``--no-write-refs``: suppress references.md mutations while ``--apply``
+    processing continues. The normal ingestion path still runs (transcripts,
+    enrichment cards, logging); only writes to references.md are blocked.
     Discovered links are still printed and written to ``--out``.
   - ``--out FILE``: write discovered links to FILE (one per line), suitable for
     ``ref --file FILE``.
@@ -73,8 +75,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-write-refs",
         action="store_true",
         help=(
-            "Never write references.md, even with --apply. Discovered links are "
-            "still printed and written to --out."
+            "Suppress references.md mutations while --apply processing continues. "
+            "Discovered links are still printed and written to --out."
         ),
     )
     parser.add_argument(
@@ -152,28 +154,25 @@ def _run(argv: Optional[Sequence[str]] = None) -> int:
             file=sys.stderr,
         )
 
-    if args.apply and not args.no_write_refs:
+    if args.apply:
         from ref_cli.cli import process_url
+        from ref_cli.references_format import suppress_reference_writes
 
         for link in discovered:
             try:
-                process_url(link, force=False)
-                print(success(f"Ingested {link}"), file=sys.stderr)
+                if args.no_write_refs:
+                    with suppress_reference_writes():
+                        process_url(link, force=False)
+                else:
+                    process_url(link, force=False)
+                print(success(f"Processed {link}"), file=sys.stderr)
             except Exception as exc:  # noqa: BLE001 - one link must not abort the run
-                print(error(f"Failed to ingest {link}: {exc}"), file=sys.stderr)
-    elif args.apply and args.no_write_refs:
-        print(
-            warning(
-                "--no-write-refs set: skipping references.md writes for "
-                f"{len(discovered)} discovered link(s)"
-            ),
-            file=sys.stderr,
-        )
+                print(error(f"Failed to process {link}: {exc}"), file=sys.stderr)
 
     print(
         info(
             f"Done: {len(urls)} Reddit URL(s), {len(discovered)} outbound link(s)"
-            + (" (apply)" if args.apply and not args.no_write_refs else "")
+            + (" (apply)" if args.apply else "")
         ),
         file=sys.stderr,
     )

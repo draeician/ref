@@ -11,11 +11,14 @@ from ref_cli.references_format import (
     META_SENTINEL,
     MigrationState,
     _steps_from_to,
+    apply_row_updates,
     effective_version,
     format_data_line,
     migrate_references_file,
     parse_data_line,
     read_format_version,
+    reference_writes_allowed,
+    suppress_reference_writes,
     with_meta,
 )
 
@@ -162,3 +165,34 @@ def test_with_meta_roundtrip() -> None:
     assert parsed is not None
     assert parsed.role == "advisor"
     assert parsed.category == "Education"
+
+
+def test_suppress_reference_writes_blocks_apply_row_updates(tmp_path: Path) -> None:
+    path = tmp_path / "references.md"
+    path.write_text(
+        "# ref-references version=2\n"
+        "2026-07-08T01:12:39|[https://youtu.be/XCUWrrmaNck]|(T)|Ch|YouTube\n",
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+    row = parse_data_line(
+        "2026-07-08T01:12:39|[https://youtu.be/XCUWrrmaNck]|(T)|Ch|YouTube",
+        line_number=2,
+    )
+    assert row is not None
+    updated = with_meta(row, category="Education", role="advisor", channel_id="UC1")
+
+    assert reference_writes_allowed() is True
+    with suppress_reference_writes():
+        assert reference_writes_allowed() is False
+        n_upd, n_del = apply_row_updates(str(path), [(row.line_number, updated)])
+        assert (n_upd, n_del) == (0, 0)
+
+    # File untouched while suppressed; flag restored afterward.
+    assert path.read_bytes() == original
+    assert reference_writes_allowed() is True
+
+    # Without suppression the same update writes through.
+    n_upd, n_del = apply_row_updates(str(path), [(row.line_number, updated)])
+    assert (n_upd, n_del) == (1, 0)
+    assert META_SENTINEL in path.read_text(encoding="utf-8")

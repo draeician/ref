@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable, Iterator, List, Optional, Sequence, Tuple
@@ -503,6 +504,42 @@ def ensure_references_migrated(
     return message if changed else None
 
 
+# ---------------------------------------------------------------------------
+# Reference-write suppression
+# ---------------------------------------------------------------------------
+#
+# Callers that need to run the normal processing path without mutating
+# references.md (e.g. ref-reddit-extract --apply --no-write-refs) wrap their
+# work in :func:`suppress_reference_writes`. Only physical writes to
+# references.md are blocked; other side effects (enrichment cards, transcripts,
+# logging) are unaffected.
+# ---------------------------------------------------------------------------
+
+_reference_writes_blocked = False
+
+
+def reference_writes_allowed() -> bool:
+    """Return False while a caller has requested references.md not be mutated."""
+    return not _reference_writes_blocked
+
+
+@contextmanager
+def suppress_reference_writes():
+    """Context manager: suppress references.md mutations inside the block.
+
+    Non-reference side effects (enrichment cards, transcripts, logging) still
+    happen. Only writes to references.md are blocked. Nested use restores the
+    previous state on exit.
+    """
+    global _reference_writes_blocked
+    previous = _reference_writes_blocked
+    _reference_writes_blocked = True
+    try:
+        yield
+    finally:
+        _reference_writes_blocked = previous
+
+
 def apply_row_updates(
     path: str,
     updates: Sequence[Tuple[int, ReferenceRow]],
@@ -515,6 +552,10 @@ def apply_row_updates(
 
     Line numbers are 1-based file line numbers (as from :func:`iter_data_rows`).
 
+    When reference writes are suppressed (see :func:`suppress_reference_writes`),
+    this returns ``(0, 0)`` without touching the file so callers can run the
+    normal processing path without mutating references.md.
+
     Args:
         path: references.md path.
         updates: ``(line_number, new_row)`` pairs to rewrite in place.
@@ -525,6 +566,8 @@ def apply_row_updates(
     Returns:
         ``(updated_count, deleted_count)``
     """
+    if not reference_writes_allowed():
+        return 0, 0
     by_line = {ln: row for ln, row in updates} if updates else {}
     delete_set = set(delete_line_numbers or ())
     if not by_line and not delete_set:

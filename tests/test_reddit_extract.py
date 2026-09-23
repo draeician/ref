@@ -57,7 +57,7 @@ def test_no_write_refs_suppresses_reference_writes(tmp_path, monkeypatch):
     assert "example.com/out" not in refs.read_text()
 
 
-def test_apply_with_no_write_refs_writes_out_file_but_not_refs(tmp_path, monkeypatch):
+def test_apply_with_no_write_refs_still_processes(tmp_path, monkeypatch):
     refs = _write_refs(tmp_path)
     out = tmp_path / "links.txt"
     _patch_discovery(monkeypatch, ["https://example.com/out"])
@@ -68,11 +68,58 @@ def test_apply_with_no_write_refs_writes_out_file_but_not_refs(tmp_path, monkeyp
     )
 
     assert code == 0
-    # References untouched even though --apply was passed.
-    assert calls == []
-    assert "example.com/out" not in refs.read_text()
+    # The normal ingestion path IS invoked (not skipped) under --no-write-refs.
+    assert calls == ["https://example.com/out"]
     # Other mutation still happened: outbound links written to --out.
     assert out.read_text().strip() == "https://example.com/out"
+
+
+def test_apply_no_write_refs_processes_but_does_not_mutate_refs(tmp_path, monkeypatch):
+    """Real process_url runs under --apply --no-write-refs, but references.md is
+    left byte-for-byte unchanged while non-reference processing still occurs."""
+    from ref_cli import cli
+
+    refs = _write_refs(tmp_path)
+    original = refs.read_bytes()
+
+    monkeypatch.setattr(cli, "UNIFIED", str(refs))
+    monkeypatch.setattr(cli, "resolve_redirect", lambda url: url)
+    monkeypatch.setattr(cli, "simplify_url", lambda url: url)
+
+    fetched = []
+
+    def fake_get_title(url):
+        fetched.append(url)
+        return "Discovered Title"
+
+    monkeypatch.setattr(cli, "get_title_from_url", fake_get_title)
+    _patch_discovery(monkeypatch, ["https://example.com/out"])
+
+    code = reddit_extract.main(["--file", str(refs), "--apply", "--no-write-refs"])
+
+    assert code == 0
+    # Non-reference processing happened: the title was fetched for the link.
+    assert fetched == ["https://example.com/out"]
+    # references.md untouched (byte-for-byte).
+    assert refs.read_bytes() == original
+
+
+def test_apply_writes_refs_via_normal_path(tmp_path, monkeypatch):
+    """Plain --apply uses the normal capture path and writes references.md."""
+    from ref_cli import cli
+
+    refs = _write_refs(tmp_path)
+
+    monkeypatch.setattr(cli, "UNIFIED", str(refs))
+    monkeypatch.setattr(cli, "resolve_redirect", lambda url: url)
+    monkeypatch.setattr(cli, "simplify_url", lambda url: url)
+    monkeypatch.setattr(cli, "get_title_from_url", lambda url: "Discovered Title")
+    _patch_discovery(monkeypatch, ["https://example.com/out"])
+
+    code = reddit_extract.main(["--file", str(refs), "--apply"])
+
+    assert code == 0
+    assert "https://example.com/out" in refs.read_text()
 
 
 def test_outbound_links_feed_normal_pipeline_not_silo(tmp_path, monkeypatch):
