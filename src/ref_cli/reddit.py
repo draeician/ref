@@ -131,6 +131,28 @@ class RedditProvider:
         raise NotImplementedError
 
 
+# Submission fields that carry the explicit outbound destination for link posts,
+# in preference order. ``url_overridden_by_dest`` is the canonical external
+# target after Reddit's redirect; ``url`` is the raw submitted destination.
+_SUBMISSION_DESTINATION_FIELDS = ("url_overridden_by_dest", "url")
+
+
+def _submission_destination(obj: Dict[str, Any]) -> str:
+    """Return a link submission's external destination URL, or ``""``.
+
+    Prefers ``url_overridden_by_dest`` over ``url`` and returns ``""`` when the
+    fields are absent, malformed, or not an absolute http(s) URL (e.g. a Reddit
+    self/permalink link for text posts is still http, so callers filter those).
+    """
+    for key in _SUBMISSION_DESTINATION_FIELDS:
+        value = obj.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith(("http://", "https://")):
+                return value
+    return ""
+
+
 class ArcticShiftProvider(RedditProvider):
     """Retrieve Reddit objects from the Arctic Shift archive API."""
 
@@ -242,6 +264,27 @@ class ArcticShiftProvider(RedditProvider):
         else:
             text = obj.get("body") or ""
             title = ""
+
+        urls: List[str] = []
+        seen = set()
+
+        if kind == "submission":
+            # Link posts carry their outbound destination on the object; prefer
+            # it so an empty selftext still yields the URL this feature exists
+            # to discover. Reddit self/permalink URLs are filtered here (and
+            # again in discover_outbound_urls) to keep Reddit→Reddit recursion
+            # bounded.
+            destination = _submission_destination(obj)
+            if destination and not is_reddit_url(destination):
+                urls.append(destination)
+                seen.add(destination)
+
+        for candidate in extract_urls(text):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            urls.append(candidate)
+
         return RedditContent(
             status="found",
             kind=kind,
@@ -249,7 +292,7 @@ class ArcticShiftProvider(RedditProvider):
             subreddit=obj.get("subreddit") or "",
             title=title,
             text=text,
-            urls=extract_urls(text),
+            urls=urls,
             raw=obj,
         )
 

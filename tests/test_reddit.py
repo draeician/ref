@@ -170,6 +170,107 @@ def test_provider_comment_success():
     assert result.urls == ["https://example.com/other"]
 
 
+def _link_submission_payload(**fields) -> dict:
+    base = {
+        "id": "abc123",
+        "name": "t3_abc123",
+        "selftext": "",
+        "title": "A link post",
+        "subreddit": "test",
+    }
+    base.update(fields)
+    return {"data": [base]}
+
+
+def test_link_submission_destination_discovered():
+    provider = ArcticShiftProvider(
+        session=FakeSession(
+            payload=_link_submission_payload(
+                url="https://example.com/article",
+                url_overridden_by_dest="https://example.com/article",
+            )
+        )
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/article"]
+
+
+def test_link_submission_destination_and_selftext():
+    provider = ArcticShiftProvider(
+        session=FakeSession(
+            payload=_link_submission_payload(
+                selftext="see https://selftext.example/extra",
+                url="https://example.com/article",
+                url_overridden_by_dest="https://example.com/article",
+            )
+        )
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/article", "https://selftext.example/extra"]
+
+
+def test_link_submission_duplicate_destination_deduped():
+    provider = ArcticShiftProvider(
+        session=FakeSession(
+            payload=_link_submission_payload(
+                selftext="https://example.com/article",
+                url="https://example.com/article",
+            )
+        )
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/article"]
+
+
+def test_link_submission_reddit_destination_filtered():
+    provider = ArcticShiftProvider(
+        session=FakeSession(
+            payload=_link_submission_payload(
+                url="https://www.reddit.com/r/other/comments/xyz/slug/"
+            )
+        )
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == []
+
+
+def test_link_submission_missing_destination_uses_selftext():
+    provider = ArcticShiftProvider(
+        session=FakeSession(
+            payload=_link_submission_payload(
+                selftext="check https://example.com/from-text"
+            )
+        )
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/from-text"]
+
+
+def test_link_submission_prefers_url_overridden_by_dest():
+    provider = ArcticShiftProvider(
+        session=FakeSession(
+            payload=_link_submission_payload(
+                url="https://example.com/original",
+                url_overridden_by_dest="https://example.com/canonical",
+            )
+        )
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/canonical"]
+
+
 def test_provider_archive_miss_is_not_found():
     provider = ArcticShiftProvider(session=FakeSession(payload={"data": []}))
     result = provider.fetch_submission("zzzzzz")

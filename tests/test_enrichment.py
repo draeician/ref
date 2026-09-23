@@ -69,6 +69,41 @@ def test_extract_urls_surrounding_punctuation() -> None:
     assert extract_urls("(see https://example.com/x).") == ["https://example.com/x"]
 
 
+def test_extract_urls_markdown_balanced_parens() -> None:
+    assert extract_urls("[x](https://example.com/Foo_(bar))") == [
+        "https://example.com/Foo_(bar)"
+    ]
+
+
+def test_extract_urls_markdown_nested_parens() -> None:
+    assert extract_urls("[x](https://example.com/a_(b_(c)))") == [
+        "https://example.com/a_(b_(c))"
+    ]
+
+
+def test_extract_urls_markdown_wikipedia_function() -> None:
+    assert extract_urls(
+        "[article](https://en.wikipedia.org/wiki/Function_(mathematics))"
+    ) == ["https://en.wikipedia.org/wiki/Function_(mathematics)"]
+
+
+def test_extract_urls_bare_balanced_parens() -> None:
+    assert extract_urls("See https://example.com/Foo_(bar).") == [
+        "https://example.com/Foo_(bar)"
+    ]
+
+
+def test_extract_urls_trailing_comma() -> None:
+    assert extract_urls("https://example.com/a,") == ["https://example.com/a"]
+
+
+def test_extract_urls_markdown_then_bare_order() -> None:
+    assert extract_urls("[a](https://a.example/x) and https://b.example/y") == [
+        "https://a.example/x",
+        "https://b.example/y",
+    ]
+
+
 def test_extract_links_markdown_inline_is_bucketed() -> None:
     links = extract_links("[repo](https://github.com/foo/bar)")
     assert links["github"] == ["https://github.com/foo/bar"]

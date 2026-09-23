@@ -149,12 +149,10 @@ YOUTUBE_CATEGORY_NAMES: Dict[str, str] = {
 
 _URL_RE = re.compile(r'https?://[^\s<>\"\']+', re.IGNORECASE)
 
-# Markdown inline link: ``[text](url)`` (optional ``<>`` around the URL). Captures
-# the URL without the closing ``)`` so it is not confused with punctuation.
-_MARKDOWN_LINK_RE = re.compile(
-    r'\[[^\]]*\]\(\s*<?(https?://[^\s()<>]+)>?',
-    re.IGNORECASE,
-)
+# Locates the ``[text](`` opening of a Markdown inline link. The destination is
+# then scanned with :func:`_scan_markdown_destination` so URLs containing
+# balanced parentheses are preserved.
+_MARKDOWN_LINK_OPEN_RE = re.compile(r'\[[^\]]*\]\(')
 
 _LINK_BUCKETS = (
     ('github', re.compile(r'(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+', re.I)),
@@ -199,29 +197,85 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
     return None
 
 
+def _clean_url(raw: str) -> str:
+    """Strip trailing prose punctuation from a URL.
+
+    Removes trailing ``.``, ``,``, ``]``, quotes, etc., then removes trailing
+    ``)`` only when they are *unbalanced* (more ``)`` than ``(``). Balanced
+    parentheses that belong to the URL path are preserved.
+    """
+    url = raw.rstrip('.,]"\'')
+    while url.endswith(')') and url.count(')') > url.count('('):
+        url = url[:-1]
+    return url
+
+
+def _scan_markdown_destination(text: str, pos: int) -> Tuple[Optional[str], int]:
+    """Scan a Markdown link destination starting at ``pos`` (just after ``(``).
+
+    Handles the plain ``(url)`` form and the angle-bracket ``(<url>)`` form,
+    tracking balanced parentheses so URLs like ``…/Function_(mathematics)`` are
+    not truncated. Returns ``(url, end)`` where ``url`` is the cleaned URL (or
+    ``None`` when no http(s) destination is present) and ``end`` is the index
+    one past the closing ``)`` of the link.
+    """
+    n = len(text)
+    i = pos
+    while i < n and text[i] in ' \t':
+        i += 1
+
+    if i < n and text[i] == '<':
+        close = text.find('>', i + 1)
+        if close == -1:
+            return None, pos
+        url = _clean_url(text[i + 1:close])
+        return (url or None), close + 1
+
+    if not text.startswith(('http://', 'https://'), i):
+        return None, pos
+
+    depth = 0
+    j = i
+    while j < n:
+        ch = text[j]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch in ' \t\n<>"\'':
+            break
+        j += 1
+
+    url = _clean_url(text[i:j])
+    return (url or None), j
+
+
 def extract_urls(text: str) -> List[str]:
     """Return a deduped, ordered list of URLs found in ``text``.
 
-    Finds Markdown inline links (``[text](url)``) precisely, plus bare
-    ``http(s)://`` URLs, tolerating surrounding punctuation. Preserves first
-    occurrence order and skips duplicates (existing dedup convention).
+    Finds Markdown inline links (``[text](url)``) with balanced parentheses,
+    plus bare ``http(s)://`` URLs, tolerating surrounding punctuation. Preserves
+    first occurrence order and skips duplicates (existing dedup convention).
     """
     if not text:
         return []
     markdown_spans: List[Tuple[int, int]] = []
     candidates: List[Tuple[int, str]] = []
 
-    for match in _MARKDOWN_LINK_RE.finditer(text):
-        url = match.group(1).rstrip(').,]\'"')
-        markdown_spans.append((match.start(), match.end()))
-        if url:
-            candidates.append((match.start(1), url))
+    for match in _MARKDOWN_LINK_OPEN_RE.finditer(text):
+        url, end = _scan_markdown_destination(text, match.end())
+        if url is None:
+            continue
+        markdown_spans.append((match.start(), end))
+        candidates.append((match.end(), url))
 
     for match in _URL_RE.finditer(text):
         # Skip bare-URL matches that fall inside a Markdown link's full span.
         if any(start <= match.start() < end for start, end in markdown_spans):
             continue
-        url = match.group(0).rstrip(').,]\'"')
+        url = _clean_url(match.group(0))
         if url:
             candidates.append((match.start(), url))
 
