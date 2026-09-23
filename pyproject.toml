@@ -47,6 +47,7 @@ ref-fix-x-titles = "ref_cli.fix_x_titles:main"
 ref-fix-reddit-titles = "ref_cli.fix_reddit_titles:main"
 ref-advisors = "ref_cli.advisors:main"
 ref-enrich = "ref_cli.enrich_cli:main"
+ref-reddit-extract = "ref_cli.reddit_extract:main"
 ref-api = "ref_api.server:main"
 
 [tool.setuptools]

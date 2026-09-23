@@ -2420,6 +2420,21 @@ def process_url(url: str, force: bool) -> None:
             except Exception as e:
                 log_error("Community Post Video", video_url, str(e))
                 print(f"Error: Failed to process linked video {video_url}: {e}")
+    elif _is_reddit_url(simplified_url):
+        _record_general_url(simplified_url, force, current_time)
+        try:
+            from ref_cli.reddit import discover_outbound_urls
+            outbound_urls = discover_outbound_urls(simplified_url)
+        except Exception as e:
+            log_error("Reddit Link Discovery", simplified_url, str(e))
+            outbound_urls = []
+        for outbound_url in outbound_urls:
+            print(f"Found linked URL in Reddit post: {outbound_url}")
+            try:
+                process_url(outbound_url, force)
+            except Exception as e:
+                log_error("Reddit Outbound Link", outbound_url, str(e))
+                print(f"Error: Failed to process linked URL {outbound_url}: {e}")
     elif (
         "youtube.com" in simplified_url
         and not simplified_url.startswith('https://www.youtube.com/redirect')
