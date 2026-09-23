@@ -23,6 +23,10 @@ from ref_cli.enrichment import extract_urls
 
 ARCTIC_SHIFT_BASE = "https://arctic-shift.photon-reddit.com"
 
+# Number of top-level comments to pull for link discovery. Large enough to
+# cover a normal-sized thread, small enough to avoid an unbounded request.
+_COMMENT_TREE_LIMIT = 100
+
 _REDDIT_HOSTS = ("reddit.com", "redd.it")
 
 
@@ -130,6 +134,14 @@ class RedditProvider:
     def fetch_comment(self, object_id: str) -> RedditContent:
         raise NotImplementedError
 
+    def fetch_submission_comments(self, submission_id: str) -> List[str]:
+        """Return archived comment bodies for a submission (best-effort).
+
+        Defaults to an empty list so providers without comment-tree support
+        contribute no comment links.
+        """
+        return []
+
 
 # Submission fields that carry the explicit outbound destination for link posts,
 # in preference order. ``url_overridden_by_dest`` is the canonical external
@@ -172,6 +184,72 @@ class ArcticShiftProvider(RedditProvider):
 
     def fetch_comment(self, object_id: str) -> RedditContent:
         return self._fetch("comments", object_id, kind="comment")
+
+    def fetch_submission_comments(self, submission_id: str) -> List[str]:
+        """Fetch the archived comment tree for a submission (best-effort).
+
+        Returns the list of comment bodies (in traversal order) found under the
+        submission. Never raises: any transport/parse failure logs and yields an
+        empty list so submission capture is unaffected.
+        """
+        url = f"{self.base_url}/api/comments/tree"
+        params = {"link_id": f"t3_{submission_id}", "limit": _COMMENT_TREE_LIMIT}
+        try:
+            response = self.session.get(url, params=params, timeout=self.timeout)
+        except requests.RequestException as exc:
+            logging.info(
+                "Arctic Shift comment tree request failed for %s: %s",
+                submission_id,
+                exc,
+            )
+            return []
+
+        if response.status_code == 429:
+            logging.info(
+                "Arctic Shift comment tree rate limited for %s (HTTP 429)",
+                submission_id,
+            )
+            return []
+        if response.status_code >= 500:
+            logging.info(
+                "Arctic Shift comment tree server error for %s (HTTP %s)",
+                submission_id,
+                response.status_code,
+            )
+            return []
+        if response.status_code != 200:
+            logging.info(
+                "Arctic Shift comment tree returned HTTP %s for %s",
+                response.status_code,
+                submission_id,
+            )
+            return []
+
+        try:
+            payload = response.json()
+        except ValueError:
+            logging.info(
+                "Arctic Shift comment tree malformed JSON for %s", submission_id
+            )
+            return []
+
+        if not isinstance(payload, dict):
+            logging.info(
+                "Arctic Shift comment tree unexpected shape for %s", submission_id
+            )
+            return []
+
+        data = payload.get("data")
+        if not isinstance(data, list):
+            logging.info(
+                "Arctic Shift comment tree unexpected shape for %s", submission_id
+            )
+            return []
+
+        bodies: List[str] = []
+        for node in data:
+            _walk_comment_tree(node, bodies)
+        return bodies
 
     def _fetch(self, collection: str, object_id: str, kind: str) -> RedditContent:
         url = f"{self.base_url}/api/{collection}/ids"
@@ -297,6 +375,36 @@ class ArcticShiftProvider(RedditProvider):
         )
 
 
+def _walk_comment_tree(node: Any, bodies: List[str]) -> None:
+    """Recursively collect usable comment bodies from an Arctic Shift tree node.
+
+    Traverses ``t1`` comment nodes in first-seen order, descending into nested
+    ``replies``. Non-comment nodes (``more`` placeholders and anything else) and
+    comments without a usable string body are skipped safely.
+    """
+    if not isinstance(node, dict):
+        return
+    if node.get("kind") != "t1":
+        return
+
+    data = node.get("data")
+    if not isinstance(data, dict):
+        return
+
+    body = data.get("body")
+    if isinstance(body, str) and body.strip():
+        bodies.append(body)
+
+    replies = data.get("replies")
+    if isinstance(replies, dict):
+        listing = replies.get("data")
+        if isinstance(listing, dict):
+            children = listing.get("children")
+            if isinstance(children, list):
+                for child in children:
+                    _walk_comment_tree(child, bodies)
+
+
 def fetch_reddit_content(
     url: str,
     provider: Optional[RedditProvider] = None,
@@ -321,6 +429,7 @@ def discover_outbound_urls(
     surrounding archive operation continues. A miss is reported as *not found*,
     never as deletion.
     """
+    provider = provider or ArcticShiftProvider()
     result = fetch_reddit_content(url, provider=provider)
     if not result.found:
         logging.info(
@@ -339,4 +448,18 @@ def discover_outbound_urls(
             continue
         seen.add(candidate)
         outbound.append(candidate)
+
+    # For submissions, also discover links in the archived comment tree. This
+    # is best-effort enrichment: any comment-fetch failure logs and yields an
+    # empty body list, leaving submission-level URLs intact.
+    if result.kind == "submission":
+        for body in provider.fetch_submission_comments(result.object_id):
+            for candidate in extract_urls(body):
+                if is_reddit_url(candidate):
+                    continue
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                outbound.append(candidate)
+
     return outbound

@@ -44,11 +44,29 @@ class FakeSession:
         return FakeResponse(self.status_code, self.payload, self.json_exc)
 
 
+class RoutingSession:
+    """Returns a different FakeResponse per endpoint (matched by URL substring)."""
+
+    def __init__(self, routes):
+        # routes: dict of url substring -> (status_code, payload, json_exc)
+        self.routes = routes
+        self.calls = []
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append((url, params, timeout))
+        for key, spec in self.routes.items():
+            if key in url:
+                status_code, payload, json_exc = spec
+                return FakeResponse(status_code, payload, json_exc)
+        return FakeResponse(200, {"data": []})
+
+
 class StubProvider(RedditProvider):
     """Deterministic provider that returns a fixed result."""
 
-    def __init__(self, result):
+    def __init__(self, result, comments=None):
         self.result = result
+        self.comments = list(comments) if comments is not None else []
         self.fetched = []
 
     def fetch_submission(self, object_id):
@@ -58,6 +76,10 @@ class StubProvider(RedditProvider):
     def fetch_comment(self, object_id):
         self.fetched.append(("comment", object_id))
         return self.result
+
+    def fetch_submission_comments(self, submission_id):
+        self.fetched.append(("comments", submission_id))
+        return list(self.comments)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +397,299 @@ def test_fetch_reddit_content_non_reddit_url_is_error():
     assert not result.found
 
 
+# ---------------------------------------------------------------------------
+# Comment-tree retrieval (Arctic Shift) and comment-link discovery
+# ---------------------------------------------------------------------------
+
+
+def _comment_node(body=None, cid="c1", replies=None):
+    data = {
+        "id": cid,
+        "name": f"t1_{cid}",
+        "body": body,
+        "subreddit": "test",
+        "link_id": "t3_abc123",
+    }
+    if replies is not None:
+        data["replies"] = replies
+    return {"kind": "t1", "data": data}
+
+
+def _more_node(child_ids, cid="m1"):
+    return {
+        "kind": "more",
+        "data": {"count": len(child_ids), "id": cid, "children": list(child_ids)},
+    }
+
+
+def _listing(children):
+    return {"kind": "Listing", "data": {"children": children}}
+
+
+def _tree_payload(nodes):
+    return {"data": nodes}
+
+
+def test_comment_tree_fetches_top_level_comment_link():
+    provider = StubProvider(
+        RedditContent(status="found", kind="submission", object_id="abc123", urls=[]),
+        comments=["see https://github.com/a/b in a comment"],
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://github.com/a/b"]
+
+
+def test_comment_tree_nested_reply_body_collected():
+    tree = [
+        _comment_node(
+            body="top level no link",
+            cid="c1",
+            replies=_listing(
+                [
+                    _comment_node(
+                        body="nested reply https://github.com/nested/link",
+                        cid="c2",
+                        replies="",
+                    )
+                ]
+            ),
+        )
+    ]
+    provider = ArcticShiftProvider(session=FakeSession(payload=_tree_payload(tree)))
+    bodies = provider.fetch_submission_comments("abc123")
+    assert bodies == [
+        "top level no link",
+        "nested reply https://github.com/nested/link",
+    ]
+
+
+def test_multiple_comments_multiple_links():
+    provider = StubProvider(
+        RedditContent(status="found", kind="submission", object_id="abc123", urls=[]),
+        comments=[
+            "first https://a.example/1",
+            "second https://b.example/2 and https://c.example/3",
+        ],
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://a.example/1", "https://b.example/2", "https://c.example/3"]
+
+
+def test_duplicate_submission_and_comment_url_deduped():
+    provider = StubProvider(
+        RedditContent(
+            status="found",
+            kind="submission",
+            object_id="abc123",
+            urls=["https://example.com/a"],
+        ),
+        comments=["see https://example.com/a again"],
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/a"]
+
+
+def test_duplicate_comment_url_deduped():
+    provider = StubProvider(
+        RedditContent(status="found", kind="submission", object_id="abc123", urls=[]),
+        comments=["https://example.com/a", "also https://example.com/a"],
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/a"]
+
+
+def test_reddit_url_in_comment_filtered():
+    provider = StubProvider(
+        RedditContent(status="found", kind="submission", object_id="abc123", urls=[]),
+        comments=[
+            "https://www.reddit.com/r/other/comments/xyz/slug/ and https://example.com/a"
+        ],
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/a"]
+
+
+def test_comment_tree_http_failure_keeps_submission_urls():
+    routes = {
+        "/api/posts/ids": (
+            200,
+            {
+                "data": [
+                    {
+                        "id": "abc123",
+                        "name": "t3_abc123",
+                        "selftext": "https://example.com/sub",
+                        "title": "t",
+                        "subreddit": "test",
+                    }
+                ]
+            },
+            None,
+        ),
+        "/api/comments/tree": (500, {}, None),
+    }
+    provider = ArcticShiftProvider(session=RoutingSession(routes))
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/sub"]
+
+
+def test_comment_tree_malformed_response_keeps_submission_urls():
+    routes = {
+        "/api/posts/ids": (
+            200,
+            {
+                "data": [
+                    {
+                        "id": "abc123",
+                        "name": "t3_abc123",
+                        "selftext": "https://example.com/sub",
+                        "title": "t",
+                        "subreddit": "test",
+                    }
+                ]
+            },
+            None,
+        ),
+        "/api/comments/tree": (200, {"unexpected": True}, None),
+    }
+    provider = ArcticShiftProvider(session=RoutingSession(routes))
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/sub"]
+
+
+def test_comment_tree_malformed_json_keeps_submission_urls():
+    routes = {
+        "/api/posts/ids": (
+            200,
+            {
+                "data": [
+                    {
+                        "id": "abc123",
+                        "name": "t3_abc123",
+                        "selftext": "https://example.com/sub",
+                        "title": "t",
+                        "subreddit": "test",
+                    }
+                ]
+            },
+            None,
+        ),
+        "/api/comments/tree": (200, None, ValueError("bad json")),
+    }
+    provider = ArcticShiftProvider(session=RoutingSession(routes))
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/", provider=provider
+    )
+    assert urls == ["https://example.com/sub"]
+
+
+def test_comment_tree_more_node_ignored():
+    tree = [
+        _comment_node(body="real comment https://example.com/real", cid="c1", replies=""),
+        _more_node(["c2"]),
+    ]
+    provider = ArcticShiftProvider(session=FakeSession(payload=_tree_payload(tree)))
+    bodies = provider.fetch_submission_comments("abc123")
+    assert bodies == ["real comment https://example.com/real"]
+
+
+def test_comment_tree_nested_more_node_ignored():
+    tree = [
+        _comment_node(
+            body="top",
+            cid="c1",
+            replies=_listing([_more_node(["c2"])]),
+        )
+    ]
+    provider = ArcticShiftProvider(session=FakeSession(payload=_tree_payload(tree)))
+    bodies = provider.fetch_submission_comments("abc123")
+    assert bodies == ["top"]
+
+
+def test_comment_tree_ignores_missing_or_nonstring_body():
+    tree = [
+        _comment_node(body="good https://example.com/good", cid="c1", replies=""),
+        {"kind": "t1", "data": {"id": "c2"}},
+        {"kind": "t1", "data": {"id": "c3", "body": 12345}},
+        {"kind": "t1", "data": {"id": "c4", "body": "   "}},
+    ]
+    provider = ArcticShiftProvider(session=FakeSession(payload=_tree_payload(tree)))
+    bodies = provider.fetch_submission_comments("abc123")
+    assert bodies == ["good https://example.com/good"]
+
+
+def test_direct_comment_url_does_not_fetch_tree():
+    provider = StubProvider(
+        RedditContent(
+            status="found",
+            kind="comment",
+            object_id="def456",
+            urls=["https://example.com/from-comment"],
+        ),
+        comments=["https://example.com/should-not-appear"],
+    )
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/test/comments/abc123/slug/def456/", provider=provider
+    )
+    assert urls == ["https://example.com/from-comment"]
+    assert provider.fetched == [("comment", "def456")]
+
+
+def test_real_world_comment_tree_regression_1wlhwmi():
+    """The submission carries no outbound link; only a comment has the GitHub URL."""
+    tree = [
+        _comment_node(
+            body=(
+                "Here is the GitHub for my playwright like system:\n\n"
+                "https://github.com/VISNRY-ENTERTAINMENT/Human-ScreenVision-Open"
+            ),
+            cid="payuk1x",
+            replies="",
+        )
+    ]
+    routes = {
+        "/api/posts/ids": (
+            200,
+            {
+                "data": [
+                    {
+                        "id": "1wlhwmi",
+                        "name": "t3_1wlhwmi",
+                        "selftext": "",
+                        "title": "anyone want to test my playwright inspired screen",
+                        "subreddit": "vibecoding",
+                    }
+                ]
+            },
+            None,
+        ),
+        "/api/comments/tree": (200, {"data": tree}, None),
+    }
+    provider = ArcticShiftProvider(session=RoutingSession(routes))
+    urls = discover_outbound_urls(
+        "https://www.reddit.com/r/vibecoding/comments/1wlhwmi/"
+        "anyone_want_to_test_my_playwright_inspired_screen/",
+        provider=provider,
+    )
+    assert urls == [
+        "https://github.com/VISNRY-ENTERTAINMENT/Human-ScreenVision-Open"
+    ]
+
+
 def test_process_url_reddit_discovers_and_processes_outbound(monkeypatch, tmp_path):
     """Capturing a Reddit URL records it and feeds outbound links to process_url."""
     from ref_cli import cli
@@ -412,6 +727,44 @@ def test_process_url_reddit_discovers_and_processes_outbound(monkeypatch, tmp_pa
 
     assert ("general", reddit_url) in recorded
     assert outbound_calls == ["https://example.com/out"]
+
+
+def test_process_url_comment_link_flows_to_process_url(monkeypatch, tmp_path):
+    """A URL discovered only in a comment is fed into the normal process_url path."""
+    from ref_cli import cli
+    from ref_cli.reddit import discover_outbound_urls as real_discover
+
+    reddit_url = "https://www.reddit.com/r/test/comments/abc123/slug/"
+    references_file = tmp_path / "references.md"
+    references_file.write_text("")
+
+    monkeypatch.setattr(cli, "UNIFIED", str(references_file))
+    monkeypatch.setattr(cli, "resolve_redirect", lambda url: url)
+    monkeypatch.setattr(cli, "simplify_url", lambda url: url)
+    monkeypatch.setattr(cli, "_record_general_url", lambda *a, **k: None)
+
+    stub = StubProvider(
+        RedditContent(status="found", kind="submission", object_id="abc123", urls=[]),
+        comments=["see https://github.com/comment/link"],
+    )
+    monkeypatch.setattr(
+        "ref_cli.reddit.discover_outbound_urls",
+        lambda url: real_discover(url, provider=stub),
+    )
+
+    real_process_url = cli.process_url
+    outbound_calls = []
+
+    def fake_process_url(url, force=False):
+        if url == reddit_url:
+            return real_process_url(url, force)
+        outbound_calls.append(url)
+
+    monkeypatch.setattr(cli, "process_url", fake_process_url)
+
+    cli.process_url(reddit_url, force=False)
+
+    assert outbound_calls == ["https://github.com/comment/link"]
 
 
 def test_process_url_reddit_miss_continues_without_crash(monkeypatch, tmp_path):
