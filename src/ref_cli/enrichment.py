@@ -149,6 +149,13 @@ YOUTUBE_CATEGORY_NAMES: Dict[str, str] = {
 
 _URL_RE = re.compile(r'https?://[^\s<>\"\']+', re.IGNORECASE)
 
+# Markdown inline link: ``[text](url)`` (optional ``<>`` around the URL). Captures
+# the URL without the closing ``)`` so it is not confused with punctuation.
+_MARKDOWN_LINK_RE = re.compile(
+    r'\[[^\]]*\]\(\s*<?(https?://[^\s()<>]+)>?',
+    re.IGNORECASE,
+)
+
 _LINK_BUCKETS = (
     ('github', re.compile(r'(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+', re.I)),
     ('amazon', re.compile(
@@ -192,6 +199,44 @@ def extract_youtube_video_id(url: str) -> Optional[str]:
     return None
 
 
+def extract_urls(text: str) -> List[str]:
+    """Return a deduped, ordered list of URLs found in ``text``.
+
+    Finds Markdown inline links (``[text](url)``) precisely, plus bare
+    ``http(s)://`` URLs, tolerating surrounding punctuation. Preserves first
+    occurrence order and skips duplicates (existing dedup convention).
+    """
+    if not text:
+        return []
+    markdown_spans: List[Tuple[int, int]] = []
+    candidates: List[Tuple[int, str]] = []
+
+    for match in _MARKDOWN_LINK_RE.finditer(text):
+        url = match.group(1).rstrip(').,]\'"')
+        markdown_spans.append((match.start(), match.end()))
+        if url:
+            candidates.append((match.start(1), url))
+
+    for match in _URL_RE.finditer(text):
+        # Skip bare-URL matches that fall inside a Markdown link's full span.
+        if any(start <= match.start() < end for start, end in markdown_spans):
+            continue
+        url = match.group(0).rstrip(').,]\'"')
+        if url:
+            candidates.append((match.start(), url))
+
+    candidates.sort(key=lambda pair: pair[0])
+
+    urls: List[str] = []
+    seen = set()
+    for _start, url in candidates:
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
 def extract_links(text: str) -> Dict[str, List[str]]:
     """Bucket URLs found in description/text into github/amazon/music/…"""
     buckets: Dict[str, List[str]] = {
@@ -204,12 +249,7 @@ def extract_links(text: str) -> Dict[str, List[str]]:
     }
     if not text:
         return buckets
-    seen = set()
-    for match in _URL_RE.finditer(text):
-        url = match.group(0).rstrip(').,]\'"')
-        if url in seen:
-            continue
-        seen.add(url)
+    for url in extract_urls(text):
         placed = False
         for name, pattern in _LINK_BUCKETS:
             if pattern.search(url):

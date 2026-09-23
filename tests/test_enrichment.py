@@ -9,6 +9,7 @@ from ref_cli.enrichment import (
     VideoEnrichment,
     ensure_enrichment_dirs,
     extract_links,
+    extract_urls,
     extract_youtube_video_id,
     infer_role,
     save_video_card,
@@ -40,6 +41,37 @@ def test_extract_links_buckets() -> None:
     assert links["amazon"]
     assert links["music"]
     assert any("example.com" in u for u in links["other"])
+
+
+def test_extract_urls_markdown_inline_link() -> None:
+    assert extract_urls("[example](https://example.com/article)") == [
+        "https://example.com/article"
+    ]
+
+
+def test_extract_urls_multiple_markdown_and_bare_links() -> None:
+    text = "[a](https://a.com) and https://b.com [c](https://c.com)"
+    assert extract_urls(text) == ["https://a.com", "https://b.com", "https://c.com"]
+
+
+def test_extract_urls_adjacent_markdown_links() -> None:
+    assert extract_urls("[a](https://a.com)[b](https://b.com)") == [
+        "https://a.com",
+        "https://b.com",
+    ]
+
+
+def test_extract_urls_deduplicates() -> None:
+    assert extract_urls("[a](https://a.com) https://a.com") == ["https://a.com"]
+
+
+def test_extract_urls_surrounding_punctuation() -> None:
+    assert extract_urls("(see https://example.com/x).") == ["https://example.com/x"]
+
+
+def test_extract_links_markdown_inline_is_bucketed() -> None:
+    links = extract_links("[repo](https://github.com/foo/bar)")
+    assert links["github"] == ["https://github.com/foo/bar"]
 
 
 def test_resolve_target_ids() -> None:
