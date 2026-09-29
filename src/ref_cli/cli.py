@@ -7,7 +7,7 @@ Purpose: To allow for fast CLI recording from the command line for later referen
 
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urlunparse, parse_qs, quote
+from urllib.parse import urlparse, urlunparse, parse_qs, quote, unquote
 import os
 import re
 import sys
@@ -827,6 +827,12 @@ def _get_reddit_oembed_title(url: str) -> Optional[str]:
     return None
 
 
+_IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+    ".ico", ".tif", ".tiff", ".avif", ".heic", ".heif",
+}
+
+
 def get_title_from_url(url: str) -> str:
     """
     Fetch a webpage title via lynx HTML dump, with site-specific fallbacks.
@@ -849,6 +855,13 @@ def get_title_from_url(url: str) -> str:
     """
     verbose_logger.log(f"Attempting to fetch title for URL: {url}")
     
+    # Skip binary / non-HTML targets (e.g. images) so lynx never receives a
+    # body that cannot be decoded as UTF-8.
+    parsed = urlparse(url)
+    if Path(unquote(parsed.path)).suffix.lower() in _IMAGE_EXTENSIONS:
+        verbose_logger.log(f"Skipping title fetch for image URL: {url}")
+        return "Image URL (no title)"
+
     # Check if lynx is installed
     try:
         subprocess.run(['which', 'lynx'], capture_output=True, check=True)
@@ -862,7 +875,7 @@ def get_title_from_url(url: str) -> str:
     verbose_logger.log(f"Executing lynx command: {lynx_command}")
 
     try:
-        result = subprocess.run(lynx_command, shell=True, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(lynx_command, shell=True, capture_output=True, text=True, errors="ignore", timeout=30)
         
         if result.returncode != 0:
             logging.error(f"Lynx command failed with return code {result.returncode}")
