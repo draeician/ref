@@ -50,3 +50,6 @@ logs/
 .roorules/*.md
 .windsurf/rules/*.md
 .aider/rules/*.md
+
+
+.zvec-grep/
