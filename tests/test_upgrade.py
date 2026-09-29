@@ -145,3 +145,64 @@ def test_report_upgrade_instructions_corrupt_metadata(tmp_path: Path, capsys) ->
     )
     assert code == 1
     assert "Could not read pipx metadata" in capsys.readouterr().out
+
+
+def test_perform_upgrade_runs_steps(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(upgrade, "_fastapi_importable", lambda: False)
+    (tmp_path / "pipx_metadata.json").write_text(
+        json.dumps(_metadata("/opt/md2/git/personal/ref", injected_api=True)),
+        encoding="utf-8",
+    )
+    unit = tmp_path / "ref-api.service"
+    unit.write_text("[Unit]\n", encoding="utf-8")
+
+    calls: list = []
+    monkeypatch.setattr(
+        upgrade.subprocess,
+        "run",
+        lambda argv: calls.append(argv) or _FakeResult(0),
+    )
+
+    code = upgrade.perform_upgrade(
+        prefix=str(tmp_path),
+        systemd_unit=unit,
+    )
+    assert code == 0
+    assert calls == [
+        ["pipx", "install", "--force", "/opt/md2/git/personal/ref"],
+        ["pipx", "inject", "ref-cli", "ref-cli[api]"],
+        ["systemctl", "--user", "restart", "ref-api"],
+    ]
+
+
+def test_perform_upgrade_stops_on_failure(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(upgrade, "_fastapi_importable", lambda: False)
+    (tmp_path / "pipx_metadata.json").write_text(
+        json.dumps(_metadata("/opt/md2/git/personal/ref")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        upgrade.subprocess,
+        "run",
+        lambda argv: _FakeResult(1),
+    )
+    code = upgrade.perform_upgrade(
+        prefix=str(tmp_path),
+        systemd_unit=tmp_path / "missing",
+    )
+    assert code == 1
+    assert "Command failed" in capsys.readouterr().out
+
+
+def test_perform_upgrade_missing_metadata(tmp_path: Path, capsys) -> None:
+    code = upgrade.perform_upgrade(
+        prefix=str(tmp_path),
+        systemd_unit=tmp_path / "missing",
+    )
+    assert code == 1
+    assert "not detected as a pipx venv" in capsys.readouterr().out
+
+
+class _FakeResult:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode

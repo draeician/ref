@@ -1368,7 +1368,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--upgrade",
         action="store_true",
-        help="Show how to upgrade this ref-cli install (pipx source detected).",
+        help="Upgrade this ref-cli install and restart the ref-api service.",
     )
     parser.add_argument(
         "--install-server",
@@ -2881,9 +2881,9 @@ def main():
 
             sys.exit(report_api_status(load_config()))
         if args.upgrade:
-            from ref_cli.upgrade import report_upgrade_instructions
+            from ref_cli.upgrade import perform_upgrade
 
-            sys.exit(report_upgrade_instructions())
+            sys.exit(perform_upgrade())
         if args.install_server:
             from ref_cli.server_install import install_server
 

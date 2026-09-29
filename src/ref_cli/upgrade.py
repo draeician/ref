@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ref_cli import __version__
-from ref_cli.utils.colors import error, highlight, info, warning
+from ref_cli.utils.colors import error, highlight, info, success, warning
 
 
 def pipx_metadata_path(prefix: Optional[str] = None) -> Path:
@@ -130,4 +132,51 @@ def report_upgrade_instructions(
     print(info("To upgrade, run:"))
     for command in commands:
         print(command)
+    return 0
+
+
+def perform_upgrade(
+    *,
+    prefix: Optional[str] = None,
+    systemd_unit: Optional[Path] = None,
+) -> int:
+    """Run the pipx upgrade steps and restart ref-api; return an exit code."""
+    print(info(f"ref-cli version: {highlight(__version__)}"))
+
+    meta_path = pipx_metadata_path(prefix)
+    if not meta_path.is_file():
+        print(warning("Install source: not detected as a pipx venv."))
+        print(
+            info(
+                "Reinstall with your original method (pipx / pip / editable). "
+                "Example: pipx install --force /path/to/ref  or  pipx upgrade ref-cli"
+            )
+        )
+        return 1
+
+    try:
+        metadata = load_pipx_metadata(meta_path)
+        source, installed_version, commands = build_upgrade_steps(
+            metadata,
+            systemd_unit=systemd_unit,
+        )
+    except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+        print(error(f"Could not read pipx metadata at {meta_path}: {exc}"))
+        return 1
+
+    print(info(f"pipx package version: {highlight(installed_version)}"))
+    print(info(f"Install source: {highlight(source)}"))
+    print(info("Running upgrade steps…"))
+    for command in commands:
+        print(highlight(f"$ {command}"))
+        try:
+            result = subprocess.run(shlex.split(command))
+        except OSError as exc:
+            print(error(f"Failed to run command: {exc}"))
+            return 1
+        if result.returncode != 0:
+            print(error(f"Command failed (exit {result.returncode}): {command}"))
+            return 1
+
+    print(success("Upgrade complete."))
     return 0
