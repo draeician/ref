@@ -29,6 +29,7 @@ from dotenv import load_dotenv, set_key
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 import shutil
+import shlex
 import subprocess
 import time
 import select
@@ -165,7 +166,7 @@ def get_rumble_title_and_channel(url: str) -> Tuple[str, str]:
     lynx_command = (
         "lynx -dump -nolist -force_html -hiddenlinks=ignore "
         "-display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines "
-        f'-dont_wrap_pre -source "{url}"'
+        f'-dont_wrap_pre -source {shlex.quote(url)}'
     )
     try:
         result = subprocess.run(
@@ -871,7 +872,9 @@ def get_title_from_url(url: str) -> str:
         logging.error(error_msg)
         return error_msg
 
-    lynx_command = f'lynx -dump -nolist -force_html -hiddenlinks=ignore -display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines -dont_wrap_pre -source "{url}"'
+    lynx_command = ('lynx -dump -nolist -force_html -hiddenlinks=ignore '
+                    '-display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines '
+                    f'-dont_wrap_pre -source {shlex.quote(url)}')
     verbose_logger.log(f"Executing lynx command: {lynx_command}")
 
     try:
