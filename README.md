@@ -268,3 +268,27 @@ ref-advisors --file ./references.md --format csv -o advisors.csv
 - `ref-advisors` - Rank trusted YouTube channels, X handles, and web/blog authors from `references.md`
 - `ref-enrich` - YouTube meta cards + `@meta` categories (migrate backups gzip by default; `--nocompress` for plain)
 
+
+### YouTube show-note link discovery
+
+`ref-youtube-extract` reads YouTube video show notes, chapters, and metadata,
+then discovers outbound links. Uses cached enrichment cards when available;
+otherwise fetches via YouTube Data API or yt-dlp.
+
+```bash
+ref-youtube-extract "https://www.youtube.com/watch?v=PqtggjVAi8M"
+ref-youtube-extract --limit 10 --out youtube-links.txt
+ref-youtube-extract --apply "https://www.youtube.com/watch?v=PqtggjVAi8M"
+ref-youtube-extract --apply --file ~/references/references.md --limit 20
+ref-youtube-extract --refresh --limit 5
+```
+
+Preview is the default and does not submit URLs. `--apply` requires a configured
+`api_url` or `REF_API_URL` and sends the source videos and discovered links
+through the existing ref-api `POST /urls` endpoint. API-side processing
+handles reference storage, deduplication, transcription, and enrichment.
+Descriptions and cached link buckets are scanned, preserving link order and
+deduplicating across videos. Self-links, local/private IP destinations, and
+localhost names are skipped. Link crawling is not recursive; comments are
+not scanned. The ref-api server must also validate destinations to prevent
+redirect/DNS-based access to internal networks.
