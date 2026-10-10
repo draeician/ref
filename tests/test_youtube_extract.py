@@ -111,3 +111,14 @@ def test_apply_still_records_parent_when_metadata_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(yt, "ingest_urls", ingest)
     assert yt.main(["--apply", f"https://youtu.be/{VIDEO}"]) == 1
     assert sent == [f"https://www.youtube.com/watch?v={VIDEO}"]
+
+
+def test_http_https_variants_deduplicate_preferring_https():
+    video = card(
+        "http://kgs.link/patreon\nhttps://kgs.link/patreon\n"
+        "https://example.com/other"
+    )
+    assert yt.outbound_urls(video, VIDEO) == [
+        "https://kgs.link/patreon",
+        "https://example.com/other",
+    ]
