@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import os
 import threading
 from typing import List
 
@@ -31,12 +32,87 @@ def _classify_stdout(stdout: str) -> UrlStatus:
     return "error"
 
 
-def process_one(raw_input: str, force: bool = False) -> UrlResult:
+# Bound automatic fan-out per API request. Manual extraction has no such cap.
+MAX_YOUTUBE_SHOW_NOTE_LINKS = 50
+
+
+def _process_youtube_show_notes(video_url: str) -> str:
+    """Record URLs in a YouTube description through the ordinary API ingest path.
+
+    This runs after the original video's process_url call releases _write_lock.
+    Child ingestion explicitly disables discovery to prevent recursive cycles.
+    """
+    from ref_cli.youtube_extract import (
+        chapters_from_description,
+        outbound_urls,
+        read_video_card,
+        youtube_video_id,
+    )
+
+    video_id = youtube_video_id(video_url)
+    if not video_id:
+        return ""
+
+    logger.info("YouTube notes: start video_id=%s", video_id)
+    base = os.path.dirname(os.path.abspath(ref_cli.UNIFIED))
+    try:
+        card = read_video_card(video_id, base)
+        description = card.get("description") or ""
+        if not isinstance(description, str):
+            description = ""
+        # Chapter markers are never submitted: outbound_urls finds URLs only.
+        chapter_count = len(chapters_from_description(description))
+        links = outbound_urls(card, video_id)
+    except Exception as exc:  # noqa: BLE001 - best-effort metadata retrieval
+        logger.warning("YouTube notes: unavailable video_id=%s reason=%s", video_id, exc)
+        return f"YouTube notes: unavailable for {video_id} ({exc})"
+
+    logger.info(
+        "YouTube notes: metadata video_id=%s source=%s description_chars=%d "
+        "timestamps_ignored=%d outbound_links=%d",
+        video_id, card.get("source") or "cache", len(description),
+        chapter_count, len(links),
+    )
+    if len(links) > MAX_YOUTUBE_SHOW_NOTE_LINKS:
+        logger.warning(
+            "YouTube notes: capped video_id=%s found=%d limit=%d",
+            video_id, len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS,
+        )
+
+    counts = {"added": 0, "exists": 0, "skipped": 0, "error": 0}
+    for link in links[:MAX_YOUTUBE_SHOW_NOTE_LINKS]:
+        child = process_one(link, force=False, _discover_youtube_links=False)
+        counts[child.status] = counts.get(child.status, 0) + 1
+        if child.status == "error":
+            logger.warning(
+                "YouTube notes: link video_id=%s status=error url=%s reason=%s",
+                video_id, link, child.message,
+            )
+        else:
+            logger.info(
+                "YouTube notes: link video_id=%s status=%s url=%s",
+                video_id, child.status, link,
+            )
+
+    summary = (
+        f"YouTube notes: video_id={video_id} scanned={min(len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS)} "
+        f"found={len(links)} timestamps_ignored={chapter_count} "
+        f"added={counts['added']} exists={counts['exists']} "
+        f"skipped={counts['skipped']} errors={counts['error']}"
+    )
+    logger.info("YouTube notes: complete %s", summary)
+    return summary
+
+
+def process_one(
+    raw_input: str, force: bool = False, *, _discover_youtube_links: bool = True
+) -> UrlResult:
     """
     Apply skip patterns, convert YouTube video IDs, then call process_url.
 
     Concurrent callers are serialized via a process-wide lock so appends to
-    references.md do not interleave.
+    references.md do not interleave. The parent YouTube capture finishes
+    before show-note child URLs are processed outside the lock.
     """
     original = raw_input.strip()
     if not original:
@@ -70,6 +146,13 @@ def process_one(raw_input: str, force: bool = False) -> UrlResult:
                 ref_cli.process_url(target, force)
         output = buf.getvalue().strip()
         status = _classify_stdout(output)
+        if _discover_youtube_links and status in {"added", "exists"}:
+            from ref_cli.youtube_extract import youtube_video_id
+
+            if youtube_video_id(target):
+                summary = _process_youtube_show_notes(target)
+                if summary:
+                    output = f"{output}\n{summary}" if output else summary
         message = {
             "added": "Recorded",
             "exists": "Already recorded",
