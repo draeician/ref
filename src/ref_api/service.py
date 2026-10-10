@@ -5,10 +5,12 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import os
 import threading
 from typing import List
 
 from ref_cli import cli as ref_cli
+from ref_cli.youtube_extract import outbound_urls, read_video_card, youtube_video_id
 from ref_api.schemas import SearchHit, TranscriptResult, UrlResult, UrlStatus
 
 logger = logging.getLogger(__name__)
@@ -95,9 +97,81 @@ def process_one(raw_input: str, force: bool = False) -> UrlResult:
         )
 
 
+# Bound automatic expansion of untrusted descriptions in a single API request.
+# Direct input URLs retain their normal behavior; links are scanned one level.
+MAX_YOUTUBE_SHOW_NOTE_LINKS = 40
+
+
+def _discover_youtube_links(parent: UrlResult) -> List[str]:
+    """Read show notes for a recorded YouTube video, without failing ingestion.
+
+    Enrichment already saves a per-video JSON card during capture. Use that
+    cache if available, otherwise use the existing API/yt-dlp fallback.
+    Never read a transcript to discover outbound URLs.
+    """
+    video_id = youtube_video_id(parent.url)
+    if not video_id or parent.status in {"error", "skipped"}:
+        return []
+
+    archive_base = os.path.dirname(os.path.abspath(ref_cli.UNIFIED))
+    logger.info("YouTube show notes: reading video=%s url=%s", video_id, parent.url)
+    try:
+        card = read_video_card(video_id, archive_base)
+        links = outbound_urls(card, video_id)
+    except Exception as exc:  # noqa: BLE001 - link discovery is best effort
+        logger.warning(
+            "YouTube show notes: metadata unavailable video=%s: %s",
+            video_id, exc,
+        )
+        return []
+
+    description = card.get("description")
+    chars = len(description) if isinstance(description, str) else 0
+    logger.info(
+        "YouTube show notes: video=%s source=%s description_chars=%d "
+        "links_found=%d links_selected=%d",
+        video_id, card.get("source", "cache"), chars, len(links),
+        min(len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS),
+    )
+    if len(links) > MAX_YOUTUBE_SHOW_NOTE_LINKS:
+        logger.warning(
+            "YouTube show notes: video=%s omitted %d links (limit %d)",
+            video_id, len(links) - MAX_YOUTUBE_SHOW_NOTE_LINKS,
+            MAX_YOUTUBE_SHOW_NOTE_LINKS,
+        )
+    return links[:MAX_YOUTUBE_SHOW_NOTE_LINKS]
+
+
 def process_many(inputs: List[str], force: bool = False) -> List[UrlResult]:
-    """Process each input in order; ingest is serialized per URL via process_one."""
-    return [process_one(item, force=force) for item in inputs]
+    """Ingest inputs, then their YouTube show-note URLs through the same API path.
+
+    Discovered URLs use process_one like explicit submissions, so skip patterns,
+    deduplication, title fetching, and normal enrichment apply. Process only
+    one expansion level to avoid recursive crawls and runaway processing.
+    The per-URL write lock is released before scanning/processing links.
+    """
+    results: List[UrlResult] = []
+    discovered_seen = set()
+    explicit_inputs = {item.strip() for item in inputs}
+
+    for item in inputs:
+        parent = process_one(item, force=force)
+        results.append(parent)
+
+        for link in _discover_youtube_links(parent):
+            if link in discovered_seen or link in explicit_inputs:
+                continue
+            discovered_seen.add(link)
+            logger.info("YouTube show notes: processing link=%s from=%s", link, parent.url)
+            child = process_one(link, force=False)
+            child.discovered_from = parent.url
+            results.append(child)
+            logger.info(
+                "YouTube show notes: result status=%s link=%s from=%s message=%s",
+                child.status, link, parent.url, child.message,
+            )
+
+    return results
 
 
 _SEARCH_FIELDS = {
