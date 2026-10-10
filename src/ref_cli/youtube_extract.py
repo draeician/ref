@@ -195,12 +195,23 @@ def _submit(base_url: str, link: str) -> bool:
     except ApiError as exc:
         print(f"API error for {link}: {exc}", file=sys.stderr)
         return False
-    if len(results) != 1 or results[0].get("status") not in {"added", "exists", "skipped"}:
-        detail = results[0].get("message") if results else "invalid API response"
-        print(f"API failed for {link}: {detail}", file=sys.stderr)
+    if not results:
+        print(f"API returned no results for {link}", file=sys.stderr)
         return False
-    print(f"API {results[0]['status']}: {link}", file=sys.stderr)
-    return True
+
+    failed = False
+    for entry in results:
+        target = entry.get("url") or entry.get("input") or link
+        status = entry.get("status", "error")
+        if status not in {"added", "exists", "skipped"}:
+            failed = True
+            print(
+                f"API failed for {target}: {entry.get('message') or 'unknown error'}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"API {status}: {target}", file=sys.stderr)
+    return not failed
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -274,12 +285,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if link not in seen_links:
                 seen_links.add(link)
                 discovered.append(link)
-
-        if base_url:
-            for target in links:
-                if target not in submitted:
-                    submitted.add(target)
-                    failed = not _submit(base_url, target) or failed
 
     if args.out:
         with open(os.path.expanduser(args.out), "w", encoding="utf-8") as handle:
