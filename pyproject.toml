@@ -40,6 +40,10 @@ api = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
 ]
+test = [
+    "pytest>=7.0.0",
+    "httpx2",  # Required by Starlette TestClient (FastAPI API tests).
+]
 
 [project.scripts]
 ref = "ref_cli.cli:main"
@@ -48,6 +52,7 @@ ref-fix-reddit-titles = "ref_cli.fix_reddit_titles:main"
 ref-advisors = "ref_cli.advisors:main"
 ref-enrich = "ref_cli.enrich_cli:main"
 ref-reddit-extract = "ref_cli.reddit_extract:main"
+ref-youtube-extract = "ref_cli.youtube_extract:main"
 ref-api = "ref_api.server:main"
 
 [tool.setuptools]

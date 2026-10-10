@@ -1002,6 +1002,24 @@ def _is_youtube_radio_mix(query_params: dict) -> bool:
     return bool(list_ids) and str(list_ids[0]).startswith('RD')
 
 
+def _is_youtube_channel_url(url: str) -> bool:
+    """Recognize YouTube channel/profile pages, which are not videos.
+
+    Shared links (including short-link redirects) may point at a channel,
+    handle, legacy /c/ or /user/ URL. Record these as general references,
+    rather than passing them to the video-only YouTube Data API lookup.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or '').lower()
+    if not (host == 'youtube.com' or host.endswith('.youtube.com')):
+        return False
+    path = parsed.path
+    return bool(
+        re.match(r'^/(?:channel|c|user)/[^/]+', path)
+        or re.match(r'^/@[^/]+', path)
+    )
+
+
 def _is_youtube_community_post(url: str) -> bool:
     """True when a YouTube URL points at a community post rather than a video.
 
@@ -2436,6 +2454,8 @@ def process_url(url: str, force: bool) -> None:
             error_message = f"Failed to process Rumble URL: {e}"
             log_error("Rumble Processing", simplified_url, error_message)
             print(f"Error: {error_message}")
+    elif _is_youtube_channel_url(simplified_url):
+        _record_general_url(simplified_url, force, current_time)
     elif _is_youtube_community_post(simplified_url):
         _record_general_url(simplified_url, force, current_time)
         for video_url in _extract_youtube_video_urls_from_community_post(simplified_url):
