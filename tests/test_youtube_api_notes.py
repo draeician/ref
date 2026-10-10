@@ -170,3 +170,41 @@ def test_failed_outbound_link_does_not_abort_other_links(capture, monkeypatch, c
     assert capture == [VIDEO_URL, "https://example.org/a", "https://example.org/b"]
     assert "errors=1" in result.output
     assert "status=error" in caplog.text
+
+
+def test_post_urls_endpoint_automatically_records_show_note_links(
+    capture, monkeypatch
+):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from ref_api.app import create_app
+
+    monkeypatch.setattr(
+        youtube_extract, "read_video_card",
+        lambda *a, **k: {
+            "description": "0:00 Intro\nhttps://example.org/show-notes",
+            "source": "cache",
+        },
+    )
+    with patch("ref_api.app._bootstrap_archive"):
+        with TestClient(create_app()) as client:
+            response = client.post("/urls", json={"url": VIDEO_URL})
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["status"] == "added"
+    assert "found=1" in result["output"]
+    assert capture == [VIDEO_URL, "https://example.org/show-notes"]
+
+
+def test_timestamp_only_description_does_not_ingest_children(capture, monkeypatch):
+    monkeypatch.setattr(
+        youtube_extract, "read_video_card",
+        lambda *a, **k: {
+            "description": "0:00 Introduction\n01:42 Demo\n1:02:15 Conclusion",
+        },
+    )
+    result = service.process_one(VIDEO_URL)
+    assert capture == [VIDEO_URL]
+    assert "found=0" in result.output
+    assert "timestamps_ignored=3" in result.output
