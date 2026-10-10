@@ -97,14 +97,30 @@ def outbound_urls(card: Dict[str, object], video_id: str) -> List[str]:
             if isinstance(values, list):
                 candidates.extend(item for item in values if isinstance(item, str))
 
-    seen = set()
+    # HTTP and HTTPS variants with the same host/path/query/fragment are
+    # usually the same referenced resource. Prefer HTTPS when both appear,
+    # retaining the original first-seen position.
+    positions: Dict[Tuple[str, str, str, str, str], int] = {}
     result: List[str] = []
     for link in candidates:
-        if link in seen or not _safe_link(link):
+        if not _safe_link(link):
             continue
         if youtube_video_id(link) == video_id:  # Don't re-submit this video.
             continue
-        seen.add(link)
+        parsed = urlsplit(link)
+        key = (
+            (parsed.hostname or "").lower(),
+            str(parsed.port or ""),
+            parsed.path or "/",
+            parsed.query,
+            parsed.fragment,
+        )
+        if key in positions:
+            previous = positions[key]
+            if parsed.scheme == "https" and result[previous].startswith("http://"):
+                result[previous] = link
+            continue
+        positions[key] = len(result)
         result.append(link)
     return result
 
