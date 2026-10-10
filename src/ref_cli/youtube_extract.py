@@ -56,6 +56,11 @@ def _safe_link(link: str) -> bool:
     The archive server should also enforce its own network access policy:
     client-side checks cannot prevent redirects or DNS rebinding.
     """
+    # Discovered URLs are untrusted. Legacy ref title extraction launches
+    # lynx via a shell; reject unsafe literal characters before forwarding.
+    # Percent-encoded query strings remain usable.
+    if any(ord(char) < 32 or char in '"\'\\\\\x60$|' for char in link):
+        return False
     try:
         parsed = urlsplit(link)
         host = (parsed.hostname or "").lower().rstrip(".")
