@@ -208,3 +208,36 @@ def test_timestamp_only_description_does_not_ingest_children(capture, monkeypatc
     assert capture == [VIDEO_URL]
     assert "found=0" in result.output
     assert "timestamps_ignored=3" in result.output
+
+
+def test_info_progress_logs_when_root_is_warning(capture, monkeypatch):
+    """Production Uvicorn can leave root at WARNING while we need INFO notes."""
+    import io
+
+    monkeypatch.setattr(
+        youtube_extract, "read_video_card",
+        lambda *a, **k: {
+            "description": "https://example.org/guide",
+            "source": "cache",
+        },
+    )
+    root = logging.getLogger()
+    previous_level = root.level
+    sink = io.StringIO()
+    handler = logging.StreamHandler(sink)
+    handler.setLevel(logging.INFO)
+    root.addHandler(handler)
+    root.setLevel(logging.WARNING)
+    try:
+        result = service.process_one(VIDEO_URL)
+    finally:
+        root.setLevel(previous_level)
+        root.removeHandler(handler)
+        handler.close()
+
+    assert result.status == "added"
+    output = sink.getvalue()
+    assert "YouTube notes: start video_id=" + VIDEO_ID in output
+    assert "YouTube notes: metadata video_id=" + VIDEO_ID in output
+    assert "YouTube notes: link video_id=" + VIDEO_ID in output
+    assert "YouTube notes: complete" in output
