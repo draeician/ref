@@ -48,6 +48,10 @@ class UrlResult(BaseModel):
     url: str = Field(description="URL that was processed (after video-id conversion if any)")
     status: UrlStatus
     message: str = ""
+    discovered_from: Optional[str] = Field(
+        default=None,
+        description="Source YouTube URL when discovered in video show notes",
+    )
     output: str = Field(
         default="",
         description="Captured stdout from process_url (reference line or status text)",
