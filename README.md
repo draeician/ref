@@ -292,3 +292,44 @@ deduplicating across videos. Self-links, local/private IP destinations, and
 localhost names are skipped. Link crawling is not recursive; comments are
 not scanned. The ref-api server must also validate destinations to prevent
 redirect/DNS-based access to internal networks.
+
+
+### Automatic YouTube show-note capture on ref-api
+
+When `ref <YouTube video URL>` sends a URL to `ref-api`, the server now
+**automatically** reads the YouTube description/show notes using its existing
+enrichment card or metadata fetch, discovers outbound HTTP(S) links, and
+ingests them through the same `process_one` archive pipeline. The original
+video is recorded first. A transcript being blocked/unavailable does **not**
+stop show-note discovery. The server logs details to `journalctl --user -u ref-api`.
+
+```bash
+ref 'https://www.youtube.com/watch?v=zmrPY6S1FwY'
+journalctl --user -u ref-api --since '10 minutes ago' --no-pager | grep 'YouTube notes:'
+```
+
+Journal entries include `start`, `metadata` (source, description length,
+`timestamps_ignored`, `outbound_links`), one `link` with status per submitted
+URL, and `complete` with added/existing/skipped/error counts. The request's
+`output` also includes a one-line show-note summary.
+
+Only real links are archived: bare chapter timestamps such as `00:37`,
+`1:02:15`, and self-links back to the same video's timestamps are ignored.
+Outbound YouTube links are saved but their own show notes are not recursively
+scanned by the same request. Auto-discovery is limited to the first 50 links
+per video to cap fan-out; use `ref-youtube-extract --apply` for larger lists.
+Metadata failures and individual link errors are logged, while successful
+parent video recording remains intact. A video already in the archive is
+still eligible for show-note discovery when it is submitted again.
+
+After upgrading the pipx-installed `ref-cli`, restart the user service:
+
+```bash
+systemctl --user restart ref-api.service
+```
+
+**Note:** local-only CLI mode (no `api_url`) does not perform this new
+server-side automatic discovery. Use `ref-youtube-extract` explicitly in
+that mode to scan descriptions. Do not expose the unauthenticated ref-api
+to untrusted networks. Server-side destination/redirect protections remain
+necessary before accepting untrusted inputs from the public internet.
