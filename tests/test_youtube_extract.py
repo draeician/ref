@@ -122,3 +122,16 @@ def test_http_https_variants_deduplicate_preferring_https():
         "https://kgs.link/patreon",
         "https://example.com/other",
     ]
+
+
+def test_links_with_unsafe_shell_characters_are_rejected():
+    notes = (
+        "https://example.org/safe?q=hello%20world\n"
+        "https://example.org/bad?x=$HOME\n"
+        "https://example.org/cmd?x=`id`\n"
+        "https://example.org/bad|pipe\n"
+        "https://example.org/bad\\\\slash\n"
+    )
+    assert yt.outbound_urls(card(notes), VIDEO) == [
+        "https://example.org/safe?q=hello%20world"
+    ]
