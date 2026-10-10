@@ -77,7 +77,7 @@ def test_apply_requires_api(monkeypatch, tmp_path):
     assert yt.main(["--apply", f"https://youtu.be/{VIDEO}"]) == 1
 
 
-def test_apply_sends_parent_and_links_to_api(monkeypatch, tmp_path):
+def test_apply_sends_only_parent_and_api_handles_discovered_links(monkeypatch, tmp_path):
     monkeypatch.setattr(yt, "_default_file", lambda: str(tmp_path / "refs.md"))
     monkeypatch.setattr("ref_cli.cli.load_config", lambda: {"api_url": "http://archive:8000"})
     monkeypatch.setattr(yt, "read_video_card", lambda *a, **kw: card(
@@ -93,8 +93,6 @@ def test_apply_sends_parent_and_links_to_api(monkeypatch, tmp_path):
     assert yt.main(["--apply", f"https://youtu.be/{VIDEO}"]) == 0
     assert sent == [
         ("http://archive:8000", f"https://www.youtube.com/watch?v={VIDEO}"),
-        ("http://archive:8000", "https://github.com/team/tool"),
-        ("http://archive:8000", "https://example.org/guide"),
     ]
 
 
@@ -122,3 +120,38 @@ def test_http_https_variants_deduplicate_preferring_https():
         "https://kgs.link/patreon",
         "https://example.com/other",
     ]
+
+
+def test_apply_handles_expanded_api_results(monkeypatch, tmp_path):
+    monkeypatch.setattr(yt, "_default_file", lambda: str(tmp_path / "refs.md"))
+    monkeypatch.setattr("ref_cli.cli.load_config", lambda: {"api_url": "http://archive:8000"})
+    monkeypatch.setattr(yt, "read_video_card", lambda *a, **kw: card("https://example.org/link"))
+    calls = []
+
+    def ingest(base_url, **kwargs):
+        calls.append(kwargs["url_value"])
+        return [
+            {"url": kwargs["url_value"], "status": "added"},
+            {"url": "https://example.org/link", "status": "added",
+             "discovered_from": kwargs["url_value"]},
+        ]
+
+    monkeypatch.setattr(yt, "ingest_urls", ingest)
+    assert yt.main(["--apply", f"https://youtu.be/{VIDEO}"]) == 0
+    assert calls == [f"https://www.youtube.com/watch?v={VIDEO}"]
+
+
+def test_apply_reports_discovered_url_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(yt, "_default_file", lambda: str(tmp_path / "refs.md"))
+    monkeypatch.setattr("ref_cli.cli.load_config", lambda: {"api_url": "http://archive:8000"})
+    monkeypatch.setattr(yt, "read_video_card", lambda *a, **kw: card("https://example.org/link"))
+
+    def ingest(base_url, **kwargs):
+        return [
+            {"status": "added", "url": kwargs["url_value"]},
+            {"status": "error", "url": "https://example.org/link",
+             "message": "title fetch failed"},
+        ]
+
+    monkeypatch.setattr(yt, "ingest_urls", ingest)
+    assert yt.main(["--apply", f"https://youtu.be/{VIDEO}"]) == 1
