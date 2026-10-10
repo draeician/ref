@@ -480,3 +480,22 @@ def test_oembed_rate_limit_waits_before_eleventh_request(monkeypatch, tmp_path):
     assert sleeps, 'expected a sleep when 10 requests already recorded'
     assert sleeps[0] > 0
     assert len(cli._oembed_request_times) == 1
+
+
+def test_general_title_uses_shell_quoted_url(monkeypatch):
+    """A URL from third-party show notes must not execute shell substitutions."""
+    import shlex
+
+    unsafe = "https://example.com/path?q=$(whoami)"
+    calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[:2] == ["which", "lynx"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "<title>Example</title>", "")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.get_title_from_url(unsafe) == "Example"
+    assert len(calls) == 1
+    assert f"-source {shlex.quote(unsafe)}" in calls[0]
