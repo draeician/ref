@@ -13,6 +13,10 @@ from ref_cli import cli as ref_cli
 from ref_api.schemas import SearchHit, TranscriptResult, UrlResult, UrlStatus
 
 logger = logging.getLogger(__name__)
+# Uvicorn often leaves the root logger at WARNING. Opt in to INFO for
+# show-note discovery so journalctl includes each URL and the completion
+# summary without turning on verbose logging across the whole process.
+logger.setLevel(logging.INFO)
 
 # Serialize writes to references.md across concurrent requests.
 _write_lock = threading.Lock()
