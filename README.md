@@ -271,6 +271,29 @@ ref-advisors --file ./references.md --format csv -o advisors.csv
 
 ### YouTube show-note link discovery
 
+**Automatic when using ref-api:** `ref <YouTube-video-URL>` posts the video
+to `POST /urls`; the API records it, reads its existing enrichment card (or
+fetches YouTube metadata), and then sends each URL found in the description
+through the same API ingestion service. Every link gets normal skip-pattern
+checks and archive deduplication. The API response includes a result per URL,
+with `discovered_from` identifying show-note links. Parent video processing
+still succeeds if metadata retrieval fails; that failure appears as a journal
+warning.
+
+```bash
+ref "https://www.youtube.com/watch?v=zmrPY6S1FwY"
+journalctl --user -u ref-api -n 100 --no-pager | grep 'YouTube show notes'
+```
+
+Scanning is **one level only**, with a limit of **40 outbound links per
+video**; skipped excess links are logged as warnings. No recursive traversal
+of links, comments, or transcripts is attempted by the new YouTube expansion
+itself. HTTP API ingestion may take longer when videos have many links.
+
+The standalone `ref-youtube-extract` command remains available for preview,
+reports, file exports, and archive scans. When `--apply` is used, it submits
+the parent videos to ref-api, which performs the link ingestion automatically.
+
 `ref-youtube-extract` reads YouTube video show notes, chapters, and metadata,
 then discovers outbound links. Uses cached enrichment cards when available;
 otherwise fetches via YouTube Data API or yt-dlp.
@@ -284,8 +307,8 @@ ref-youtube-extract --refresh --limit 5
 ```
 
 Preview is the default and does not submit URLs. `--apply` requires a configured
-`api_url` or `REF_API_URL` and sends the source videos and discovered links
-through the existing ref-api `POST /urls` endpoint. API-side processing
+`api_url` or `REF_API_URL` and sends source videos through the existing ref-api
+`POST /urls` endpoint, which discovers and ingests show-note links. API-side processing
 handles reference storage, deduplication, transcription, and enrichment.
 Descriptions and cached link buckets are scanned, preserving link order and
 deduplicating across videos. Self-links, local/private IP destinations, and
