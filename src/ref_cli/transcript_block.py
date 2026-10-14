@@ -100,6 +100,12 @@ _memory_state_lock = threading.Lock()
 _memory_state: Dict[str, Dict[str, Any]] = {}
 _memory_authoritative: set = set()
 
+# Process-local critical section for marker read/modify/write. Always held (via
+# ``_file_lock``) so the documented single-flight guarantee holds even when POSIX
+# ``flock`` -- or the lock file itself -- is unavailable. Never held across
+# provider I/O.
+_process_state_lock = threading.RLock()
+
 
 @dataclass
 class ProbeDecision:
@@ -155,10 +161,14 @@ def lock_path(transcripts_dir: str) -> str:
 
 
 def _as_finite_nonneg(data: Dict[str, Any], key: str) -> Optional[float]:
-    """Return a finite, non-negative float for ``key`` or None if malformed."""
+    """Return a finite, non-negative float for ``key`` or None if malformed.
+
+    ``float()`` of a huge-but-valid JSON integer (e.g. a 400-digit number) raises
+    ``OverflowError``; that too must be treated as malformed, never raised.
+    """
     try:
         value = float(data.get(key))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(value) or value < 0:
         return None
@@ -214,35 +224,43 @@ def _read_marker_unlocked(transcripts_dir: str) -> Optional[Dict[str, Any]]:
 
 @contextlib.contextmanager
 def _file_lock(transcripts_dir: str) -> Iterator[None]:
-    """Advisory lock protecting marker read-modify-write (POSIX)."""
-    try:
-        import fcntl
-    except ImportError:
-        yield
-        return
-    try:
-        os.makedirs(transcripts_dir, exist_ok=True)
-    except OSError:
-        yield
-        return
-    try:
-        handle = open(lock_path(transcripts_dir), "a+", encoding="utf-8")
-    except OSError:
-        yield
-        return
-    with handle:
+    """Critical section guarding marker read/modify/write.
+
+    Always serializes within this process via ``_process_state_lock``, so the
+    documented process-local single-flight guarantee holds even when POSIX
+    locking, the archive directory or the lock file is unavailable. When POSIX
+    ``flock`` works it additionally serializes independent processes sharing the
+    archive. The lock is never held across provider I/O.
+    """
+    with _process_state_lock:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            import fcntl
+        except ImportError:
+            yield
+            return
+        try:
+            os.makedirs(transcripts_dir, exist_ok=True)
         except OSError:
             yield
             return
         try:
+            handle = open(lock_path(transcripts_dir), "a+", encoding="utf-8")
+        except OSError:
             yield
-        finally:
+            return
+        with handle:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             except OSError:
-                pass
+                yield
+                return
+            try:
+                yield
+            finally:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
 
 
 def _memory_marker(transcripts_dir: str) -> Optional[Dict[str, Any]]:
@@ -528,28 +546,30 @@ def finish_probe(
     now = time.time() if now is None else now
     success = transcript_file is not None
 
+    def _owns_current_epoch(marker: Dict[str, Any]) -> bool:
+        return (
+            marker.get("lease_owner") == decision.owner
+            and marker["blocked_until"] == decision.epoch_blocked_until
+        )
+
     def _finish_probing() -> None:
         marker = _read_effective_marker(transcripts_dir)
         if marker is None:
             # Another producer already cleared the marker (its own success). There
             # is nothing to protect; our job is done.
             return
-        if success:
-            if (
-                marker.get("lease_owner") == decision.owner
-                and marker["blocked_until"] <= now
-            ):
-                # We own the lease and the block epoch was not renewed behind us.
-                _clear_marker_unlocked(transcripts_dir)
-            else:
-                # A newer cooldown or a different owner took over: a stale success
-                # must never erase the current epoch.
-                if marker.get("lease_owner") == decision.owner:
-                    marker["lease_owner"] = None
-                    marker["lease_expires_at"] = 0.0
-                    _commit_marker(transcripts_dir, marker)
+        if not _owns_current_epoch(marker):
+            # Either a newer owner claimed the recovery lease or a newer block
+            # epoch replaced ours. A stale success/failure from an older probe
+            # must leave the entire newer marker untouched: never clear a newer
+            # cooldown, never seize another owner's lease, never arm a backoff on
+            # someone else's behalf.
             return
-        # Unrelated failure / abort: release the lease and back off.
+        if success:
+            _clear_marker_unlocked(transcripts_dir)
+            return
+        # Unrelated failure / abort from the CURRENT owner of the CURRENT epoch:
+        # release our own lease and arm a bounded backoff.
         marker["lease_owner"] = None
         marker["lease_expires_at"] = 0.0
         marker["next_probe_at"] = now + PROBE_BACKOFF_SECONDS
