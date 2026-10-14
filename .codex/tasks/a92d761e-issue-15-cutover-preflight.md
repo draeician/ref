@@ -1,7 +1,7 @@
 # [ci] Issue #15 merge readiness and read-only cutover preflight
 
 - Task ID: a92d761e
-- State: COMPLETE — CI trigger added and read-only cutover preflight performed 2026-10-14; awaiting independent verification of exact final remote SHA/CI and explicit user/architect authorization before merge, deploy, or live validation.
+- State: CI / read-only preflight evidence verified on exact SHA `5747ff15aaaad1df998c3dae750d5f82bb24d090`, but release-plan QA **FAILED**: pre-API rollback target `ref-cli==1.6.11` is unsafe; unverified pipx extras preservation and blanket archive restore present data/service risks. Narrow successor correction: `.codex/tasks/c41e90b7-issue-15-pipx-cutover-safety.md`. No merge/deploy authorized.
 - Priority: High — release/cutover gate
 - Current development branch: `fix/issue-15-ref-api-disconnect`
 - Draft PR: https://github.com/draeician/ref/pull/16
