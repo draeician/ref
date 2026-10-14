@@ -1,7 +1,7 @@
 # Agent handoff — ref-cli
 
 ## Current state
-- **INDEPENDENT IMPLEMENTATION QA PASSED** on exact reviewed SHA `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d` for issue #15 cooldown and all probe corrections. Draft PR #16 is NOT merged/deployed. Post-merge CI, production validation, and cutover remain OPEN and require explicit user authorization.
+- **CUTOVER PREFLIGHT QA BLOCKED** by unsafe package rollback instructions (see latest review below), while **INDEPENDENT IMPLEMENTATION QA PASSED** on exact reviewed SHA `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d` for issue #15 cooldown and all probe corrections. Draft PR #16 is NOT merged/deployed. Post-merge CI, production validation, and cutover remain OPEN and require explicit user authorization.
 - Repository: https://github.com/draeician/ref
 - Default/protected branch: `main` (unchanged); baseline `276ea2afdfd8ea401f1849ba50b847225487f9ee`.
 - Development branch: `fix/issue-15-ref-api-disconnect`.
@@ -95,8 +95,16 @@ Do **not** assume `pipx upgrade ref-cli` reaches the unreleased GitHub branch �
 5. **Rollback (scoped to actual installs):** `systemctl --user stop` only in idle window; `pipx install --force 'ref-cli==1.6.11'` (or reinstall prior SHA from the local checkout); restore `references.md` from `references.md.bak-*.gz` / `*_references.md.gz` if needed; `systemctl --user restart ref-api.service`; re-verify `/health` + `ref --status`. No other production mutations.
 Standalone caveats to record in the cutover execution ticket: synchronous 50-link fanout and long per-URL network work mean a single POST is unbounded; schedule restarts when no client POST is active; API remains unauthenticated (trusted network only).
 
+## Architect independent preflight QA — 2026-10-14
+
+- **Verdict:** a92d761e CI portion PASS, **cutover plan FAIL** pending narrow correction. Reviewed exact PR HEAD `5747ff15aaaad1df998c3dae750d5f82bb24d090` (same as development branch), `main` untouched at `276ea2afd`, PR #16 draft/unmerged. Since last accepted code only workflow `.github/workflows/tests.yml` and canonical docs changed; no unapproved app modifications.
+- **Remote exact-SHA CI verified:** push https://github.com/draeician/ref/actions/runs/38635883999 and PR https://github.com/draeician/ref/actions/runs/38635892439, both completed SUCCESS at the exact reviewed SHA, with **336 passed** in each job log. Workflow now includes `main` in push branches. Architect has **not** independently connected to minion; read-only service/pipx/backup evidence is implementer's report; the report is consistent with repo architecture.
+- **Blocking deployment/rollback safety correction:** current handoff and PR body advise `pipx install --force 'ref-cli==1.6.11'` as a fallback, but this repository's README explicitly identifies 1.6.11 as **before** ref-api existed. Restoring it would remove the live API capability. Must roll back to actual pinned API-capable baseline `276ea2afdfd8ea401f1849ba50b847225487f9ee`, not 1.6.11. `pipx install --force` may also drop separately injected `[api]` dependencies; exact SHA-pinned `[api]` syntax and resulting `ref-api`/FastAPI/uvicorn availability must be tested in an isolated throwaway pipx environment before deployment. Routine `references.md` backup restore as part of package rollback risks discarding post-snapshot references; preserve archive by default and restore data only on proven corruption with explicit data-loss assessment.
+- **New canonical corrective task:** `.codex/tasks/c41e90b7-issue-15-pipx-cutover-safety.md`; `.codex/notes/current-task.md` points to it. This is documentation/isolated packaging verification only. No production deploy, merge or restart authorized. Previous app-code QA remains accepted.
+- **Release/incident gate still open:** cooldown mitigates YouTube transcript IP ban requests; it does NOT fix systemd SIGKILL of long synchronous in-flight POST. Production validation remains operator-authorization-gated.
+
 ## Exactly one recommended next step
-OpenCode: on the existing branch/PR #16, complete `.codex/tasks/a92d761e-issue-15-cutover-preflight.md` (only the main-push CI trigger + read-only preflight; no application code or production mutations), update this handoff, push and verify both remote workflows on the final exact SHA, and request independent review. Then the architect authorizes the merge decision.
+OpenCode: execute `.codex/tasks/c41e90b7-issue-15-pipx-cutover-safety.md` on the existing branch and draft PR #16, validate SHA-pinned API-extras install and prior-SHA rollback in an isolated temporary pipx home (never production), correct PR/handoff release instructions, run full checks, push and verify exact-final-SHA push/PR CI, then request independent review.
 
 ## Local/working-tree notes
 - Dedicated worktree `/tmp/opencode/ref-issue-15`; production checkout `/home/draeician/git/personal/ref` untouched (modified `TODO.md`, untracked `BAD`, `advisors.md` intact).
