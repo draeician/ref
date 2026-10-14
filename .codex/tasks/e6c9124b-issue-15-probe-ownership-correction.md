@@ -1,7 +1,7 @@
 # [fix] Issue #15 QA correction: transcript probe ownership and honest disconnect status
 
 - Task ID: e6c9124b
-- State: CORRECTIVE TASK / BLOCKING PR #16 MERGE
+- State: IMPLEMENTED; INDEPENDENT CODE QA PASSED on `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d`; awaiting separately authorized main merge, post-merge CI, deployment and production validation. Current follow-on task: `.codex/tasks/a92d761e-issue-15-cutover-preflight.md`.
 - Priority: High
 - Original issue: https://github.com/draeician/ref/issues/15
 - Draft PR: https://github.com/draeician/ref/pull/16
