@@ -1,9 +1,12 @@
 name: tests
 
 on:
-  # Keep the issue-15 fix loop green on its own branch as well as on any PR.
+  # Keep the issue-15 fix loop green on its own branch, run the repository
+  # suite on pushes to main (post-merge exact-main-SHA CI gate for cutover),
+  # and keep the existing PR coverage.
   push:
     branches:
+      - main
       - fix/issue-15-ref-api-disconnect
   pull_request:
 

@@ -64,9 +64,40 @@ After correction: all new tests pass; full suite green.
 - **Next-gate discovery:** `.github/workflows/tests.yml` currently runs on PRs and feature-branch pushes only, not **pushes to `main`**. Add main push CI before any merger so project rule requiring post-merge exact-default-branch SHA CI can be satisfied. Also establish read-only minion deployment preflight and rollback procedure rather than assuming `pipx upgrade` will fetch unreleased code.
 - **New active canonical task:** `.codex/tasks/a92d761e-issue-15-cutover-preflight.md`; `.codex/notes/current-task.md` now points to it. Feature implementation is QA-approved, not yet merged/production-accepted. The planning commits after the code SHA must themselves receive exact-SHA remote CI when code branch is finalized.
 
+## Cutover preflight (task a92d761e) — read-only, verified 2026-10-14
+
+**Status: main-push CI trigger added; read-only minion preflight COMPLETE. No merge, deploy, restart, install, or unit change performed.** All preflight commands were observational only (status/show/cat, bounded journal, pipx metadata, version/health, archive metadata, free space), sanitized, and excluded secrets and archive contents.
+
+### Service configuration (minion)
+- `ref-api.service` user unit: `Type=simple`, `ExecStart=/home/draeician/.local/bin/ref-api --host 0.0.0.0 --port 8000`, `EnvironmentFile=-/home/draeician/.config/ref/ref-api.env` (file present, no active vars), `Restart=on-failure`, `RestartSec=5`, `WantedBy=default.target`. **No `TimeoutStopSec` override** — effective `TimeoutStopUSec=1min 30s` (systemd default).
+- State: `active (running)` 17h, `MainPID=6083`, `NRestarts=0`, `Result=success`, `ExecMainStatus=0`, enabled. One `Started ref-api.service` in last 24h (03:06:53, i.e. the restart after the documented stop-timeout kill). No error-level journal entries beyond routine per-URL `Lynx command timed out` messages during show-note fanout.
+
+### Installed package source (verified, NOT released code)
+- `pipx list` → `ref-cli 1.6.12b1.dev40+g276ea2afd.d20261010`, apps incl. `ref`, `ref-api` under `~/.local/bin`.
+- `src/ref_cli/_version.py` is git-ignored (setuptools_scm generated); installed dist-info `direct_url.json` = `{"dir_info": {}, "url": "file:///opt/md2/git/personal/ref"}` with **no** `__editable__`/`.pth` marker → **non-editable local-directory install**.
+- `ref --version` / `/health` both report `1.6.12b1.dev40+g276ea2afd.d20261010` (main `276ea2afd`, 40 commits past `v1.6.12-beta`, dirty build). Production checkout `/home/draeician/git/personal/ref` = `main` @ `276ea2a`.
+- The running process still logs per-video `YouTube blocked transcript requests` warnings (e.g. 20:38–20:39 UTC) → the approved cooldown fix is **not yet active in production**, exactly as expected before cutover. Production artifact provenance: `pipx install file:///opt/md2/git/personal/ref`.
+
+### Service lifecycle / disconnect distinction (preserved)
+- Working, tested: transcript **cooldown** suppresses remote transcript calls during a confirmed IP block and persists a cross-process marker at `<transcripts_dir>/.youtube-transcript-block.json`.
+- **NOT resolved by this feature:** stopping `ref-api.service` while a synchronous `POST /urls` is in flight (show-note fanout can run minutes) → 90s graceful stop timeout (`TimeoutStopUSec=1min 30s`) → systemd SIGKILL closes the socket with **no HTTP response** → client `RemoteDisconnected`. Observed in journal (03:05:23 stop → 03:06:53 SIGKILL). Cooldown reduces the request-storm amplifier, not stop-in-flight disconnects. Production validation of this gate remains open and operator-authorized only.
+
+### Backup verification (read-only)
+- `~/references` = 638M. Snapshot/backup evidence present: `references.md.bak-20260717T203644.gz` plus timestamped gzip snapshots `YYYYMMDDTHHMMSS_references.md.gz` in the archive root, and a `backups/` subdir. `ref --backup` writes/gzips a timestamped copy (local mode uses the file directly when `api_url` is loopback).
+- Cooldown marker `~/references/transcripts/.youtube-transcript-block.json` does **not** exist yet (old code never writes it) — expected pre-cutover. Disk: 4.0T (6% used, 3.6T free).
+
+### Actual deployment procedure (documented; NOT executed; requires explicit operator authorization)
+Do **not** assume `pipx upgrade ref-cli` reaches the unreleased GitHub branch — the pipx metadata points at a local directory snapshot, and PyPI has no matching release. Actual, verified-from-source cutover, in an idle window with no in-flight requests:
+1. **Snapshot:** `ref --backup` (plain `--nocompress` optional) and verify the new gzip appears in `~/references`.
+2. **Code phase-in:** recover the final SHA into a known source dir, then `pipx install --force 'git+https://github.com/draeician/ref.git@<final-sha>'` (or from the SHA-pinned local checkout), then confirm `pipx list` / `ref --version` shows the new SHA-derived version.
+3. **Unit unchanged** (no `systemctl --user cat` change needed); `systemctl --user daemon-reload` anyway, then `systemctl --user restart ref-api.service` **only in the idle window**.
+4. **Verify:** `systemctl --user status ref-api` active; `curl -sS http://127.0.0.1:8000/health` = `{"status":"ok","version":"…<new-sha>…"}`; `ref --status` ok; confirm first confirmed block creates `~/references/transcripts/.youtube-transcript-block.json`; during bloom, expect suppressed remote transcript calls and no per-video ban warnings.
+5. **Rollback (scoped to actual installs):** `systemctl --user stop` only in idle window; `pipx install --force 'ref-cli==1.6.11'` (or reinstall prior SHA from the local checkout); restore `references.md` from `references.md.bak-*.gz` / `*_references.md.gz` if needed; `systemctl --user restart ref-api.service`; re-verify `/health` + `ref --status`. No other production mutations.
+Standalone caveats to record in the cutover execution ticket: synchronous 50-link fanout and long per-URL network work mean a single POST is unbounded; schedule restarts when no client POST is active; API remains unauthenticated (trusted network only).
+
 ## Exactly one recommended next step
-OpenCode: on the existing development branch/PR #16, complete `.codex/tasks/a92d761e-issue-15-cutover-preflight.md` (add main-push CI trigger and read-only cutover/rollback preflight, no application code or production mutations), update this handoff, push and verify both remote workflows on the final exact SHA, and request independent review.
+OpenCode: on the existing branch/PR #16, complete `.codex/tasks/a92d761e-issue-15-cutover-preflight.md` (only the main-push CI trigger + read-only preflight; no application code or production mutations), update this handoff, push and verify both remote workflows on the final exact SHA, and request independent review. Then the architect authorizes the merge decision.
 
 ## Local/working-tree notes
 - Dedicated worktree `/tmp/opencode/ref-issue-15`; production checkout `/home/draeician/git/personal/ref` untouched (modified `TODO.md`, untracked `BAD`, `advisors.md` intact).
-- WIP markers: `/tmp/opencode/wip-marker-issue-15.txt`, `-v2.txt`, `-v3.txt`; no ephemeral files committed.
+- WIP markers: `/tmp/opencode/wip-marker-issue-15.txt`, `-v2.txt` … `-v4.txt` (`2026-10-14T20:28:41Z`); no ephemeral files committed.
