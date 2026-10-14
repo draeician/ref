@@ -1,7 +1,7 @@
 # [fix] Issue #15: ref-api disconnect during YouTube IP-block capture
 
 - Task ID: b3e718cf
-- State: QUEUED FOR IMPLEMENTATION (not complete)
+- State: IMPLEMENTED; INDEPENDENT CODE QA PASSED on `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d`; awaiting separately authorized main merge, post-merge CI, deployment and production validation. Current follow-on task: `.codex/tasks/a92d761e-issue-15-cutover-preflight.md`.
 - Priority: High — API ingestion reliability
 - GitHub issue: https://github.com/draeician/ref/issues/15
 - Work branch: `fix/issue-15-ref-api-disconnect`
