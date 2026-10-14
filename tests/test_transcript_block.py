@@ -146,7 +146,18 @@ def test_marker_file_is_nonsecret_json(tmp_path):
     )
     data = json.loads(raw)
     assert data["blocked_until"] == marker["blocked_until"]
-    assert set(data) == {"version", "blocked_until", "set_at", "duration_seconds"}
+    for key in (
+        "version",
+        "blocked_until",
+        "set_at",
+        "duration_seconds",
+        "lease_owner",
+        "lease_expires_at",
+        "next_probe_at",
+    ):
+        assert key in data
+    assert "token" not in raw.lower()
+    assert "secret" not in raw.lower()
 
 
 def test_concurrent_enter_block_does_not_extend(tmp_path):
@@ -176,13 +187,16 @@ def test_concurrent_enter_block_does_not_extend(tmp_path):
 
 def test_probe_guard_yields_false_when_blocked(tmp_path):
     transcript_block.enter_block(str(tmp_path), duration_seconds=600, now=T0)
-    with transcript_block.probe_guard(str(tmp_path), now=T0 + 100) as allowed:
-        assert allowed is False
+    decision = transcript_block.begin_probe(str(tmp_path), now=T0 + 100)
+    assert decision.allowed is False
+    assert decision.message != ""
+    assert decision.probing is False
 
 
 def test_probe_guard_yields_true_when_not_blocked(tmp_path):
-    with transcript_block.probe_guard(str(tmp_path), now=T0) as allowed:
-        assert allowed is True
+    decision = transcript_block.begin_probe(str(tmp_path), now=T0)
+    assert decision.allowed is True
+    assert decision.probing is False
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +258,9 @@ def test_second_video_during_cooldown_skips_provider(monkeypatch, tmp_path, capl
         and "suppressing transcript fetches" in r.message
     ) == 1
     assert any(
-        r.levelno == logging.DEBUG and "IP-block cooldown" in r.message
+        r.levelno == logging.DEBUG
+        and "Transcript fetch skipped for" in r.message
+        and "cooldown" in r.message
         for r in caplog.records
     )
 
