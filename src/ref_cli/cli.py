@@ -41,6 +41,7 @@ from colorama import init
 from ref_cli.utils.colors import success, error, warning, info, url, title, highlight, dim
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, RequestBlocked
+from ref_cli import transcript_block
 
 # Import the new transcript functionality
 try:
@@ -222,6 +223,54 @@ def log_blocked_warning(video_identifier: str, error: Exception) -> None:
         BLOCKED_ERROR_GUIDANCE_URL,
     )
     logging.debug("YouTube transcript blocking details for %s: %s", video_identifier, error)
+
+
+def _yt_block_cooldown_seconds() -> int:
+    """Resolve the configured YouTube transcript block cooldown duration."""
+    cfg: dict = {}
+    try:
+        if os.path.exists(CONFIG_FILE):
+            cfg = load_config()
+    except Exception:  # noqa: BLE001 - config is advisory only
+        cfg = {}
+    return transcript_block.cooldown_seconds(cfg)
+
+
+def _note_youtube_transcript_blocked(video_id: str) -> None:
+    """Record a confirmed IP block and start/extend the persisted cooldown.
+
+    Only the transition into blocked state logs a WARNING (see
+    ``transcript_block.enter_block``); subsequent blocked videos are skipped
+    without repeating the IP-ban warning until the cooldown expires.
+    """
+    transcript_block.enter_block(
+        TRANSCRIPTS_DIR,
+        duration_seconds=_yt_block_cooldown_seconds(),
+        guidance_url=BLOCKED_ERROR_GUIDANCE_URL,
+    )
+    verbose_logger.log(f"YouTube transcript cooldown active after video {video_id}")
+
+
+def _youtube_transcript_blocked_skip(
+    video_id: str,
+) -> Optional[Tuple[Optional[str], Optional[Tuple[str, str]]]]:
+    """Return an IP-block skip result when cooldown is active, else None.
+
+    Acts as the single gate before any ``youtube-transcript-api`` call (enhanced
+    or legacy). It serializes probes per process so concurrent requests do not
+    stampede into remote probes the instant the cooldown expires.
+    """
+    with transcript_block.probe_guard(TRANSCRIPTS_DIR):
+        if transcript_block.is_blocked(TRANSCRIPTS_DIR):
+            logging.debug(
+                "Transcript fetch skipped for %s (YouTube IP-block cooldown active)",
+                video_id,
+            )
+            return (
+                None,
+                ("blocked", transcript_block.cooldown_message(TRANSCRIPTS_DIR)),
+            )
+    return None
 
 
 _NO_TRANSCRIPT_PHRASES = (
@@ -1950,6 +1999,12 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
     base_transcript_file = os.path.join(TRANSCRIPTS_DIR, safe_video_id)
     
     if not is_rumble:
+        # Persisted IP-block cooldown: do not call youtube-transcript-api at all
+        # while YouTube is blocking this host. Missing transcripts still flow
+        # through the existing local-transcribe queue / pending-file fallback.
+        cooldown_skip = _youtube_transcript_blocked_skip(video_id)
+        if cooldown_skip is not None:
+            return cooldown_skip
         # YouTube URL handling - use new structured JSON format when available
         if get_youtube_transcript_with_metadata:
             verbose_logger.log("Attempting to use enhanced transcript functionality")
@@ -1968,6 +2023,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                     json.dump(result, f, indent=2, ensure_ascii=False)
 
                 verbose_logger.log(f"Structured transcript saved to: {json_file}")
+                transcript_block.clear_block(TRANSCRIPTS_DIR)
                 return json_file, None  # Return the structured JSON file as primary
 
             except Exception as e:
@@ -1976,7 +2032,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 verbose_logger.log(f"Enhanced transcript error: {error_msg}")
                 if is_request_blocked_error(e):
                     failure_info = ("blocked", str(e))
-                    log_blocked_warning(video_id, e)
+                    _note_youtube_transcript_blocked(video_id)
                     return None, failure_info
 
                 failure_info = ("enhanced", str(e))
@@ -2033,7 +2089,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 verbose_logger.log(f"Direct fetch failed: {str(e)}")
                 if is_request_blocked_error(e):
                     failure_info = ("blocked", str(e))
-                    log_blocked_warning(video_id, e)
+                    _note_youtube_transcript_blocked(video_id)
                     return None, failure_info
                 try:
                     # Try listing available transcripts and finding the best match
@@ -2084,7 +2140,7 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                     verbose_logger.log(f"Failed to get transcript: {str(e)}")
                     if is_request_blocked_error(e):
                         failure_info = ("blocked", str(e))
-                        log_blocked_warning(video_id, e)
+                        _note_youtube_transcript_blocked(video_id)
                         return None, failure_info
                     legacy_message = str(e)
                     if failure_info and failure_info[0] == "enhanced":
@@ -2124,13 +2180,14 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
                 json.dump(structured_data, f, indent=2, ensure_ascii=False)
 
             verbose_logger.log(f"Legacy transcript saved to: {json_file}")
+            transcript_block.clear_block(TRANSCRIPTS_DIR)
             return json_file, None
 
         except Exception as e:
             verbose_logger.log(f"Legacy transcript method failed: {str(e)}")
             if is_request_blocked_error(e):
                 failure_info = ("blocked", str(e))
-                log_blocked_warning(video_id, e)
+                _note_youtube_transcript_blocked(video_id)
                 return None, failure_info
             logging.info(f"Failed to get transcript for video {video_id} (Legacy method: {e})")
             logging.info(
