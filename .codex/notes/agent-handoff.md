@@ -17,12 +17,14 @@
 - Inspected routes and service: HTTP ingest and show-note fanout synchronous, write lock surrounds CLI processing and external operations. Existing blocked-transcript path queues in local-transcribe, falling back to transcript-pending file.
 - Inspected CI: no `.github/workflows` directory or configured GitHub Actions on initial `main`. Existing `.codex/modes/CODER.md` contains stale Aether/uv lint/coverage instructions, not automatically valid for ref.
 - No tests run, no live server commands executed by architect, no production changes or deploy.
+- Subsequent architect update: user explicitly confirmed desired IP-block cooldown behavior; committed it to the canonical task on the same development branch. This is a scoped requirement, not a verified implementation.
 
 ## Changed areas
 Only task/planning documents on the development branch: `.codex/tasks/b3e718cf-issue-15-ref-api-disconnect.md`, `.codex/notes/current-task.md`, and this handoff file.
 
 ## Important decisions / invariants
-- Diagnose the server disconnect before prescribing circuit breaking or asynchronous architecture changes.
+- **2026-10-13 user-confirmed decision:** independently add a persisted, cross-process, configurable 60-minute-default YouTube transcript IP-block cooldown. On the first confirmed `RequestBlocked`/`IpBlocked`, suppress additional remote transcript calls and repetitive warnings, while preserving existing transcripts or queueing missing ones via local-transcribe with the pending-file fallback. One probe after expiry; reset on success or renew on confirmed block. Tests cover concurrency, persistence, expiry, local and API calls, deduplication and failure fallback. Full detail is now mandatory in `.codex/tasks/b3e718cf-issue-15-ref-api-disconnect.md`.
+- Diagnose the server HTTP disconnect independently; do not assert the transcript IP ban caused `RemoteDisconnected` without evidence.
 - Preserve current `POST /urls` schema, 50-link cap, nonrecursive discovery, queue-first local-transcribe API, pending-file fallback, archive safety and existing security guardrails.
 - No separate scheduler/queue, proxy bypass or speculative bulk refactor.
 - Implementation in branch and draft PR only; main merge and deployment require user authorization.
@@ -33,7 +35,7 @@ Only task/planning documents on the development branch: `.codex/tasks/b3e718cf-i
 - Prior PR #14 described 284 passing tests, but **this is historical evidence only**, not validation of issue #15.
 
 ## Known issues / risks
-- Exact cause of HTTP RemoteDisconnected unknown; blocked transcripts may be coincident.
+- Exact cause of HTTP RemoteDisconnected unknown; blocked transcripts may be coincident. IP-block cooldown is a separate confirmed requirement, not proof of API root cause.
 - Existing synchronous batching, nested show-note processing, and global archive lock are latency risks.
 - API is unauthenticated; use trusted network only.
 - SSRF hardening for DNS/redirect targets is deferred existing debt.
