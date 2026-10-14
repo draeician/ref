@@ -1,7 +1,7 @@
 # Agent handoff — ref-cli
 
 ## Current state
-- **CORRECTION 2 IMPLEMENTED (`5f46ca91`); PR #16 still draft; awaiting independent re-review. Not merged, not deployed, not accepted.**
+- **INDEPENDENT IMPLEMENTATION QA PASSED** on exact reviewed SHA `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d` for issue #15 cooldown and all probe corrections. Draft PR #16 is NOT merged/deployed. Post-merge CI, production validation, and cutover remain OPEN and require explicit user authorization.
 - Repository: https://github.com/draeician/ref
 - Default/protected branch: `main` (unchanged); baseline `276ea2afdfd8ea401f1849ba50b847225487f9ee`.
 - Development branch: `fix/issue-15-ref-api-disconnect`.
@@ -54,8 +54,18 @@ After correction: all new tests pass; full suite green.
 ## Deferred work
 - Async/durable ingest architecture, full SSRF hardening, proxy/VPN rotation, deeper packaging/linters, deployment and merge to `main` (require user authorization).
 
+## Architect independent PASS review — 2026-10-14
+
+- **QA verdict:** PASS for implementation and regression coverage on **exact** `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d`. `main` remained unchanged at `276ea2afdfd8ea401f1849ba50b847225487f9ee`, and PR #16 remained open/draft, targeting main. No merge or deploy performed. Examined actual changed `src/ref_cli/transcript_block.py`, `src/ref_cli/cli.py`, test suite, task/handoff, workflow, and relevant API/service architecture.
+- **Remedies verified by source/tests:** `finish_probe` non-block completion now changes marker only when matching both current `lease_owner` and `epoch_blocked_until`; stale failures/successes cannot take over new owner/epoch. `_as_finite_nonneg` now catches `OverflowError` for huge valid JSON numbers. `_file_lock` wraps state transitions in a process-local `RLock` even when POSIX file locking fails; no state lock held across provider I/O. Existing cross-process single-flight and queue-first integration tests retained.
+- **Exact-SHA remote CI independently VERIFIED SUCCESS**: push run https://github.com/draeician/ref/actions/runs/38619727048, PR run https://github.com/draeician/ref/actions/runs/38619733660, both on the exact reviewed SHA and both direct job logs report **336 passed, 1 warning**.
+- **Branch/WIP safety:** PR diff contains only task planning docs, README, pyproject, tests workflow, cooldown module, CLI, relevant tests. No untracked local WIP items appear in committed diff. `main` not advanced.
+- **Scope limitation:** API still uses synchronous 50-link show-note fanout and systemd can terminate an in-flight POST; YouTube cooldown mitigates transcript ban request storms, not `RemoteDisconnected` caused by service stop. The implementer provided minion shutdown evidence; architect did not independently access private live minion journal. Live production validation and operator-initiated service actions remain a distinct, unapproved cutover gate.
+- **Next-gate discovery:** `.github/workflows/tests.yml` currently runs on PRs and feature-branch pushes only, not **pushes to `main`**. Add main push CI before any merger so project rule requiring post-merge exact-default-branch SHA CI can be satisfied. Also establish read-only minion deployment preflight and rollback procedure rather than assuming `pipx upgrade` will fetch unreleased code.
+- **New active canonical task:** `.codex/tasks/a92d761e-issue-15-cutover-preflight.md`; `.codex/notes/current-task.md` now points to it. Feature implementation is QA-approved, not yet merged/production-accepted. The planning commits after the code SHA must themselves receive exact-SHA remote CI when code branch is finalized.
+
 ## Exactly one recommended next step
-Architect: independently re-review corrected draft PR #16 (three targeted fixes + deterministic fail-before-fix regressions + corrected title); if accepted, then proceed (user-authorized) to the production cutover and live stop-in-flight validation as a separate gate.
+OpenCode: on the existing development branch/PR #16, complete `.codex/tasks/a92d761e-issue-15-cutover-preflight.md` (add main-push CI trigger and read-only cutover/rollback preflight, no application code or production mutations), update this handoff, push and verify both remote workflows on the final exact SHA, and request independent review.
 
 ## Local/working-tree notes
 - Dedicated worktree `/tmp/opencode/ref-issue-15`; production checkout `/home/draeician/git/personal/ref` untouched (modified `TODO.md`, untracked `BAD`, `advisors.md` intact).
