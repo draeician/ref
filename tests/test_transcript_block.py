@@ -409,7 +409,7 @@ def test_no_false_trigger_on_unrelated_failure(monkeypatch, tmp_path, caplog):
 
 def test_api_process_one_during_cooldown_returns_valid_result(monkeypatch, tmp_path):
     from ref_api import service
-    from ref_cli import youtube_extract
+    from ref_cli import enrichment, youtube_extract
 
     transcripts = str(tmp_path / "transcripts")
     pending = tmp_path / "transcript-pending.md"
@@ -429,6 +429,9 @@ def test_api_process_one_during_cooldown_returns_valid_result(monkeypatch, tmp_p
     )
     _block_provider(monkeypatch)
     _force_legacy_pending(monkeypatch)
+    # The fake video is not real; never let capture-time enrichment hit the
+    # network or classify/drop the freshly appended row.
+    monkeypatch.setattr(enrichment, "enrich_youtube_reference", lambda *a, **k: None)
     monkeypatch.setattr(
         youtube_extract,
         "read_video_card",
@@ -445,7 +448,7 @@ def test_api_process_one_during_cooldown_returns_valid_result(monkeypatch, tmp_p
         "queued in transcript-pending.md" in (result.output or "")
     )
     assert VIDEO_URL_A in pending.read_text()
-    assert references.read_text().strip() != ""
+    assert VIDEO_URL_A in references.read_text()
 
 
 def test_http_endpoints_healthy_during_cooldown(monkeypatch, tmp_path):
@@ -455,7 +458,7 @@ def test_http_endpoints_healthy_during_cooldown(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
     from ref_api import service
     from ref_api.app import create_app
-    from ref_cli import youtube_extract
+    from ref_cli import enrichment, youtube_extract
 
     transcripts = str(tmp_path / "transcripts")
     pending = tmp_path / "transcript-pending.md"
@@ -475,6 +478,7 @@ def test_http_endpoints_healthy_during_cooldown(monkeypatch, tmp_path):
     )
     _block_provider(monkeypatch)
     _force_legacy_pending(monkeypatch)
+    monkeypatch.setattr(enrichment, "enrich_youtube_reference", lambda *a, **k: None)
     monkeypatch.setattr(
         youtube_extract,
         "read_video_card",
