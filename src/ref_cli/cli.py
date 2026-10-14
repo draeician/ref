@@ -236,41 +236,28 @@ def _yt_block_cooldown_seconds() -> int:
     return transcript_block.cooldown_seconds(cfg)
 
 
-def _note_youtube_transcript_blocked(video_id: str) -> None:
-    """Record a confirmed IP block and start/extend the persisted cooldown.
-
-    Only the transition into blocked state logs a WARNING (see
-    ``transcript_block.enter_block``); subsequent blocked videos are skipped
-    without repeating the IP-ban warning until the cooldown expires.
-    """
-    transcript_block.enter_block(
+def _finish_youtube_probe(
+    decision: transcript_block.ProbeDecision,
+    *,
+    transcript_file: Optional[str],
+    failure_info: Optional[Tuple[str, str]],
+    video_id: str,
+) -> None:
+    """Close out a probe attempt: cooldown on block, epoch-aware clear on success,
+    bounded backoff on unrelated failure (see ``transcript_block.finish_probe``)."""
+    transcript_block.finish_probe(
         TRANSCRIPTS_DIR,
+        decision,
+        transcript_file=transcript_file,
+        failure_info=failure_info,
         duration_seconds=_yt_block_cooldown_seconds(),
         guidance_url=BLOCKED_ERROR_GUIDANCE_URL,
+        video_id=video_id,
     )
-    verbose_logger.log(f"YouTube transcript cooldown active after video {video_id}")
 
 
-def _youtube_transcript_blocked_skip(
-    video_id: str,
-) -> Optional[Tuple[Optional[str], Optional[Tuple[str, str]]]]:
-    """Return an IP-block skip result when cooldown is active, else None.
-
-    Acts as the single gate before any ``youtube-transcript-api`` call (enhanced
-    or legacy). It serializes probes per process so concurrent requests do not
-    stampede into remote probes the instant the cooldown expires.
-    """
-    with transcript_block.probe_guard(TRANSCRIPTS_DIR):
-        if transcript_block.is_blocked(TRANSCRIPTS_DIR):
-            logging.debug(
-                "Transcript fetch skipped for %s (YouTube IP-block cooldown active)",
-                video_id,
-            )
-            return (
-                None,
-                ("blocked", transcript_block.cooldown_message(TRANSCRIPTS_DIR)),
-            )
-    return None
+def _blocked_skip_failure(message: str) -> Tuple[Optional[str], Optional[Tuple[str, str]]]:
+    return None, ("blocked", message)
 
 
 _NO_TRANSCRIPT_PHRASES = (
@@ -1999,207 +1986,34 @@ def fetch_youtube_transcript(video_id: str, metadata: dict = None) -> Tuple[Opti
     base_transcript_file = os.path.join(TRANSCRIPTS_DIR, safe_video_id)
     
     if not is_rumble:
-        # Persisted IP-block cooldown: do not call youtube-transcript-api at all
-        # while YouTube is blocking this host. Missing transcripts still flow
-        # through the existing local-transcribe queue / pending-file fallback.
-        cooldown_skip = _youtube_transcript_blocked_skip(video_id)
-        if cooldown_skip is not None:
-            return cooldown_skip
-        # YouTube URL handling - use new structured JSON format when available
-        if get_youtube_transcript_with_metadata:
-            verbose_logger.log("Attempting to use enhanced transcript functionality")
-            try:
-                # Use the new structured approach
-                result = get_youtube_transcript_with_metadata(video_id, save_to_file=False)
-
-                # If we have pre-collected metadata, use it instead of the API metadata
-                if metadata:
-                    result['metadata'] = metadata
-                    verbose_logger.log(f"Using pre-collected metadata for video {video_id}")
-
-                # Save the structured JSON with metadata
-                json_file = f"{base_transcript_file}.json"
-                with open(json_file, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=2, ensure_ascii=False)
-
-                verbose_logger.log(f"Structured transcript saved to: {json_file}")
-                transcript_block.clear_block(TRANSCRIPTS_DIR)
-                return json_file, None  # Return the structured JSON file as primary
-
-            except Exception as e:
-                # Check if it's a "no transcript available" error
-                error_msg = str(e).lower()
-                verbose_logger.log(f"Enhanced transcript error: {error_msg}")
-                if is_request_blocked_error(e):
-                    failure_info = ("blocked", str(e))
-                    _note_youtube_transcript_blocked(video_id)
-                    return None, failure_info
-
-                failure_info = ("enhanced", str(e))
-                if any(phrase in error_msg for phrase in _NO_TRANSCRIPT_PHRASES):
-                    verbose_logger.log(f"No transcript available for video {video_id}: {e}")
-                    logging.info(f"No transcript available for video {video_id} (Enhanced method: {str(e)})")
-                    return None, failure_info  # Don't try legacy method if transcript is simply not available
-                else:
-                    verbose_logger.log(f"Failed to use new transcript method, falling back to legacy: {e}")
-                    # Fall through to legacy method
-
-        # Legacy YouTube transcript handling (fallback)
-        try:
-            verbose_logger.log("Attempting to use legacy transcript method")
-            verbose_logger.log(f"Attempting to get transcript for video ID: {video_id}")
-            
-            # Create an instance of YouTubeTranscriptApi (required for v1.2.3+)
-            api = YouTubeTranscriptApi()
-            
-            try:
-                # Try to fetch transcript directly first
-                verbose_logger.log("Attempting direct transcript fetch")
-                fetched_transcript = api.fetch(video_id, languages=['en'])
-                transcript_segments = fetched_transcript
-                verbose_logger.log(
-                    f"Successfully retrieved transcript with {len(transcript_segments)} entries"
-                )
-
-                # Convert transcript data to our format
-                clean_text = ""
-                total_duration = 0
-
-                # Process each segment in the transcript
-                for segment in transcript_segments:
-                    try:
-                        # FetchedTranscriptSnippet objects support dictionary-style access
-                        text = segment["text"]
-                        duration = segment["duration"]
-                    except (KeyError, TypeError, AttributeError) as e:
-                        # Fallback: try attribute access if dictionary access fails
-                        try:
-                            text = segment.text if hasattr(segment, 'text') else ""
-                            duration = segment.duration if hasattr(segment, 'duration') else 0
-                        except (AttributeError, TypeError):
-                            verbose_logger.log(f"Error accessing segment attributes: {e}")
-                            text = ""
-                            duration = 0
-                    clean_text += text + " "
-                    total_duration += duration
-
-                verbose_logger.log("Successfully processed transcript data")
-
-            except Exception as e:
-                verbose_logger.log(f"Direct fetch failed: {str(e)}")
-                if is_request_blocked_error(e):
-                    failure_info = ("blocked", str(e))
-                    _note_youtube_transcript_blocked(video_id)
-                    return None, failure_info
-                try:
-                    # Try listing available transcripts and finding the best match
-                    verbose_logger.log("Attempting to list available transcripts")
-                    transcript_list = api.list(video_id)
-                    verbose_logger.log("Successfully listed transcripts")
-
-                    # Try to get English transcript first
-                    try:
-                        transcript = transcript_list.find_transcript(['en'])
-                        verbose_logger.log("Found English transcript")
-                    except NoTranscriptFound:
-                        verbose_logger.log("No English transcript found, trying other languages")
-                        # Get the first available transcript and translate it to English
-                        transcript = next(iter(transcript_list)).translate('en')
-                        verbose_logger.log("Using translated transcript")
-
-                    transcript_segments = transcript.fetch()
-                    verbose_logger.log(
-                        f"Successfully retrieved transcript with {len(transcript_segments)} entries"
-                    )
-
-                    # Convert transcript data to our format
-                    clean_text = ""
-                    total_duration = 0
-
-                    # Process each segment in the transcript
-                    for segment in transcript_segments:
-                        try:
-                            # FetchedTranscriptSnippet objects support dictionary-style access
-                            text = segment["text"]
-                            duration = segment["duration"]
-                        except (KeyError, TypeError, AttributeError) as e:
-                            # Fallback: try attribute access if dictionary access fails
-                            try:
-                                text = segment.text if hasattr(segment, 'text') else ""
-                                duration = segment.duration if hasattr(segment, 'duration') else 0
-                            except (AttributeError, TypeError):
-                                verbose_logger.log(f"Error accessing segment attributes: {e}")
-                                text = ""
-                                duration = 0
-                        clean_text += text + " "
-                        total_duration += duration
-
-                    verbose_logger.log("Successfully processed transcript data")
-                    
-                except Exception as e:
-                    verbose_logger.log(f"Failed to get transcript: {str(e)}")
-                    if is_request_blocked_error(e):
-                        failure_info = ("blocked", str(e))
-                        _note_youtube_transcript_blocked(video_id)
-                        return None, failure_info
-                    legacy_message = str(e)
-                    if failure_info and failure_info[0] == "enhanced":
-                        legacy_message = (
-                            f"{legacy_message} (Enhanced method previously failed: {failure_info[1]})"
-                        )
-                    failure_info = ("legacy", legacy_message)
-                    return None, failure_info
-            
-            # Clean up the text (remove extra spaces, etc.)
-            clean_text = ' '.join(clean_text.split())
-            
-            # Create a structured JSON format similar to the new method
-            json_file = f"{base_transcript_file}.json"
-            
-            # Use pre-collected metadata if available, otherwise use legacy fallback
-            if metadata:
-                metadata_to_use = metadata
-                verbose_logger.log(f"Using pre-collected metadata for video {video_id} (legacy method)")
-            else:
-                metadata_to_use = {
-                    "id": video_id,
-                    "title": "Title unavailable (legacy method)",
-                    "channel": "Channel unavailable (legacy method)",
-                    "published_at": "Date unavailable (legacy method)"
-                }
-            
-            structured_data = {
-                "transcript": clean_text,
-                "duration": int(total_duration),  # Convert to int like the new method
-                "comments": [],
-                "metadata": metadata_to_use
-            }
-            
-            # Save structured JSON
-            with open(json_file, 'w', encoding='utf-8') as f:
-                json.dump(structured_data, f, indent=2, ensure_ascii=False)
-
-            verbose_logger.log(f"Legacy transcript saved to: {json_file}")
-            transcript_block.clear_block(TRANSCRIPTS_DIR)
-            return json_file, None
-
-        except Exception as e:
-            verbose_logger.log(f"Legacy transcript method failed: {str(e)}")
-            if is_request_blocked_error(e):
-                failure_info = ("blocked", str(e))
-                _note_youtube_transcript_blocked(video_id)
-                return None, failure_info
-            logging.info(f"Failed to get transcript for video {video_id} (Legacy method: {e})")
-            logging.info(
-                "If YouTube is blocking requests from your IP, review %s for guidance.",
-                BLOCKED_ERROR_GUIDANCE_URL,
+        # Cross-process recovery-probe decision. While a cooldown is active, or
+        # while another thread/process owns the single recovery probe (or the
+        # post-failure probe backoff is pending), all youtube-transcript-api calls
+        # are skipped and the caller routes through queue-first / pending-file
+        # fallback. The provider call happens OUTSIDE the file lock; the lease is
+        # claimed atomically and released via finish_probe afterwards.
+        decision = transcript_block.begin_probe(TRANSCRIPTS_DIR)
+        if not decision.allowed:
+            logging.debug(
+                "Transcript fetch skipped for %s (%s)", video_id, decision.message
             )
-            legacy_message = str(e)
-            if failure_info:
-                legacy_message = f"{legacy_message} (Enhanced method previously failed: {failure_info[1]})"
-            failure_info = ("legacy", legacy_message)
-            return None, failure_info
-
+            return _blocked_skip_failure(decision.message)
+        try:
+            transcript_file, failure_info = _fetch_youtube_transcript_provider(
+                video_id, metadata, base_transcript_file
+            )
+        except Exception as exc:  # noqa: BLE001 - treat unexpected as unrelated failure
+            logging.info(
+                "Unexpected error fetching transcript for %s: %s", video_id, exc
+            )
+            transcript_file, failure_info = None, ("enhanced", str(exc))
+        _finish_youtube_probe(
+            decision,
+            transcript_file=transcript_file,
+            failure_info=failure_info,
+            video_id=video_id,
+        )
+        return transcript_file, failure_info
     else:
         # Rumble handling code...
         # For Rumble, we need to ensure the URL is properly formatted
@@ -2681,6 +2495,221 @@ def process_url(url: str, force: bool) -> None:
             print(f"Error: {error_message}")
     else:
         _record_general_url(simplified_url, force, current_time)
+
+
+def _fetch_youtube_transcript_provider(
+    video_id: str,
+    metadata: Optional[dict],
+    base_transcript_file: str,
+) -> Tuple[Optional[str], Optional[Tuple[str, str]]]:
+    """Run the provider (enhanced then legacy) transcript fetch for one video.
+
+    This is the only place ``youtube-transcript-api`` is contacted. It performs no
+    cooldown bookkeeping; the caller owns the probe decision and calls
+    ``_finish_youtube_probe`` afterwards (cooldown on confirmed block, epoch-aware
+    clear on success, bounded backoff on unrelated failure).
+    """
+    failure_info: Optional[Tuple[str, str]] = None
+
+    # YouTube URL handling - use new structured JSON format when available
+    if get_youtube_transcript_with_metadata:
+        verbose_logger.log("Attempting to use enhanced transcript functionality")
+        try:
+            # Use the new structured approach
+            result = get_youtube_transcript_with_metadata(video_id, save_to_file=False)
+
+            # If we have pre-collected metadata, use it instead of the API metadata
+            if metadata:
+                result['metadata'] = metadata
+                verbose_logger.log(f"Using pre-collected metadata for video {video_id}")
+
+            # Save the structured JSON with metadata
+            json_file = f"{base_transcript_file}.json"
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+
+            verbose_logger.log(f"Structured transcript saved to: {json_file}")
+            return json_file, None  # Return the structured JSON file as primary
+
+        except Exception as e:
+            # Check if it's a "no transcript available" error
+            error_msg = str(e).lower()
+            verbose_logger.log(f"Enhanced transcript error: {error_msg}")
+            if is_request_blocked_error(e):
+                failure_info = ("blocked", str(e))
+                return None, failure_info
+
+            failure_info = ("enhanced", str(e))
+            if any(phrase in error_msg for phrase in _NO_TRANSCRIPT_PHRASES):
+                verbose_logger.log(f"No transcript available for video {video_id}: {e}")
+                logging.info(f"No transcript available for video {video_id} (Enhanced method: {str(e)})")
+                return None, failure_info  # Don't try legacy method if transcript is simply not available
+            else:
+                verbose_logger.log(f"Failed to use new transcript method, falling back to legacy: {e}")
+                # Fall through to legacy method
+
+    # Legacy YouTube transcript handling (fallback)
+    # Another thread/process may have discovered a block while the enhanced
+    # attempt was running: do NOT contact the legacy provider during an
+    # active cooldown.
+    if transcript_block.is_blocked(TRANSCRIPTS_DIR):
+        logging.debug(
+            "Transcript fetch blocked while preparing the legacy fallback for %s",
+            video_id,
+        )
+        return None, ("blocked", transcript_block.cooldown_message(TRANSCRIPTS_DIR))
+
+    try:
+        verbose_logger.log("Attempting to use legacy transcript method")
+        verbose_logger.log(f"Attempting to get transcript for video ID: {video_id}")
+
+        # Create an instance of YouTubeTranscriptApi (required for v1.2.3+)
+        api = YouTubeTranscriptApi()
+
+        try:
+            # Try to fetch transcript directly first
+            verbose_logger.log("Attempting direct transcript fetch")
+            fetched_transcript = api.fetch(video_id, languages=['en'])
+            transcript_segments = fetched_transcript
+            verbose_logger.log(
+                f"Successfully retrieved transcript with {len(transcript_segments)} entries"
+            )
+
+            # Convert transcript data to our format
+            clean_text = ""
+            total_duration = 0
+
+            # Process each segment in the transcript
+            for segment in transcript_segments:
+                try:
+                    # FetchedTranscriptSnippet objects support dictionary-style access
+                    text = segment["text"]
+                    duration = segment["duration"]
+                except (KeyError, TypeError, AttributeError) as e:
+                    # Fallback: try attribute access if dictionary access fails
+                    try:
+                        text = segment.text if hasattr(segment, 'text') else ""
+                        duration = segment.duration if hasattr(segment, 'duration') else 0
+                    except (AttributeError, TypeError):
+                        verbose_logger.log(f"Error accessing segment attributes: {e}")
+                        text = ""
+                        duration = 0
+                clean_text += text + " "
+                total_duration += duration
+
+            verbose_logger.log("Successfully processed transcript data")
+
+        except Exception as e:
+            verbose_logger.log(f"Direct fetch failed: {str(e)}")
+            if is_request_blocked_error(e):
+                failure_info = ("blocked", str(e))
+                return None, failure_info
+            try:
+                # Try listing available transcripts and finding the best match
+                verbose_logger.log("Attempting to list available transcripts")
+                transcript_list = api.list(video_id)
+                verbose_logger.log("Successfully listed transcripts")
+
+                # Try to get English transcript first
+                try:
+                    transcript = transcript_list.find_transcript(['en'])
+                    verbose_logger.log("Found English transcript")
+                except NoTranscriptFound:
+                    verbose_logger.log("No English transcript found, trying other languages")
+                    # Get the first available transcript and translate it to English
+                    transcript = next(iter(transcript_list)).translate('en')
+                    verbose_logger.log("Using translated transcript")
+
+                transcript_segments = transcript.fetch()
+                verbose_logger.log(
+                    f"Successfully retrieved transcript with {len(transcript_segments)} entries"
+                )
+
+                # Convert transcript data to our format
+                clean_text = ""
+                total_duration = 0
+
+                # Process each segment in the transcript
+                for segment in transcript_segments:
+                    try:
+                        # FetchedTranscriptSnippet objects support dictionary-style access
+                        text = segment["text"]
+                        duration = segment["duration"]
+                    except (KeyError, TypeError, AttributeError) as e:
+                        # Fallback: try attribute access if dictionary access fails
+                        try:
+                            text = segment.text if hasattr(segment, 'text') else ""
+                            duration = segment.duration if hasattr(segment, 'duration') else 0
+                        except (AttributeError, TypeError):
+                            verbose_logger.log(f"Error accessing segment attributes: {e}")
+                            text = ""
+                            duration = 0
+                    clean_text += text + " "
+                    total_duration += duration
+
+                verbose_logger.log("Successfully processed transcript data")
+
+            except Exception as e:
+                verbose_logger.log(f"Failed to get transcript: {str(e)}")
+                if is_request_blocked_error(e):
+                    failure_info = ("blocked", str(e))
+                    return None, failure_info
+                legacy_message = str(e)
+                if failure_info and failure_info[0] == "enhanced":
+                    legacy_message = (
+                        f"{legacy_message} (Enhanced method previously failed: {failure_info[1]})"
+                    )
+                failure_info = ("legacy", legacy_message)
+                return None, failure_info
+
+        # Clean up the text (remove extra spaces, etc.)
+        clean_text = ' '.join(clean_text.split())
+
+        # Create a structured JSON format similar to the new method
+        json_file = f"{base_transcript_file}.json"
+
+        # Use pre-collected metadata if available, otherwise use legacy fallback
+        if metadata:
+            metadata_to_use = metadata
+            verbose_logger.log(f"Using pre-collected metadata for video {video_id} (legacy method)")
+        else:
+            metadata_to_use = {
+                "id": video_id,
+                "title": "Title unavailable (legacy method)",
+                "channel": "Channel unavailable (legacy method)",
+                "published_at": "Date unavailable (legacy method)"
+            }
+
+        structured_data = {
+            "transcript": clean_text,
+            "duration": int(total_duration),  # Convert to int like the new method
+            "comments": [],
+            "metadata": metadata_to_use
+        }
+
+        # Save structured JSON
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(structured_data, f, indent=2, ensure_ascii=False)
+
+        verbose_logger.log(f"Legacy transcript saved to: {json_file}")
+        return json_file, None
+
+    except Exception as e:
+        verbose_logger.log(f"Legacy transcript method failed: {str(e)}")
+        if is_request_blocked_error(e):
+            failure_info = ("blocked", str(e))
+            return None, failure_info
+        logging.info(f"Failed to get transcript for video {video_id} (Legacy method: {e})")
+        logging.info(
+            "If YouTube is blocking requests from your IP, review %s for guidance.",
+            BLOCKED_ERROR_GUIDANCE_URL,
+        )
+        legacy_message = str(e)
+        if failure_info:
+            legacy_message = f"{legacy_message} (Enhanced method previously failed: {failure_info[1]})"
+        failure_info = ("legacy", legacy_message)
+        return None, failure_info
+
 
 def update_reference_entry(
     video_url: str,
