@@ -1,21 +1,22 @@
 # Current task — ref-cli
 
-- **State:** INDEPENDENT QA FAILED on corrected PR #16 head `669c692d4b98526cb86167a679be8acdf7cd2b33`; **third narrow corrective task IMPLEMENTED on same branch/PR — awaiting independent re-review**. The original issue is not completed or accepted. Not merged/deployed.
-- **Active development branch:** `fix/issue-15-ref-api-disconnect`. Default branch `main` baseline `276ea2afdfd8ea401f1849ba50b847225487f9ee`.
-- **Current corrective task:** [5f46ca91 — stale probe failure + fail-safe marker/local-lock correction](../tasks/5f46ca91-issue-15-stale-probe-fix.md) (implemented).
-- **Prior correction:** [e6c9124b — cross-process single-flight and honest disconnect claims](../tasks/e6c9124b-issue-15-probe-ownership-correction.md).
-- **Original issue specification:** [b3e718cf](../tasks/b3e718cf-issue-15-ref-api-disconnect.md).
-- **Draft PR:** https://github.com/draeician/ref/pull/16 (update same PR and branch; title corrected to not imply the HTTP disconnect was fixed).
+- **State:** **INDEPENDENT CODE QA PASSED** for issue #15 cooldown and probe corrections at exact reviewed commit `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d`; **NOT MERGED OR DEPLOYED**. Production/cutover gate remains OPEN.
+- **Active development branch:** `fix/issue-15-ref-api-disconnect`; protected default branch `main` baseline `276ea2afdfd8ea401f1849ba50b847225487f9ee`.
+- **Canonical current task:** [a92d761e — main-branch CI + read-only cutover preflight](../tasks/a92d761e-issue-15-cutover-preflight.md), queued after QA.
+- **Completed code/correction tasks (review accepted, merge still pending):** [b3e718cf — issue #15 cooldown/incident](../tasks/b3e718cf-issue-15-ref-api-disconnect.md), [e6c9124b — recovery probe ownership](../tasks/e6c9124b-issue-15-probe-ownership-correction.md), [5f46ca91 — stale failure/local-state correction](../tasks/5f46ca91-issue-15-stale-probe-fix.md).
+- **Draft PR:** https://github.com/draeician/ref/pull/16 (do not merge or deploy without explicit user authorization).
 - **Issue:** https://github.com/draeician/ref/issues/15
 - **Canonical handoff:** [agent-handoff.md](agent-handoff.md).
 
-## Correction implemented (implementer's turn, not yet independently re-reviewed)
-- Stale unrelated FAILURE/abort (and stale success) from an older probe can no longer seize another owner's lease, overwrite a newer block epoch, or arm a backoff on someone else's behalf — `finish_probe` validates `lease_owner == decision.owner` and `blocked_until == decision.epoch_blocked_until` before mutating any marker state.
-- Marker parsing catches `OverflowError` for huge-but-valid JSON integers on every timestamp field (and NaN/inf and type garbage) — a corrupt or extreme marker can never abort API capture.
-- `_file_lock` now enforces a process-local `RLock` critical section for marker read/modify/write even when POSIX `flock`/lock-file/archive access is unavailable, so single-flight ownership holds at thread level; never held across provider I/O.
+## Independent QA evidence and architectural decisions
 
-## Quality gate
-- New deterministic regressions (stale-fail ownership/epoch, huge-number parse, forced no-lock + no-persistence single-flight) demonstrated FAIL at reviewed SHA `669c692` and pass after the fix; focused/full pytest and compileall green. New remote SHA must have both push and PR GitHub Actions green; then independent re-review. Production stop/restart validation remains unapproved and open.
+- Reviewed actual `src/ref_cli/transcript_block.py`, `src/ref_cli/cli.py`, deterministic threaded/OS-process concurrency tests, existing blocked-transcript/API tests, README, workflow, and PR diff on exact SHA `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d`.
+- Required GitHub Actions **push** https://github.com/draeician/ref/actions/runs/38619727048 and **PR** https://github.com/draeician/ref/actions/runs/38619733660 completed SUCCESS on exact reviewed SHA; direct job logs each confirm **336 passed, 1 warning**.
+- Previous stale-failure lease overwrite, huge-integer parser exception, and no-file-lock thread races were fixed and covered with fail-before-fix regressions. No unexplained file changes or committed WIP artefacts.
+- Transcript cooldown reduces banned transcript calls and preserves local-transcribe queue-first fallback. It **does NOT** fix disconnects from an operator stopping the synchronous API service mid-request. No live deployment/validation was authorized or performed.
+- **Cutover CI gap identified:** current workflow triggers pushes only to feature branch, not `main`; a post-merge main-SHA CI gate cannot run until this is amended. Next task is scoped to this workflow trigger plus read-only preflight. Keep application code frozen pending release.
+- Code review acceptance is *not* issue closure, merged-main CI, or production acceptance; all latter gates remain separately open.
 
-## Next actor
-Architect: independently re-review corrected draft PR #16; do not merge/deploy until user-authorized cutover plus live stop-in-flight validation.
+## Recovery / next actor
+
+Read `.codex/AGENTS.md`, `.codex/AGENTS_WORKFLOW.md`, `.codex/modes/CODER.md`, this pointer, the new current task, handoff, `README.md`, `src/ref_cli/server_install.py`, and other links named by the task. Check local WIP/git status, use the same isolated branch/worktree, and do not touch production except read-only inspection. After implementation: full tests and compile, push on development branch, verify exact-SHA push + PR workflows, update handoff and request independent re-review. **Never merge, install, restart or deploy without explicit user approval.**
