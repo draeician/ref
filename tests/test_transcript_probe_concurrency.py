@@ -357,3 +357,221 @@ def test_implausible_marker_timestamp_ignored(tmp_path, caplog):
     )
     assert transcript_block.is_blocked(d, now=time.time()) is False
     assert transcript_block.begin_probe(d, now=time.time()).allowed is True
+
+
+# ---------------------------------------------------------------------------
+# QA correction 2 (task 5f46ca91): stale unrelated FAIL must not perturb a newer
+# owner/epoch; huge valid-JSON numbers must never throw; process-local
+# single-flight must hold even when POSIX locking and persistence are unavailable.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_unrelated_failure_cannot_alter_newer_owner_or_lease(tmp_path):
+    """A stale unrelated FAIL from an older probe must not seize a newer lease,
+    null someone else's lease, or arm a backoff on their behalf."""
+    d = str(tmp_path)
+    transcript_block.enter_block(d, duration_seconds=60, now=T0 - 100)  # expired at T0
+    # A claims the expired recovery probe; A's lease expires at T0+300.
+    a = transcript_block.begin_probe(d, now=T0)
+    assert a.allowed and a.probing
+
+    # B claims a NEW lease after A's lease expired (T0+301).
+    b = transcript_block.begin_probe(d, now=T0 + 301)
+    assert b.allowed and b.probing
+
+    # A finishes late with an unrelated FAILURE: it must NOT touch B's state.
+    transcript_block.finish_probe(
+        d, a, failure_info=("enhanced", "network hiccup"), now=T0 + 302
+    )
+
+    marker = transcript_block.read_marker(d)
+    assert marker is not None
+    assert marker["lease_owner"] == b.owner
+    assert (
+        marker["lease_expires_at"]
+        == T0 + 301 + transcript_block.PROBE_LEASE_SECONDS
+    )
+    assert marker["next_probe_at"] == 0.0  # no backoff armed by A
+
+    # C is still denied while B owns the lease.
+    c = transcript_block.begin_probe(d, now=T0 + 302)
+    assert c.allowed is False
+
+    # B's OWN unrelated failure releases only ITS lease and arms the backoff.
+    transcript_block.finish_probe(
+        d, b, failure_info=("enhanced", "network hiccup"), now=T0 + 303
+    )
+    marker2 = transcript_block.read_marker(d)
+    assert marker2["lease_owner"] is None
+    assert (
+        marker2["next_probe_at"]
+        == T0 + 303 + transcript_block.PROBE_BACKOFF_SECONDS
+    )
+
+
+def test_stale_failure_after_new_epoch_cannot_edit_marker(tmp_path):
+    """A stale unrelated FAIL arriving after a newer block epoch must leave that
+    newer marker entirely untouched (no lease edit, no backoff, no clear)."""
+    d = str(tmp_path)
+    transcript_block.enter_block(d, duration_seconds=60, now=T0 - 100)  # expired at T0
+    a = transcript_block.begin_probe(d, now=T0)
+    assert a.allowed and a.probing
+
+    # Another producer records a fresh block epoch (resets lease, extends expiry).
+    transcript_block.enter_block(d, duration_seconds=600, now=T0 + 10)
+
+    # A's OLD unrelated failure must not perturb the newer epoch.
+    transcript_block.finish_probe(
+        d, a, failure_info=("enhanced", "network hiccup"), now=T0 + 20
+    )
+
+    marker = transcript_block.read_marker(d)
+    assert marker is not None
+    assert marker["blocked_until"] == T0 + 610
+    assert marker["lease_owner"] is None
+    assert marker["next_probe_at"] == 0.0
+    assert transcript_block.is_blocked(d, now=T0 + 30) is True
+
+
+def test_stale_success_after_new_owner_cannot_clear(tmp_path):
+    """Pre-owned success (same epoch) cannot clear after another owner claims."""
+    d = str(tmp_path)
+    transcript_block.enter_block(d, duration_seconds=60, now=T0 - 100)  # expired at T0
+    a = transcript_block.begin_probe(d, now=T0)
+    b = transcript_block.begin_probe(d, now=T0 + 301)  # A's lease expired; B claims
+    assert b.allowed and b.probing
+    # A's late success must not clear B's lease epoch.
+    transcript_block.finish_probe(d, a, transcript_file="x.json", now=T0 + 302)
+    marker = transcript_block.read_marker(d)
+    assert marker is not None
+    assert marker["lease_owner"] == b.owner
+    assert transcript_block.is_blocked(d, now=T0 + 302) is False  # cooldown still expired
+    # B can still finish normally (success clears since B owns the epoch).
+    transcript_block.finish_probe(d, b, transcript_file="x.json", now=T0 + 303)
+    assert transcript_block.read_marker(d) is None
+
+
+HUGE_NUMBER = 10 ** 400  # huge but perfectly valid JSON integer
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["blocked_until", "set_at", "duration_seconds", "lease_owner", "lease_expires_at", "next_probe_at"],
+)
+def test_huge_valid_json_number_never_throws(tmp_path, key):
+    """A legit JSON marker carrying a huge integer in any numeric field must be
+    parsed (or safely ignored) - never raise OverflowError into capture."""
+    d = str(tmp_path)
+    payload = {
+        "version": 1,
+        "blocked_until": int(T0) + 600,
+        "set_at": int(T0),
+        "duration_seconds": 600,
+        "lease_owner": "some-owner",
+        "lease_expires_at": 0.0,
+        "next_probe_at": 0.0,
+    }
+    payload[key] = HUGE_NUMBER
+
+    Path(transcript_block.marker_path(d)).write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    if key == "blocked_until":
+        assert transcript_block.read_marker(d) is None
+        assert transcript_block.is_blocked(d, now=T0) is False
+    elif key == "lease_owner":
+        # Non-string huge integer for a string field -> treated as no owner.
+        assert transcript_block.read_marker(d) is not None
+    else:
+        assert transcript_block.read_marker(d) is not None
+    decision = transcript_block.begin_probe(d, now=T0)
+    assert isinstance(decision.allowed, bool)
+
+
+def test_process_local_single_flight_without_posix_lock_or_persistence(
+    monkeypatch, tmp_path
+):
+    """Even when POSIX flock AND marker persistence both fail, two threads starting
+    together must yield exactly one process-local recovery owner (the other is
+    denied and routes to the queue path), not a probe stampede."""
+    import fcntl
+
+    transcripts = str(tmp_path / "transcripts")
+    monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", transcripts)
+
+    def _fail_flock(*args, **kwargs):
+        raise OSError(38, "flock unavailable")
+
+    monkeypatch.setattr(fcntl, "flock", _fail_flock)
+
+    def _fail_write(*args, **kwargs):
+        raise OSError(30, "read-only filesystem")
+
+    monkeypatch.setattr(transcript_block, "_atomic_write_marker", _fail_write)
+
+    # Slow the in-memory marker commit so that WITHOUT a process-local critical
+    # section both threads would read the same expired marker and both claim a
+    # lease before either writes (deterministic double-owner on a lock-less build).
+    real_commit = transcript_block._commit_marker
+
+    def _slow_commit(tdir, marker):
+        time.sleep(0.3)
+        real_commit(tdir, marker)
+
+    monkeypatch.setattr(transcript_block, "_commit_marker", _slow_commit)
+
+    # Expired cooldown (persisted only to the in-memory fallback) so both threads
+    # are eligible to claim the recovery probe.
+    transcript_block.enter_block(transcripts, duration_seconds=60, now=time.time() - 100)
+
+    provider_calls = []
+    calls_lock = threading.Lock()
+    start_together = threading.Barrier(2)
+    first_probe = threading.Event()
+    release_first = threading.Event()
+
+    def fake_provider(video_id, save_to_file=False):
+        with calls_lock:
+            provider_calls.append(video_id)
+            count = len(provider_calls)
+        first_probe.set()
+        if count == 1:
+            release_first.wait(timeout=15)
+        return dict(
+            FAKE_TRANSCRIPT,
+            metadata={"id": video_id, "title": "T", "channel": "C", "published_at": "D"},
+        )
+
+    monkeypatch.setattr(cli, "get_youtube_transcript_with_metadata", fake_provider)
+
+    results = {}
+    results_lock = threading.Lock()
+
+    def worker(video_id):
+        start_together.wait(timeout=15)
+        transcript_file, failure_info = cli.fetch_youtube_transcript(video_id)
+        with results_lock:
+            results[video_id] = (transcript_file, failure_info)
+
+    t1 = threading.Thread(target=worker, args=(VIDEO_A,))
+    t2 = threading.Thread(target=worker, args=(VIDEO_B,))
+    t1.start()
+    t2.start()
+    assert first_probe.wait(timeout=15), "first probe did not start"
+    time.sleep(0.5)
+    release_first.set()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert not t1.is_alive() and not t2.is_alive()
+    assert len(provider_calls) == 1, (
+        f"expected exactly one provider call without POSIX lock/persistence, "
+        f"got {len(provider_calls)}"
+    )
+    queued = [
+        fi
+        for tf, fi in results.values()
+        if tf is None and cli.should_queue_transcript_pending(fi)
+    ]
+    assert len(queued) == 1, f"exactly one denied video must route to the queue: {results}"
