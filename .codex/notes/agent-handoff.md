@@ -1,7 +1,7 @@
 # Agent handoff — ref-cli
 
 ## Current state
-- **IMPLEMENTED; draft PR OPEN; CI green on implementation head; awaiting architect review.** No merge/deploy performed.
+- **INDEPENDENT QA FAILED on SHA `d2b2a028253cbc09dd2dc94b28696ee139b3eafb` despite both green CI runs; corrective task queued.** Original feature is not accepted, merged or deployed.
 - Repository: https://github.com/draeician/ref
 - Default/protected branch: `main` (unchanged); starting main SHA `276ea2afdfd8ea401f1849ba50b847225487f9ee`.
 - Development branch: `fix/issue-15-ref-api-disconnect`.
@@ -64,8 +64,17 @@
 - Implementation head: `6c9f2b09e6e6e925fe65836975dc3c39feb5b56f` — pytest **green** (push + PR workflows).
 - Branch tip at handoff time (this docs commit) is re-verified green after push; exact tip SHA reported in `[REVIEW-REQUEST]`/PR.
 
+## Independent architect QA — 2026-10-14
+- Compared `main` at `276ea2afd` to PR #16 head `d2b2a028253cbc09dd2dc94b28696ee139b3eafb`: nine changed files, no unrelated WIP files, main unchanged, PR remains draft. Reviewed actual `src/ref_cli/transcript_block.py`, `src/ref_cli/cli.py`, `tests/test_transcript_block.py`, CI workflow and task docs.
+- GitHub Actions completed SUCCESS on **exact SHA** `d2b2a028253cbc09dd2dc94b28696ee139b3eafb` for push run 38514600822 and PR run 38514605728, each with `307 passed`. This verifies CI state, not the correctness of the untested concurrency path.
+- **FAIL:** `cli.py:_youtube_transcript_blocked_skip` exits `probe_guard` before external transcript retrieval begins; `probe_guard` only uses a thread-local lock and never holds ownership across provider I/O. On expiry multiple callers/processes may independently probe. Marker-write concurrency test does not cover this.
+- **FAIL:** `clear_block` executes on any successful transcript retrieval, so an older in-flight success can erase a more recently recorded block by another caller. Must guard clear by lease/block epoch ownership.
+- **FAIL:** `_read_marker_unlocked` can raise on malformed numeric `set_at` / `duration_seconds` fields after successful JSON parse, breaking best-effort capture. Add a safe parse and test.
+- **Accuracy correction:** A reported operator/systemd SIGTERM followed by timeout SIGKILL is consistent with `RemoteDisconnected`; architect did not independently access live minion journal. No shutdown/service code changed in PR. Block suppression mitigates one latency source but does not guarantee `POST /urls` returns before service stop. Live deployment/validation remains open pending separate authorization.
+- New scoped corrective task: `.codex/tasks/e6c9124b-issue-15-probe-ownership-correction.md` and canonical pointer updated. Original issue/task not complete. This planning update itself changes branch HEAD and must be included in next exact-SHA CI verification.
+
 ## Exactly one recommended next step
-Architect: review draft PR #16 (root-cause narrative + cooldown implementation + deterministic tests + CI gate), then, if accepted, explicitly authorize merge-to-main + production deployment steps (pipx install/upgrade and `systemctl --user restart ref-api.service` on minion) as a separate, user-approved operation.
+OpenCode: implement `.codex/tasks/e6c9124b-issue-15-probe-ownership-correction.md` on the existing `fix/issue-15-ref-api-disconnect` branch/PR #16, add deterministic threaded and cross-process probe-ownership tests, update handoff and PR claims, push and verify green push+PR workflows on the new final SHA, and request independent re-review.
 
 ## Local/working-tree notes
 - Implementation was done in a dedicated git worktree; production checkout at `/home/draeician/git/personal/ref` was NOT touched (its modified `TODO.md` and untracked `BAD`, `advisors.md` remain intact).
