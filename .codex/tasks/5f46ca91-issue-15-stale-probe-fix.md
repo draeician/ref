@@ -1,7 +1,7 @@
 # [fix] Issue #15 QA correction 2: stale probe failure and fail-safe state
 
 - Task ID: 5f46ca91
-- State: CORRECTION QUEUED / PR #16 NOT ACCEPTED
+- State: IMPLEMENTED; INDEPENDENT CODE QA PASSED on `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d`; awaiting separately authorized main merge, post-merge CI, deployment and production validation. Current follow-on task: `.codex/tasks/a92d761e-issue-15-cutover-preflight.md`.
 - Repository: https://github.com/draeician/ref
 - Branch: `fix/issue-15-ref-api-disconnect`
 - Pull request: https://github.com/draeician/ref/pull/16 (keep draft, do not merge)
