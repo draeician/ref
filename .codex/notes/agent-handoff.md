@@ -1,7 +1,7 @@
 # Agent handoff — ref-cli
 
 ## Current state
-- **QA FAILED on reviewed SHA `d2b2a028253cbc09dd2dc94b28696ee139b3eafb`; probe-ownership correction IMPLEMENTED on the same branch/PR #16; awaiting independent re-review. Not merged, not deployed, not accepted.**
+- **INDEPENDENT QA FAILED on latest reviewed code SHA `669c692d4b98526cb86167a679be8acdf7cd2b33`; probe-ownership correction improved the code, but three additional narrow defects remain. New task `5f46ca91` QUEUED. Original issue not accepted/merged/deployed.**
 - Repository: https://github.com/draeician/ref
 - Default/protected branch: `main` (unchanged); starting main SHA `276ea2afdfd8ea401f1849ba50b847225487f9ee`.
 - Development branch: `fix/issue-15-ref-api-disconnect`.
@@ -55,8 +55,19 @@
 ## Deferred work
 - Async/durable ingest architecture, full SSRF hardening, proxy/VPN rotation, deeper packaging/linters, deployment and merge to `main` (require user authorization).
 
+## Architect independent re-review — 2026-10-14
+
+- **Reviewed exact PR/branch SHA:** `669c692d4b98526cb86167a679be8acdf7cd2b33`. Branch remains a draft PR (#16) targeting `main` at `276ea2afd`; no merge or deploy. PR diff has 11 files; no WIP markers or unrelated local-only files.
+- **Remote CI independently verified GREEN on exact reviewed SHA:** push workflow run https://github.com/draeician/ref/actions/runs/38586292021 and PR run https://github.com/draeician/ref/actions/runs/38586301572. Direct job logs confirm **326 passed, 1 warning** in each run. This is not proof the newly identified races are absent.
+- **Reviewed actual source** `src/ref_cli/transcript_block.py`, `src/ref_cli/cli.py`, new `tests/test_transcript_probe_concurrency.py`, existing cooldown tests, README, workflow, PR/body and canonical task/handoff. Cross-process lease claim under file lock, previous stale-success clear behavior, pre-legacy guard, and real OS-process test address the prior critique; PR now correctly calls the systemd disconnect an unresolved service-lifecycle issue.
+- **FAIL #1, stale unrelated failure overwrites a new lease:** `src/ref_cli/transcript_block.py` lines 552–556 clears `lease_owner` and `lease_expires_at` and arms backoff unconditionally after unrelated probe failure. If A's 300-second lease expires, B claims it, then late A finishes with a non-block error, A erases B's still-active lease. A third probe can subsequently start while B is in flight. Only owning token + matching block epoch may release or change backoff. Tested current-owner failure alone is insufficient.
+- **FAIL #2, malformed numeric overflow:** `_as_finite_nonneg` handles TypeError/ValueError but not OverflowError when converting a huge valid-JSON integer to float (e.g. `10**400`). This can escape a best-effort marker read. Extend exception safety and test all timestamp fields.
+- **FAIL #3, process-local fallback is not serialized:** `_file_lock` yields without *any* lock on several file/fcntl acquisition failure paths. The in-memory fallback only locks individual state accesses, not the claim transaction, so concurrent threads can each claim on failed persistence. Use short process-level state lock around state I/O in both normal and degraded cases; don't hold it across network calls.
+- **New narrow corrective task** `.codex/tasks/5f46ca91-issue-15-stale-probe-fix.md`; pointer in `.codex/notes/current-task.md`. Planning-only QA commits since reviewed SHA are not implementation proof and require new exact-head CI on next agent delivery.
+- **Production gate unchanged:** architect cannot verify minion journal independently; reported shutdown evidence is from implementer. Even with cooldown working, systemd stop during synchronous ingest may still drop a socket; deployment/validation needs separate operator authorization.
+
 ## Exactly one recommended next step
-Architect: independently re-review corrected draft PR #16 (probe-ownership lease, epoch-aware clearing, hardened parsing, threaded AND real multi-process regression evidence, corrected disconnect claims); if accepted, then (separately, user-authorized) drive the production cutover and the live stop-in-flight validation.
+OpenCode: complete `.codex/tasks/5f46ca91-issue-15-stale-probe-fix.md` on the existing branch/draft PR #16, add fail-before-fix regressions, update handoff/PR, push, verify both green exact-final-SHA GitHub Actions workflows, and request independent re-review.
 
 ## Local/working-tree notes
 - Dedicated worktree `/tmp/opencode/ref-issue-15`; production checkout at `/home/draeician/git/personal/ref` untouched (its modified `TODO.md` and untracked `BAD`, `advisors.md` remain intact).
