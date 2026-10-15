@@ -103,6 +103,13 @@ Standalone caveats to record in the cutover execution ticket: synchronous 50-lin
 - **New canonical corrective task:** `.codex/tasks/c41e90b7-issue-15-pipx-cutover-safety.md`; `.codex/notes/current-task.md` points to it. This is documentation/isolated packaging verification only. No production deploy, merge or restart authorized. Previous app-code QA remains accepted.
 - **Release/incident gate still open:** cooldown mitigates YouTube transcript IP ban requests; it does NOT fix systemd SIGKILL of long synchronous in-flight POST. Production validation remains operator-authorization-gated.
 
+## Explicit user merge/deploy authorization — 2026-10-14
+
+- User: "Then let's push it to main and get it in production if it's ready." This is **conditional authorization** to merge PR #16 and deploy, not evidence that it is ready. **DO NOT bypass** current `c41e90b7` failed release-safety gate. Last checked code remains QA-passed; latest reviewed feature branch `80e306e15c294a5d4973ab48e85efe9c077a770e` had green push/PR CI, but the documented rollback still targets pre-API `ref-cli==1.6.11` and the SHA-pinned pipx `[api]` install/rollback has not been smoke-tested. Recheck SHA after this documentation commit.
+- This architect does not have direct access to minion and network access in the isolated container cannot resolve GitHub, so isolated pipx smoke and production cutover must be performed by OpenCode on minion, with read-only/staged work first.
+- **Execution boundary:** OpenCode completes the existing `c41e90b7` correction and returns `[REVIEW-REQUEST]`, including actual isolated install/rollback evidence and exact final SHA/CI; architect independently reviews and merges via PR after successful gates; after exact-merged-main-SHA CI green, OpenCode may perform operator-authorized **idle-window production cutover** following proven procedure with backups and preserved archive data, then return installation SHA/version, `/health`, `ref --status`, cooldown/queue behavior and journal evidence. Stop and report if the host is busy or any gate fails. No extra confirmation needed for the already-approved overall goal.
+- **No user SSH-key inspection** or secret disclosure required.
+
 ## Exactly one recommended next step
 OpenCode: execute `.codex/tasks/c41e90b7-issue-15-pipx-cutover-safety.md` on the existing branch and draft PR #16, validate SHA-pinned API-extras install and prior-SHA rollback in an isolated temporary pipx home (never production), correct PR/handoff release instructions, run full checks, push and verify exact-final-SHA push/PR CI, then request independent review.
 
