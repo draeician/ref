@@ -1,7 +1,7 @@
 # [docs] Issue #15 cutover preflight correction: safe pipx upgrade/rollback
 
 - Task ID: c41e90b7
-- State: QUEUED — blocking release/cutover preflight acceptance (NOT blocking previously approved cooldown code)
+- State: CORRECTION COMPLETE — rollback/packaging instructions corrected and SHA-pinned `[api]` pipx install/rollback verified in an isolated temp environment 2026-10-15; awaiting independent review before any merge-authorization decision. (Previously QUEUED — blocking release/cutover preflight acceptance; it never blocked the approved cooldown code.)
 - Draft PR: https://github.com/draeician/ref/pull/16
 - Development branch: `fix/issue-15-ref-api-disconnect`
 - Independently reviewed preflight SHA: `5747ff15aaaad1df998c3dae750d5f82bb24d090`

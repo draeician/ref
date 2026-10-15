@@ -1,7 +1,7 @@
 # Agent handoff — ref-cli
 
 ## Current state
-- **CUTOVER PREFLIGHT QA BLOCKED** by unsafe package rollback instructions (see latest review below), while **INDEPENDENT IMPLEMENTATION QA PASSED** on exact reviewed SHA `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d` for issue #15 cooldown and all probe corrections. Draft PR #16 is NOT merged/deployed. Post-merge CI, production validation, and cutover remain OPEN and require explicit user authorization.
+- **IMPLEMENTATION QA PASSED** on exact reviewed SHA `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d` for issue #15 cooldown and all probe corrections. **CUTOVER PREFLIGHT QA previously BLOCKED on unsafe package rollback instructions is now CORRECTED (task c41e90b7):** rollback targets the prior API-capable SHA `276ea2afdfd8ea401f1849ba50b847225487f9ee` (never pre-API `ref-cli==1.6.11`), the SHA-pinned `ref-cli[api]` pipx install/rollback was verified in an isolated temporary pipx environment, and archive data is preserved by default. Draft PR #16 is NOT merged/deployed. The user has conditionally authorized the eventual merge+deploy; independent review, post-merge main-SHA CI, and idle-window production cutover remain OPEN.
 - Repository: https://github.com/draeician/ref
 - Default/protected branch: `main` (unchanged); baseline `276ea2afdfd8ea401f1849ba50b847225487f9ee`.
 - Development branch: `fix/issue-15-ref-api-disconnect`.
@@ -86,14 +86,25 @@ After correction: all new tests pass; full suite green.
 - `~/references` = 638M. Snapshot/backup evidence present: `references.md.bak-20260717T203644.gz` plus timestamped gzip snapshots `YYYYMMDDTHHMMSS_references.md.gz` in the archive root, and a `backups/` subdir. `ref --backup` writes/gzips a timestamped copy (local mode uses the file directly when `api_url` is loopback).
 - Cooldown marker `~/references/transcripts/.youtube-transcript-block.json` does **not** exist yet (old code never writes it) — expected pre-cutover. Disk: 4.0T (6% used, 3.6T free).
 
-### Actual deployment procedure (documented; NOT executed; requires explicit operator authorization)
-Do **not** assume `pipx upgrade ref-cli` reaches the unreleased GitHub branch — the pipx metadata points at a local directory snapshot, and PyPI has no matching release. Actual, verified-from-source cutover, in an idle window with no in-flight requests:
-1. **Snapshot:** `ref --backup` (plain `--nocompress` optional) and verify the new gzip appears in `~/references`.
-2. **Code phase-in:** recover the final SHA into a known source dir, then `pipx install --force 'git+https://github.com/draeician/ref.git@<final-sha>'` (or from the SHA-pinned local checkout), then confirm `pipx list` / `ref --version` shows the new SHA-derived version.
-3. **Unit unchanged** (no `systemctl --user cat` change needed); `systemctl --user daemon-reload` anyway, then `systemctl --user restart ref-api.service` **only in the idle window**.
+### Actual deployment procedure (documented; SHA-pinned `[api]` install verified in isolated temp pipx; NOT executed on production; requires explicit operator authorization)
+Do **not** assume `pipx upgrade ref-cli` reaches the unreleased GitHub branch — the pipx metadata points at a local directory snapshot (`file:///opt/md2/git/personal/ref`), and PyPI has no matching release. Use the SHA-pinned, `[api]`-inclusive VCS spec below (verified in an isolated throwaway `PIPX_HOME`, never production). One command installs the package **and** its FastAPI/uvicorn extras (no separate `pipx inject` needed):
+1. **Snapshot (disaster-recovery only, optional):** `ref --backup` and note the new gzip under `~/references`. Do NOT plan to restore this during a normal code rollback.
+2. **Code phase-in:** `pipx install --force 'ref-cli[api] @ git+https://github.com/draeician/ref.git@<final-sha>'`, then confirm `pipx list` / `ref --version` shows the new SHA-derived version and that `ref-api --help` exits 0.
+3. **Unit unchanged** (no `systemctl --user cat` change needed); `systemctl --user daemon-reload`, then `systemctl --user restart ref-api.service` **only in the idle window** (no in-flight POST).
 4. **Verify:** `systemctl --user status ref-api` active; `curl -sS http://127.0.0.1:8000/health` = `{"status":"ok","version":"…<new-sha>…"}`; `ref --status` ok; confirm first confirmed block creates `~/references/transcripts/.youtube-transcript-block.json`; during bloom, expect suppressed remote transcript calls and no per-video ban warnings.
-5. **Rollback (scoped to actual installs):** `systemctl --user stop` only in idle window; `pipx install --force 'ref-cli==1.6.11'` (or reinstall prior SHA from the local checkout); restore `references.md` from `references.md.bak-*.gz` / `*_references.md.gz` if needed; `systemctl --user restart ref-api.service`; re-verify `/health` + `ref --status`. No other production mutations.
+5. **Rollback (API-capable; archive-preserving):** `systemctl --user stop` only in an idle window; `pipx install --force 'ref-cli[api] @ git+https://github.com/draeician/ref.git@276ea2afdfd8ea401f1849ba50b847225487f9ee'` (the prior **API-capable** revision — verified to restore a working `ref-api`); `systemctl --user restart ref-api.service`; re-verify `/health` + `ref --status`. **Do NOT** roll back to `ref-cli==1.6.11` — README documents it as the last **pre-API** PyPI release and it lacks `ref-api`. Application rollback **does not touch `~/references`**; the archive is preserved by default. Restoring `references.md` from `references.md.bak-*.gz` / `*_references.md.gz` is **disaster recovery only** (proven corruption) and will discard entries written after the snapshot.
 Standalone caveats to record in the cutover execution ticket: synchronous 50-link fanout and long per-URL network work mean a single POST is unbounded; schedule restarts when no client POST is active; API remains unauthenticated (trusted network only).
+
+## Cutover safety correction (task c41e90b7) — isolated pipx verification 2026-10-15
+
+Blocking finding from architect review of a92d761e: the prior rollback advised pre-API `ref-cli==1.6.11` (would remove `ref-api`); `pipx install --force` from VCS was not proven to retain the `[api]` extras; and routinely restoring an old `references.md` backup risks losing post-snapshot entries. Corrected and verified without touching production:
+
+- **Production install provenance (read-only, minion):** pipx `ref-cli 1.6.12b1.dev40+g276ea2afd.d20261010` base (non-editable local-dir `file:///opt/md2/git/personal/ref`) **plus** injected `ref-cli 1.6.12b1.dev15+g5642e2e44`; venv contains fastapi 0.143.0 / uvicorn 0.54.0; `ref-api` entry point present; `~/references` 644M intact.
+- **Isolated smoke test** (dedicated temp `PIPX_HOME` + `PIPX_BIN_DIR` under `/tmp`, never the production pipx home/archive/service; dir removed after):
+  - `pipx install 'ref-cli[api] @ git+https://github.com/draeician/ref.git@3626d65bc2b61dc2d076ded878d23314fccf22dc'` → `ref 1.6.12b1.dev77+g3626d65bc`; `ref-api --help` exit 0; baked venv imports `fastapi 0.143.1`, `uvicorn 0.54.0`, `ref_api.app` → OK.
+  - `pipx install --force 'ref-cli[api] @ git+https://github.com/draeician/ref.git@276ea2afdfd8ea401f1849ba50b847225487f9ee'` → `ref 1.6.12b1.dev40+g276ea2afd` (matches production baseline); `ref-api --help` exit 0; API imports OK.
+  - **Conclusion:** `ref-cli[api] @ git+…@<sha>` installs package + FastAPI/uvicorn in one step (no separate `pipx inject`), and the same spec pinned at the prior SHA is a working API-capable rollback. GitHub was reachable from minion.
+- **Archive safety:** package rollback replaces only the pipx venv; `~/references` is untouched. Old `references.md` backups are disaster recovery only, with an explicit post-snapshot data-loss warning.
 
 ## Architect independent preflight QA — 2026-10-14
 
@@ -111,8 +122,8 @@ Standalone caveats to record in the cutover execution ticket: synchronous 50-lin
 - **No user SSH-key inspection** or secret disclosure required.
 
 ## Exactly one recommended next step
-OpenCode: execute `.codex/tasks/c41e90b7-issue-15-pipx-cutover-safety.md` on the existing branch and draft PR #16, validate SHA-pinned API-extras install and prior-SHA rollback in an isolated temporary pipx home (never production), correct PR/handoff release instructions, run full checks, push and verify exact-final-SHA push/PR CI, then request independent review.
+OpenCode: this c41e90b7 correction (corrected rollback docs/PR body + isolated `[api]` pipx smoke evidence) is complete on the existing branch/PR #16 and awaiting independent review. The architect then independently re-reviews the exact final SHA + both green workflows and performs the authorized PR merge; on post-merge `main`-SHA CI success, run the idle-window production cutover exactly as documented, then report installed SHA/version, `/health`, `ref --status`, and cooldown/queue journal evidence.
 
 ## Local/working-tree notes
 - Dedicated worktree `/tmp/opencode/ref-issue-15`; production checkout `/home/draeician/git/personal/ref` untouched (modified `TODO.md`, untracked `BAD`, `advisors.md` intact).
-- WIP markers: `/tmp/opencode/wip-marker-issue-15.txt`, `-v2.txt` … `-v4.txt` (`2026-10-14T20:28:41Z`); no ephemeral files committed.
+- WIP markers: `/tmp/opencode/wip-marker-issue-15.txt`, `-v2.txt` … `-v6.txt` (`2026-10-15T00:27:51Z`); no ephemeral files committed. Isolated smoke dir was under `/tmp` and was removed.
