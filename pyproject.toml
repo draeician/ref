@@ -42,7 +42,7 @@ api = [
 ]
 test = [
     "pytest>=7.0.0",
-    "httpx2",  # Required by Starlette TestClient (FastAPI API tests).
+    "httpx",  # Required by Starlette TestClient (FastAPI API tests).
 ]
 
 [project.scripts]

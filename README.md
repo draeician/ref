@@ -195,6 +195,41 @@ skip_patterns:
 
 Patterns are checked before processing each URL. Matching URLs will be skipped with an informative message.
 
+### YouTube transcript IP-block cooldown
+
+When YouTube blocks transcript requests from this host's public IP (a
+`RequestBlocked`/`IpBlocked`), `ref` stops calling `youtube-transcript-api` for
+a cooldown window instead of hammering the blocked endpoint on every video. The
+first confirmed block starts a persisted, cross-process cooldown; during it,
+missing transcripts are still queued for local-transcribe with the
+`transcript-pending.md` fallback exactly as before — only the remote transcript
+calls and the per-video IP-ban warnings are suppressed. Metadata (YouTube Data
+API) and show-note discovery are unaffected.
+
+After the cooldown expires, exactly one recovery probe is allowed at a time
+**across threads and independent processes** sharing the archive: a bounded
+ownership lease is claimed under a short file lock, and other concurrent
+requests (or requests during the bounded backoff that follows a failed probe)
+are routed to the queue/pending-file fallback instead of contacting YouTube.
+The lease expires after a bounded window, so a crashed probe owner cannot wedge
+ingestion. Probe success clears the block; another confirmed block renews the
+cooldown for a fresh window; a non-block failure backs off and retries later
+without stampeding.
+
+- Default cooldown: **3600 seconds (60 minutes)**.
+- Configure via `REF_YOUTUBE_TRANSCRIPT_BLOCK_COOLDOWN_SECONDS` (seconds) or the
+  `youtube_transcript_block_cooldown_seconds` config key.
+- The nonsecret expiry marker lives in the archive's transcripts state area,
+  outside the repository: `<transcripts_dir>/.youtube-transcript-block.json`
+  (e.g. `~/references/transcripts/.youtube-transcript-block.json`), so the CLI
+  and the `ref-api` process on the archive host share it and it survives
+  restarts.
+- To clear an active cooldown manually (e.g. the ban lifted early), remove that
+  marker file:
+  ```bash
+  rm ~/references/transcripts/.youtube-transcript-block.json
+  ```
+
 ## Usage
 
 ### Interactive Mode
