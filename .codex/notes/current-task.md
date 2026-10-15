@@ -16,6 +16,10 @@
 - **FAIL: unsafe release plan.** PR body/handoff recommends `pipx install --force 'ref-cli==1.6.11'` as a rollback option, but README expressly identifies 1.6.11 as pre-API. Could remove `ref-api`. Original installation is API-capable at SHA `276ea2afd`; rollback must use that version. `pipx install --force` from VCS may not retain injected `[api]` extras, which requires isolated verification. Blindly restoring archive backup during code rollback risks discarding new entries. Full details/acceptance in task `c41e90b7`.
 - The original shutdown-related `RemoteDisconnected` on systemd stop-in-flight remains distinct and uncorrected; production validation remains a separate authorization-gated cutover step.
 
+## User authorization — 2026-10-14
+
+The user explicitly authorized **merging PR #16 to `main` and deploying to production when ready**. This does not waive the currently blocking `c41e90b7` packaging/rollback smoke-test and review, required exact-final-SHA PR CI, exact-merged-main-SHA post-merge CI, verified API-capable rollback, or production idle-window checks. Architect will review corrective delivery and merge using GitHub's PR merge action (not direct push); OpenCode will operate minion only after the verified merge and release instructions are recorded. Do not claim the feature is deployed until post-install `/health` and `ref --status` match the new version and the queue/cooldown behavior is checked. If any gate fails, stop safely and report it. The user need not repeat general merge/deploy authorization.
+
 ## Next actor
 
 OpenCode: preserve WIP, read this pointer, current task, handoff and .codex agent guides, use same branch/worktree, correct release docs and PR body, verify pinned `[api]` pipx behavior in isolated temp env without production/secret access, run required tests/compile, push/verify exact-SHA CI and request independent re-review. **No merge, deploy, service restart or production modification.**
