@@ -7,14 +7,16 @@ import io
 import logging
 import os
 import threading
-from typing import List
+import time
+from typing import Any, Dict, List, Optional
 
 from ref_cli import cli as ref_cli
 from ref_api.schemas import SearchHit, TranscriptResult, UrlResult, UrlStatus
+from ref_api.show_notes_queue import ShowNotesQueue
 
 logger = logging.getLogger(__name__)
 # Uvicorn often leaves the root logger at WARNING. Opt in to INFO for
-# show-note discovery so journalctl includes each URL and the completion
+# show-note discovery so journalctl includes each URL, job id and the queued
 # summary without turning on verbose logging across the whole process.
 logger.setLevel(logging.INFO)
 
@@ -39,12 +41,54 @@ def _classify_stdout(stdout: str) -> UrlStatus:
 # Bound automatic fan-out per API request. Manual extraction has no such cap.
 MAX_YOUTUBE_SHOW_NOTE_LINKS = 50
 
+# Directory (beside references.md) that holds the durable show-note queue. This
+# is runtime archive state, not version-controlled repository content.
+_QUEUE_DIRNAME = "show_notes_queue"
 
-def _process_youtube_show_notes(video_url: str) -> str:
-    """Record URLs in a YouTube description through the ordinary API ingest path.
+# Background worker singleton + start/stop serialization.
+_worker: Optional["_ShowNotesWorker"] = None
+_worker_lock = threading.Lock()
 
-    This runs after the original video's process_url call releases _write_lock.
-    Child ingestion explicitly disables discovery to prevent recursive cycles.
+# Lazily-constructed queue, keyed to the current archive location so tests that
+# repoint ``ref_cli.UNIFIED`` to a temp path get an isolated queue.
+_queue: Optional[ShowNotesQueue] = None
+_queue_dir: Optional[str] = None
+_queue_lock = threading.Lock()
+
+
+def _queue_directory() -> str:
+    """Absolute path of the show-note queue directory beside references.md."""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(ref_cli.UNIFIED)), _QUEUE_DIRNAME
+    )
+
+
+def _get_queue() -> ShowNotesQueue:
+    """Return the (lazily-created) durable queue for the current archive."""
+    global _queue, _queue_dir
+    current = _queue_directory()
+    with _queue_lock:
+        if _queue is None or _queue_dir != current:
+            _queue = ShowNotesQueue(current)
+            _queue_dir = current
+        return _queue
+
+
+def queue_status() -> Dict[str, int]:
+    """Return the current show-note queue counts for observability."""
+    queue = _get_queue()
+    counts = queue.stats()
+    counts["unfinished"] = counts.get("pending", 0) + counts.get("running", 0)
+    return counts
+
+
+def _discover_youtube_show_note_links(
+    video_url: str,
+) -> tuple[Optional[str], List[str], str, int]:
+    """Return ``(video_id, links, error_summary, chapter_count)`` for a YouTube URL.
+
+    ``video_id`` is None when the URL is not a YouTube video; ``error_summary``
+    is non-empty when metadata retrieval failed (links will be empty).
     """
     from ref_cli.youtube_extract import (
         chapters_from_description,
@@ -55,9 +99,8 @@ def _process_youtube_show_notes(video_url: str) -> str:
 
     video_id = youtube_video_id(video_url)
     if not video_id:
-        return ""
+        return None, [], "", 0
 
-    logger.info("YouTube notes: start video_id=%s", video_id)
     base = os.path.dirname(os.path.abspath(ref_cli.UNIFIED))
     try:
         card = read_video_card(video_id, base)
@@ -69,7 +112,7 @@ def _process_youtube_show_notes(video_url: str) -> str:
         links = outbound_urls(card, video_id)
     except Exception as exc:  # noqa: BLE001 - best-effort metadata retrieval
         logger.warning("YouTube notes: unavailable video_id=%s reason=%s", video_id, exc)
-        return f"YouTube notes: unavailable for {video_id} ({exc})"
+        return video_id, [], f"YouTube notes: unavailable for {video_id} ({exc})", 0
 
     logger.info(
         "YouTube notes: metadata video_id=%s source=%s description_chars=%d "
@@ -77,46 +120,75 @@ def _process_youtube_show_notes(video_url: str) -> str:
         video_id, card.get("source") or "cache", len(description),
         chapter_count, len(links),
     )
+    return video_id, links, "", chapter_count
+
+
+def _enqueue_youtube_show_notes(video_url: str) -> str:
+    """Discover a YouTube video's show-note links and enqueue them for the worker.
+
+    Returns a one-line summary. Children are NOT processed inline, so the parent
+    ``POST /urls`` response returns immediately; a background worker drains the
+    durable queue.
+    """
+    video_id, links, error_summary, chapter_count = _discover_youtube_show_note_links(
+        video_url
+    )
+    if video_id is None:
+        return ""
+    if error_summary:
+        return error_summary
+
+    logger.info("YouTube notes: start video_id=%s", video_id)
     if len(links) > MAX_YOUTUBE_SHOW_NOTE_LINKS:
         logger.warning(
             "YouTube notes: capped video_id=%s found=%d limit=%d",
             video_id, len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS,
         )
 
-    counts = {"added": 0, "exists": 0, "skipped": 0, "error": 0}
+    queue = _get_queue()
+    queued = 0
+    duplicate = 0
     for link in links[:MAX_YOUTUBE_SHOW_NOTE_LINKS]:
-        child = process_one(link, force=False, _discover_youtube_links=False)
-        counts[child.status] = counts.get(child.status, 0) + 1
-        if child.status == "error":
-            logger.warning(
-                "YouTube notes: link video_id=%s status=error url=%s reason=%s",
-                video_id, link, child.message,
+        job_id = queue.enqueue(link, parent_video_id=video_id)
+        if job_id:
+            queued += 1
+            logger.info(
+                "YouTube notes: queued video_id=%s url=%s job=%s",
+                video_id, link, job_id,
             )
         else:
+            duplicate += 1
             logger.info(
-                "YouTube notes: link video_id=%s status=%s url=%s",
-                video_id, child.status, link,
+                "YouTube notes: duplicate video_id=%s url=%s",
+                video_id, link,
             )
 
+    unfinished = queue.unfinished_count()
     summary = (
         f"YouTube notes: video_id={video_id} scanned={min(len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS)} "
         f"found={len(links)} timestamps_ignored={chapter_count} "
-        f"added={counts['added']} exists={counts['exists']} "
-        f"skipped={counts['skipped']} errors={counts['error']}"
+        f"queued={queued} duplicate={duplicate} queue_unfinished={unfinished}"
     )
-    logger.info("YouTube notes: complete %s", summary)
+    logger.info("YouTube notes: queued %s", summary)
     return summary
 
 
 def process_one(
-    raw_input: str, force: bool = False, *, _discover_youtube_links: bool = True
+    raw_input: str,
+    force: bool = False,
+    *,
+    _discover_youtube_links: bool = True,
+    _suppress_playlist_expansion: bool = False,
 ) -> UrlResult:
     """
     Apply skip patterns, convert YouTube video IDs, then call process_url.
 
     Concurrent callers are serialized via a process-wide lock so appends to
-    references.md do not interleave. The parent YouTube capture finishes
-    before show-note child URLs are processed outside the lock.
+    references.md do not interleave. The parent YouTube capture finishes before
+    show-note child URLs are *enqueued* (not processed) for the background worker.
+
+    ``_suppress_playlist_expansion`` is set only by the show-note worker so a
+    discovered playlist link is recorded without full playlist traversal.
     """
     original = raw_input.strip()
     if not original:
@@ -147,14 +219,17 @@ def process_one(
     try:
         with _write_lock:
             with contextlib.redirect_stdout(buf):
-                ref_cli.process_url(target, force)
+                if _suppress_playlist_expansion and _is_youtube_playlist_url(target):
+                    ref_cli.record_youtube_playlist_link(target, force)
+                else:
+                    ref_cli.process_url(target, force)
         output = buf.getvalue().strip()
         status = _classify_stdout(output)
         if _discover_youtube_links and status in {"added", "exists"}:
             from ref_cli.youtube_extract import youtube_video_id
 
             if youtube_video_id(target):
-                summary = _process_youtube_show_notes(target)
+                summary = _enqueue_youtube_show_notes(target)
                 if summary:
                     output = f"{output}\n{summary}" if output else summary
         message = {
@@ -180,6 +255,108 @@ def process_one(
             message=str(exc),
             output=output,
         )
+
+
+def _is_youtube_playlist_url(url: str) -> bool:
+    """Local wrapper so the service does not import youtube_extract at module load."""
+    from ref_cli.youtube_extract import is_youtube_playlist_url
+
+    return is_youtube_playlist_url(url)
+
+
+def _process_queued_job(queue: ShowNotesQueue, job: Dict[str, Any]) -> None:
+    """Process one claimed show-note child job, then record its terminal state."""
+    job_id = job.get("id", "")
+    url = job.get("url", "")
+    logger.info("YouTube notes: job start id=%s url=%s", job_id, url)
+    start = time.monotonic()
+    try:
+        result = process_one(
+            url,
+            force=False,
+            _discover_youtube_links=False,
+            _suppress_playlist_expansion=True,
+        )
+        elapsed = time.monotonic() - start
+        if result.status == "error":
+            queue.mark_failed(job_id, result.message, retryable=True)
+            logger.warning(
+                "YouTube notes: job id=%s url=%s status=error elapsed=%.2fs reason=%s",
+                job_id, url, elapsed, result.message,
+            )
+        else:
+            queue.mark_done(job_id)
+            logger.info(
+                "YouTube notes: job id=%s url=%s status=%s elapsed=%.2fs",
+                job_id, url, result.status, elapsed,
+            )
+    except Exception as exc:  # noqa: BLE001 - a failed child must not kill the worker
+        elapsed = time.monotonic() - start
+        queue.mark_failed(job_id, str(exc), retryable=True)
+        logger.exception(
+            "YouTube notes: job id=%s url=%s failed elapsed=%.2fs", job_id, url, elapsed
+        )
+
+
+def _drain_show_notes_queue(queue: ShowNotesQueue) -> bool:
+    """Claim and process at most one ready job. Returns True if any work was done."""
+    job = queue.next_pending()
+    if job is None:
+        return False
+    _process_queued_job(queue, job)
+    return True
+
+
+class _ShowNotesWorker:
+    """Background daemon thread that drains the durable show-note queue."""
+
+    def __init__(self, poll_interval: float = 0.5) -> None:
+        self._poll_interval = poll_interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="ref-show-notes-worker", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def _run(self) -> None:
+        queue = _get_queue()
+        queue.recover()
+        while not self._stop.is_set():
+            try:
+                drained = _drain_show_notes_queue(queue)
+            except Exception:  # noqa: BLE001 - keep the worker alive across bad jobs
+                logger.exception("show-notes worker iteration failed")
+                drained = False
+            if not drained:
+                self._stop.wait(self._poll_interval)
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        self._thread.join(timeout)
+
+
+def start_show_notes_worker() -> None:
+    """Start the background show-note worker (idempotent)."""
+    global _worker
+    with _worker_lock:
+        if _worker is not None and _worker.is_alive():
+            return
+        _worker = _ShowNotesWorker()
+        _worker.start()
+
+
+def stop_show_notes_worker() -> None:
+    """Stop the background show-note worker (idempotent)."""
+    global _worker
+    with _worker_lock:
+        if _worker is not None:
+            _worker.stop()
+            _worker = None
 
 
 def process_many(inputs: List[str], force: bool = False) -> List[UrlResult]:

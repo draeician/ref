@@ -1244,6 +1244,46 @@ def get_youtube_playlist_data(playlist_id: str, youtube) -> tuple:
 
     return playlist_title, playlist_uploader, video_details
 
+def _youtube_playlist_metadata(playlist_id: str, youtube) -> Tuple[str, str]:
+    """Fetch only a playlist's title and channel (no ``playlistItems`` expansion)."""
+    playlist_response = youtube.playlists().list(part='snippet', id=playlist_id).execute()
+    if not playlist_response.get('items'):
+        raise ValueError("Invalid YouTube Playlist ID")
+    snippet = playlist_response['items'][0]['snippet']
+    return snippet['title'], snippet['channelTitle']
+
+def record_youtube_playlist_link(url: str, force: bool) -> None:
+    """Record a playlist as a single entry without expanding its videos.
+
+    This is the safe path used for a YouTube playlist link discovered as a
+    show-note child: it stores the playlist reference itself but does not fetch
+    every playlist item nor their transcripts (the expensive traversal in
+    :func:`process_url`). Directly submitted playlists still use ``process_url``
+    and keep full expansion.
+    """
+    verbose_logger.log(f"Recording playlist link without expansion: {url}")
+    resolved_url = resolve_redirect(url)
+    simplified_url = simplify_url(resolved_url)
+    query_params = parse_qs(urlparse(simplified_url).query)
+    list_ids = query_params.get('list') or []
+    if not list_ids:
+        # Not actually a playlist after simplification; defer to normal handling.
+        process_url(url, force)
+        return
+
+    youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=DEVELOPER_KEY)
+    playlist_title, playlist_uploader = _youtube_playlist_metadata(list_ids[0], youtube)
+    current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    if not url_exists_in_file(simplified_url, UNIFIED) or force:
+        _append_reference_line(
+            f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube\n"
+        )
+        print(f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube")
+        logging.info(f"Added playlist URL: {simplified_url}")
+    else:
+        print(f"URL {simplified_url} already recorded.")
+        logging.info(f"Duplicate URL: {simplified_url}")
+
 def ensure_path_exists(file_path: str):
     """
     Ensures that the directory and file specified by `file_path` exist. Creates them if they do not exist.

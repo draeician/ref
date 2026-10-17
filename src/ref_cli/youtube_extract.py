@@ -13,7 +13,7 @@ import os
 import re
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from ref_cli.api_client import ApiError, get_api_base_url, ingest_urls
 from ref_cli.completion import enable_argcomplete, files_completer
@@ -48,6 +48,34 @@ def youtube_video_id(url: str) -> Optional[str]:
     ):
         return None
     return extract_youtube_video_id(url)
+
+
+def is_youtube_playlist_url(url: str) -> bool:
+    """True when ``url`` is a YouTube playlist link that would trigger full
+    playlist ingestion (a ``list=`` query parameter that is not a radio/mix).
+
+    Used by the API service to distinguish a *discovered* show-note child that is
+    a playlist (which must be recorded as a link without expanding its videos)
+    from an ordinary video or a directly submitted playlist.
+    """
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not (
+        host == "youtube.com" or host.endswith(".youtube.com")
+    ):
+        return False
+    query = parse_qs(parsed.query)
+    list_ids = query.get("list") or []
+    if not list_ids:
+        return False
+    if "start_radio" in query:
+        return False
+    if str(list_ids[0]).startswith("RD"):
+        return False
+    return True
 
 
 def _safe_link(link: str) -> bool:

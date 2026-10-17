@@ -1,4 +1,9 @@
-"""Server-side YouTube show-note processing via ordinary POST /urls ingestion."""
+"""Server-side YouTube show-note discovery now enqueues children for a worker.
+
+These tests verify that a YouTube parent's ``POST /urls`` (or ``process_one``)
+records the parent and *enqueues* discovered show-note links for later background
+processing, instead of processing them synchronously (the issue #18 timeout bug).
+"""
 
 import logging
 
@@ -13,7 +18,7 @@ VIDEO_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
 
 @pytest.fixture
 def capture(monkeypatch, tmp_path):
-    """Capture API processing without touching the live references archive."""
+    """Capture parent process_url calls without touching the live archive."""
     seen = []
     monkeypatch.setattr(service.ref_cli, "UNIFIED", str(tmp_path / "references.md"))
     monkeypatch.setattr(service.ref_cli, "load_config", lambda: {})
@@ -25,6 +30,11 @@ def capture(monkeypatch, tmp_path):
 
     monkeypatch.setattr(service.ref_cli, "process_url", record)
     return seen
+
+
+def queued_urls():
+    """Return the URLs of all jobs currently in the durable show-note queue."""
+    return [job["url"] for job in service._get_queue().jobs()]
 
 
 def test_normal_api_ingest_discovers_links_but_ignores_chapters(
@@ -45,14 +55,17 @@ def test_normal_api_ingest_discovers_links_but_ignores_chapters(
         result = service.process_one(VIDEO_URL)
 
     assert result.status == "added"
-    assert capture == [
-        VIDEO_URL, "https://example.org/resource", "https://github.com/example/code"
+    # Only the parent is processed synchronously; children are enqueued.
+    assert capture == [VIDEO_URL]
+    assert queued_urls() == [
+        "https://example.org/resource", "https://github.com/example/code"
     ]
     assert "found=2" in result.output
+    assert "queued=2" in result.output
     assert "timestamps_ignored=2" in result.output
     assert "YouTube notes: metadata" in caplog.text
-    assert "status=added url=https://example.org/resource" in caplog.text
-    assert "YouTube notes: complete" in caplog.text
+    assert "YouTube notes: queued video_id=" + VIDEO_ID in caplog.text
+    assert "YouTube notes: queued YouTube notes: video_id=" in caplog.text
 
 
 def test_existing_video_still_checks_links(capture, monkeypatch):
@@ -70,7 +83,8 @@ def test_existing_video_still_checks_links(capture, monkeypatch):
     )
     result = service.process_one(VIDEO_URL)
     assert result.status == "exists"
-    assert capture == [VIDEO_URL, "https://example.com/out"]
+    assert capture == [VIDEO_URL]
+    assert queued_urls() == ["https://example.com/out"]
 
 
 def test_linked_youtube_videos_do_not_scan_recursively(capture, monkeypatch):
@@ -88,9 +102,8 @@ def test_linked_youtube_videos_do_not_scan_recursively(capture, monkeypatch):
     result = service.process_one(VIDEO_URL)
     assert result.status == "added"
     assert calls == [VIDEO_ID]
-    assert capture == [
-        VIDEO_URL, f"https://www.youtube.com/watch?v={another_video}"
-    ]
+    assert capture == [VIDEO_URL]
+    assert queued_urls() == [f"https://www.youtube.com/watch?v={another_video}"]
 
 
 def test_metadata_failure_does_not_lose_parent(capture, monkeypatch, caplog):
@@ -103,6 +116,7 @@ def test_metadata_failure_does_not_lose_parent(capture, monkeypatch, caplog):
 
     assert result.status == "added"
     assert capture == [VIDEO_URL]
+    assert queued_urls() == []
     assert "YouTube notes: unavailable" in result.output
     assert "YouTube metadata blocked" in caplog.text
 
@@ -115,6 +129,7 @@ def test_nonyoutube_urls_do_not_scan_notes(capture, monkeypatch):
     result = service.process_one("https://example.com/article")
     assert result.status == "added"
     assert capture == ["https://example.com/article"]
+    assert queued_urls() == []
 
 
 def test_api_skips_no_scan(capture, monkeypatch):
@@ -126,6 +141,7 @@ def test_api_skips_no_scan(capture, monkeypatch):
     result = service.process_one(VIDEO_URL)
     assert result.status == "skipped"
     assert capture == []
+    assert queued_urls() == []
 
 
 def test_many_links_bounded_and_logged(capture, monkeypatch, caplog):
@@ -142,37 +158,32 @@ def test_many_links_bounded_and_logged(capture, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="ref_api.service"):
         result = service.process_one(VIDEO_URL)
 
-    assert capture == [VIDEO_URL, "https://example.org/a", "https://example.org/b"]
+    assert capture == [VIDEO_URL]
+    assert queued_urls() == ["https://example.org/a", "https://example.org/b"]
     assert "found=3" in result.output
     assert "scanned=2" in result.output
+    assert "queued=2" in result.output
     assert "YouTube notes: capped" in caplog.text
 
 
-def test_failed_outbound_link_does_not_abort_other_links(capture, monkeypatch, caplog):
+def test_duplicate_discovered_links_enqueued_once(capture, monkeypatch):
+    """The same discovered URL must not be enqueued twice for one parent."""
     monkeypatch.setattr(
         youtube_extract, "read_video_card",
         lambda *a, **k: {
-            "description": "https://example.org/a\nhttps://example.org/b",
+            "description": (
+                "https://example.org/a\nhttps://example.org/a\n"
+                "https://example.org/a"
+            ),
         },
     )
-    def record(url, force):
-        capture.append(url)
-        if url == "https://example.org/a":
-            print("Error: denied")
-        else:
-            print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
-
-    monkeypatch.setattr(service.ref_cli, "process_url", record)
-    with caplog.at_level(logging.WARNING, logger="ref_api.service"):
-        result = service.process_one(VIDEO_URL)
-
+    result = service.process_one(VIDEO_URL)
     assert result.status == "added"
-    assert capture == [VIDEO_URL, "https://example.org/a", "https://example.org/b"]
-    assert "errors=1" in result.output
-    assert "status=error" in caplog.text
+    assert capture == [VIDEO_URL]
+    assert queued_urls() == ["https://example.org/a"]
 
 
-def test_post_urls_endpoint_automatically_records_show_note_links(
+def test_post_urls_endpoint_automatically_enqueues_show_note_links(
     capture, monkeypatch
 ):
     from unittest.mock import patch
@@ -194,7 +205,9 @@ def test_post_urls_endpoint_automatically_records_show_note_links(
     result = response.json()["results"][0]
     assert result["status"] == "added"
     assert "found=1" in result["output"]
-    assert capture == [VIDEO_URL, "https://example.org/show-notes"]
+    assert "queued=1" in result["output"]
+    assert capture == [VIDEO_URL]
+    assert queued_urls() == ["https://example.org/show-notes"]
 
 
 def test_timestamp_only_description_does_not_ingest_children(capture, monkeypatch):
@@ -206,6 +219,7 @@ def test_timestamp_only_description_does_not_ingest_children(capture, monkeypatc
     )
     result = service.process_one(VIDEO_URL)
     assert capture == [VIDEO_URL]
+    assert queued_urls() == []
     assert "found=0" in result.output
     assert "timestamps_ignored=3" in result.output
 
@@ -239,5 +253,5 @@ def test_info_progress_logs_when_root_is_warning(capture, monkeypatch):
     output = sink.getvalue()
     assert "YouTube notes: start video_id=" + VIDEO_ID in output
     assert "YouTube notes: metadata video_id=" + VIDEO_ID in output
-    assert "YouTube notes: link video_id=" + VIDEO_ID in output
-    assert "YouTube notes: complete" in output
+    assert "YouTube notes: queued video_id=" + VIDEO_ID in output
+    assert "queue_unfinished=" in output
