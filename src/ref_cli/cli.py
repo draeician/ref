@@ -1244,6 +1244,46 @@ def get_youtube_playlist_data(playlist_id: str, youtube) -> tuple:
 
     return playlist_title, playlist_uploader, video_details
 
+def _youtube_playlist_metadata(playlist_id: str, youtube) -> Tuple[str, str]:
+    """Fetch only a playlist's title and channel (no ``playlistItems`` expansion)."""
+    playlist_response = youtube.playlists().list(part='snippet', id=playlist_id).execute()
+    if not playlist_response.get('items'):
+        raise ValueError("Invalid YouTube Playlist ID")
+    snippet = playlist_response['items'][0]['snippet']
+    return snippet['title'], snippet['channelTitle']
+
+def record_youtube_playlist_link(url: str, force: bool) -> None:
+    """Record a playlist as a single entry without expanding its videos.
+
+    This is the safe path used for a YouTube playlist link discovered as a
+    show-note child: it stores the playlist reference itself but does not fetch
+    every playlist item nor their transcripts (the expensive traversal in
+    :func:`process_url`). Directly submitted playlists still use ``process_url``
+    and keep full expansion.
+    """
+    verbose_logger.log(f"Recording playlist link without expansion: {url}")
+    resolved_url = resolve_redirect(url)
+    simplified_url = simplify_url(resolved_url)
+    query_params = parse_qs(urlparse(simplified_url).query)
+    list_ids = query_params.get('list') or []
+    if not list_ids:
+        # Not actually a playlist after simplification; defer to normal handling.
+        process_url(url, force)
+        return
+
+    youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=DEVELOPER_KEY)
+    playlist_title, playlist_uploader = _youtube_playlist_metadata(list_ids[0], youtube)
+    current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    if not url_exists_in_file(simplified_url, UNIFIED) or force:
+        _append_reference_line(
+            f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube\n"
+        )
+        print(f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube")
+        logging.info(f"Added playlist URL: {simplified_url}")
+    else:
+        print(f"URL {simplified_url} already recorded.")
+        logging.info(f"Duplicate URL: {simplified_url}")
+
 def ensure_path_exists(file_path: str):
     """
     Ensures that the directory and file specified by `file_path` exist. Creates them if they do not exist.
@@ -1257,6 +1297,14 @@ def ensure_path_exists(file_path: str):
     if not os.path.exists(file_path):
         open(file_path, 'w').close()
 
+# Serialize all reads and writes of the shared references.md archive across
+# concurrent API requests and the background show-note worker. This is the ONE
+# shared process-local lock used by every archive read/modify/write commit
+# (appends, update_reference_entry, update_transcript, and the enrichment
+# whole-file rewrite in references_format.apply_row_updates). Held only for the
+# short file-access critical section (never across network/provider I/O).
+from ref_cli.archive_lock import archive_lock as _archive_lock
+
 def append_to_file(file_path: str, line: str) -> None:
     """
     Appends a line to the specified file, ensuring the path exists.
@@ -1265,11 +1313,12 @@ def append_to_file(file_path: str, line: str) -> None:
         file_path (str): The path to the file.
         line (str): The line to append to the file.
     """
-    ensure_path_exists(file_path)
-    with open(file_path, "a") as f:
-        f.write(line)
-        f.flush()
-        os.fsync(f.fileno())
+    with _archive_lock:
+        ensure_path_exists(file_path)
+        with open(file_path, "a") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
 
 def _append_reference_line(line: str) -> None:
     """Append a data line to references.md unless reference writes are suppressed.
@@ -1343,40 +1392,66 @@ def update_transcript(video_url: str) -> None:
         video_url (str): The URL of the YouTube video to update.
     """
     verbose_logger.log(f"Starting transcript update for URL: {video_url}")
-    
-    with open(UNIFIED, 'r') as file:
-        lines = file.readlines()
+
+    # Snapshot which rows still need a transcript (short critical section; no
+    # network here).
+    with _archive_lock:
+        with open(UNIFIED, 'r') as file:
+            lines = file.readlines()
+        pending = any(
+            video_url in line and line.strip().endswith("|None") for line in lines
+        )
         verbose_logger.log(f"Read {len(lines)} lines from references file")
+
+    if not pending:
+        verbose_logger.log("No transcript update needed or possible")
+        print(warning(f"No matching entry found for {url(video_url)} or transcript already exists."))
+        return
+
+    video_id_match = re.search(r'v=([^&]+)', video_url)
+    video_id = video_id_match.group(1) if video_id_match else None
+    verbose_logger.log(f"Extracted video ID: {video_id}")
+
+    # Network/provider fetch happens OUTSIDE the archive lock so a slow
+    # transcript fetch cannot block other references.md writes.
+    print(info(f"Fetching transcript for: {url(video_url)}"))
+    transcript_file = None
+    failure_info = None
+    if video_id:
+        transcript_file, failure_info = fetch_youtube_transcript(video_id)
 
     updated = False
     failure_recorded = False
-    with open(UNIFIED, 'w') as file:
-        for line in lines:
-            if video_url in line and line.strip().endswith("|None"):
-                verbose_logger.log("Found matching entry without transcript")
-                video_id = re.search(r'v=([^&]+)', video_url).group(1)
-                verbose_logger.log(f"Extracted video ID: {video_id}")
-                print(info(f"Fetching transcript for: {url(video_url)}"))
-                transcript_file, failure_info = fetch_youtube_transcript(video_id)
-                if transcript_file:
-                    verbose_logger.log(f"Successfully fetched transcript: {transcript_file}")
-                    line = line.replace("|None", f"|{transcript_file}")
-                    updated = True
-                    logging.info(f"Transcript updated for URL: {video_url}")
+    if transcript_file:
+        verbose_logger.log(f"Successfully fetched transcript: {transcript_file}")
+        replacement = f"|{transcript_file}"
+        updated = True
+        logging.info(f"Transcript updated for URL: {video_url}")
+    else:
+        verbose_logger.log("Failed to fetch transcript")
+        formatted_failure = resolve_transcript_failure_placeholder(
+            failure_info, video_url, video_id
+        )
+        replacement = f"|{formatted_failure}"
+        failure_recorded = True
+        print(warning(f"{formatted_failure} for {url(video_url)}"))
+        if failure_info:
+            method_display = failure_info[0].replace('_', ' ').title()
+            logging.info(
+                f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
+            )
+
+    # Commit under the archive lock, re-reading the current state so a
+    # concurrent append/rewrite is not clobbered by a stale snapshot.
+    with _archive_lock:
+        with open(UNIFIED, 'r') as file:
+            current_lines = file.readlines()
+        with open(UNIFIED, 'w') as file:
+            for line in current_lines:
+                if video_url in line and line.strip().endswith("|None"):
+                    file.write(line.replace("|None", replacement))
                 else:
-                    verbose_logger.log("Failed to fetch transcript")
-                    formatted_failure = resolve_transcript_failure_placeholder(
-                        failure_info, video_url, video_id
-                    )
-                    line = line.replace("|None", f"|{formatted_failure}")
-                    failure_recorded = True
-                    print(warning(f"{formatted_failure} for {url(video_url)}"))
-                    if failure_info:
-                        method_display = failure_info[0].replace('_', ' ').title()
-                        logging.info(
-                            f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
-                        )
-            file.write(line)
+                    file.write(line)
 
     if updated:
         verbose_logger.log("Transcript update completed successfully")
@@ -1509,14 +1584,15 @@ def url_exists_in_file(url: str, file_path: str) -> bool:
     """
     simplified_input_url = simplify_url(url)
     
-    with open(file_path, "r") as f:
-        for line in f:
-            match = re.search(r'\[([^\]]+)\]', line)
-            if match:
-                existing_url = match.group(1)
-                simplified_existing_url = simplify_url(existing_url)
-                if simplified_input_url == simplified_existing_url:
-                    return True
+    with _archive_lock:
+        with open(file_path, "r") as f:
+            for line in f:
+                match = re.search(r'\[([^\]]+)\]', line)
+                if match:
+                    existing_url = match.group(1)
+                    simplified_existing_url = simplify_url(existing_url)
+                    if simplified_input_url == simplified_existing_url:
+                        return True
     return False
 
 def should_skip_url(url: str, config: dict) -> bool:
@@ -2206,13 +2282,16 @@ def _record_general_url(simplified_url: str, force: bool, current_time: str) -> 
         log_error("URL Processing", simplified_url, title)
         print(f"Error: Could not fetch {simplified_url} ({title}).")
     elif title and not title.startswith("Error"):
-        if url_exists_in_file(simplified_url, UNIFIED) and not force:
-            print(f"URL {simplified_url} already recorded.")
-            logging.info(f"Duplicate URL: {simplified_url}")
-        else:
-            _append_reference_line(f"{current_time}|[{simplified_url}]|({title})|General|General\n")
-            print(f"{current_time}|[{simplified_url}]|({title})|General|General")
-            logging.info(f"Added URL: {simplified_url}")
+        # Check-then-append is a single critical section so two concurrent
+        # submissions of the same URL cannot both append a duplicate row.
+        with _archive_lock:
+            if url_exists_in_file(simplified_url, UNIFIED) and not force:
+                print(f"URL {simplified_url} already recorded.")
+                logging.info(f"Duplicate URL: {simplified_url}")
+            else:
+                _append_reference_line(f"{current_time}|[{simplified_url}]|({title})|General|General\n")
+                print(f"{current_time}|[{simplified_url}]|({title})|General|General")
+                logging.info(f"Added URL: {simplified_url}")
     elif title.startswith("Error"):
         log_error("URL Processing", simplified_url, title)
         print(f"Error: {simplified_url} returned: {title}")
@@ -2363,10 +2442,11 @@ def process_url(url: str, force: bool) -> None:
             if isinstance(result, tuple) and len(result) >= 3 and isinstance(result[2], list):  # Playlist
                 playlist_title, playlist_uploader, videos = result
                 playlist_url = simplified_url
-                if not url_exists_in_file(playlist_url, UNIFIED) or force:
-                    _append_reference_line(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n")
-                    print(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube")
-                    logging.info(f"Added playlist URL: {playlist_url}")
+                with _archive_lock:
+                    if not url_exists_in_file(playlist_url, UNIFIED) or force:
+                        _append_reference_line(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n")
+                        print(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube")
+                        logging.info(f"Added playlist URL: {playlist_url}")
                 for video_id, title, uploader, published_at in videos:
                     title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -2734,43 +2814,47 @@ def update_reference_entry(
     write_refs = reference_writes_allowed()
     updated = False
     if write_refs:
-        with open(UNIFIED, 'r') as file:
-            lines = file.readlines()
+        # Read-modify-write is a single critical section so concurrent writers
+        # cannot lose each other's rows. Network enrichment runs after, outside
+        # the lock.
+        with _archive_lock:
+            with open(UNIFIED, 'r') as file:
+                lines = file.readlines()
 
-        with open(UNIFIED, 'w') as file:
-            for line in lines:
-                if video_url in line:
-                    row = parse_data_line(line)
-                    if row is not None:
-                        row.title = video_title
-                        if uploader:
-                            row.uploader = uploader
-                        row.source = source or row.source or 'YouTube'
-                        # Transcript / status lives in extra (do not clobber @meta).
-                        row.extra = transcript_file or row.extra
-                        line = format_data_line(row) + '\n'
-                    else:
-                        # Fallback for unparseable legacy lines
-                        parts = line.rstrip().split('|')
-                        if len(parts) >= 6:
-                            parts[2] = f"({video_title})"
-                            # Prefer replacing a trailing non-meta field only
-                            parts[-1] = transcript_file
-                            line = "|".join(parts) + "\n"
+            with open(UNIFIED, 'w') as file:
+                for line in lines:
+                    if video_url in line:
+                        row = parse_data_line(line)
+                        if row is not None:
+                            row.title = video_title
+                            if uploader:
+                                row.uploader = uploader
+                            row.source = source or row.source or 'YouTube'
+                            # Transcript / status lives in extra (do not clobber @meta).
+                            row.extra = transcript_file or row.extra
+                            line = format_data_line(row) + '\n'
                         else:
-                            if line.strip().endswith("|None"):
-                                line = line.replace("|None", f"|{transcript_file}")
-                            elif not line.strip().endswith(f"|{transcript_file}"):
-                                line = line.rstrip() + f"|{transcript_file}\n"
-                    updated = True
-                file.write(line)
+                            # Fallback for unparseable legacy lines
+                            parts = line.rstrip().split('|')
+                            if len(parts) >= 6:
+                                parts[2] = f"({video_title})"
+                                # Prefer replacing a trailing non-meta field only
+                                parts[-1] = transcript_file
+                                line = "|".join(parts) + "\n"
+                            else:
+                                if line.strip().endswith("|None"):
+                                    line = line.replace("|None", f"|{transcript_file}")
+                                elif not line.strip().endswith(f"|{transcript_file}"):
+                                    line = line.rstrip() + f"|{transcript_file}\n"
+                        updated = True
+                    file.write(line)
 
-        if not updated:
-            entry = (
-                f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|"
-                f"[{video_url}]|({video_title})|{uploader}|{source}|{transcript_file}\n"
-            )
-            append_to_file(UNIFIED, entry)
+            if not updated:
+                entry = (
+                    f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|"
+                    f"[{video_url}]|({video_title})|{uploader}|{source}|{transcript_file}\n"
+                )
+                append_to_file(UNIFIED, entry)
 
     logging.info(f"Updated reference entry for URL: {video_url} with transcript file: {transcript_file}")
     print(success(f"Updated reference entry for {url(video_url)}"))

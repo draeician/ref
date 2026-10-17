@@ -98,3 +98,12 @@ class TranscriptResult(BaseModel):
 
 class TranscriptResponse(BaseModel):
     result: TranscriptResult
+
+
+class QueueStatusResponse(BaseModel):
+    pending: int = 0
+    running: int = 0
+    done: int = 0
+    failed: int = 0
+    unfinished: int = 0
+    corrupt: int = 0

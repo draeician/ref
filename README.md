@@ -331,31 +331,65 @@ redirect/DNS-based access to internal networks.
 
 ### Automatic YouTube show-note capture on ref-api
 
-When `ref <YouTube video URL>` sends a URL to `ref-api`, the server now
+When `ref <YouTube video URL>` sends a URL to `ref-api`, the server
 **automatically** reads the YouTube description/show notes using its existing
-enrichment card or metadata fetch, discovers outbound HTTP(S) links, and
-ingests them through the same `process_one` archive pipeline. The original
-video is recorded first. A transcript being blocked/unavailable does **not**
-stop show-note discovery. The server logs details to `journalctl --user -u ref-api`.
+enrichment card or metadata fetch, discovers outbound HTTP(S) links, and records
+the original video. A transcript being blocked/unavailable does **not** stop
+show-note discovery. The server logs details to `journalctl --user -u ref-api`.
 
 ```bash
 ref 'https://www.youtube.com/watch?v=zmrPY6S1FwY'
 journalctl --user -u ref-api --since '10 minutes ago' --no-pager | grep 'YouTube notes:'
 ```
 
-Journal entries include `start`, `metadata` (source, description length,
-`timestamps_ignored`, `outbound_links`), one `link` with status per submitted
-URL, and `complete` with added/existing/skipped/error counts. The request's
-`output` also includes a one-line show-note summary.
+Discovery of outbound links and their ingestion are both **queued** (not
+performed synchronously), so the parent `POST /urls` returns immediately and is
+not held hostage to slow metadata lookup or child work. A single background
+worker inside the `ref-api` process drains a durable, restart-recoverable,
+deduplicating local queue stored beside the archive at
+`~/references/show_notes_queue/jobs.json` (never inside the git repository). The
+worker first fetches the video card (a `discover` job), then records each
+discovered link (`ingest` jobs). Each job is retried with bounded backoff;
+terminal failures remain visible in the queue, and an unreadable/corrupt queue is
+taken read-only (fail-closed) rather than overwritten. The request `output`
+reports `discovery queued video_id=…` (not a misleading `complete`).
+
+Journal entries include `discovery queued` (with job id), `discover start`,
+`metadata` (source, description length, `timestamps_ignored`, `outbound_links`),
+and a `discovered` summary with `queued`, `duplicate` and `queue_unfinished`
+counts. Inspect outstanding work:
+
+```bash
+curl -sS http://127.0.0.1:8000/queue
+# {"pending":0,"running":0,"done":0,"failed":0,"unfinished":0,"corrupt":0}
+```
+
+A non-zero `unfinished` after a client read timeout means discovery or child work
+is still outstanding; `corrupt=1` means the queue file is unreadable and has been
+taken read-only pending operator action. Search `/search` to confirm whether the
+parent was already archived.
 
 Only real links are archived: bare chapter timestamps such as `00:37`,
 `1:02:15`, and self-links back to the same video's timestamps are ignored.
-Outbound YouTube links are saved but their own show notes are not recursively
-scanned by the same request. Auto-discovery is limited to the first 50 links
-per video to cap fan-out; use `ref-youtube-extract --apply` for larger lists.
-Metadata failures and individual link errors are logged, while successful
-parent video recording remains intact. A video already in the archive is
-still eligible for show-note discovery when it is submitted again.
+Outbound YouTube links are queued but their own show notes are not recursively
+scanned. A YouTube **playlist** link discovered as a show-note child is recorded
+as a single playlist entry without expanding its videos or fetching their
+transcripts (which previously caused multi-minute latency); a playlist submitted
+**directly** still keeps full playlist expansion. Auto-discovery is limited to
+the first 50 links per video to cap fan-out; use `ref-youtube-extract --apply`
+for larger lists. Metadata failures and individual link errors are logged, while
+successful parent video recording remains intact. A video already in the archive
+whose show notes were already discovered is not rediscovered or re-ingested on a
+repeat submission; only failed children are retried.
+
+All writes to `references.md` — appends, transcript updates, and the whole-file
+rewrites driven by enrichment (`@meta` stamping / unavailable-video cleanup) —
+commit their read/decide/write section under a single process-local archive lock,
+so concurrent requests and the background worker cannot silently lose each
+other's rows. Slow network/provider work runs outside that lock. The lock is
+**process-local**: it serializes threads inside `ref-api`, but a `ref` CLI
+command writing directly to the same archive in a *separate OS process* is not
+coordinated by it (the single-writer-on-the-API-host model).
 
 After upgrading the pipx-installed `ref-cli`, restart the user service:
 

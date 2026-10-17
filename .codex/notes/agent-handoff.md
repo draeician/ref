@@ -1,5 +1,22 @@
 # Agent handoff — ref-cli
 
+## ACTIVE — Issue #18: architect QA PASSED, explicit user release approval required
+
+- **Application QA verdict:** **PASSED / ready for release planning** on exact reviewed feature SHA `8711cf473b73c8fee34e4c635efe78dd109926ba` (app/tests commit `bdd2916`). Earlier three QA cycles now accepted; no identified blocker in the reviewed code scope. Issue https://github.com/draeician/ref/issues/18; same draft https://github.com/draeician/ref/pull/19. `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c` and production remains previous issue #15 build.
+- **PR review comment:** https://github.com/draeician/ref/pull/19#issuecomment-6229705014. GitHub REST returned 422 when submitting formal APPROVE because connected account is also PR author; the detailed independent architect QA approval was successfully posted as a PR comment instead.
+- **Exact-source CI:** https://github.com/draeician/ref/actions/runs/39002946373 SUCCESS on `8711cf473b73c8fee34e4c635efe78dd109926ba`, actual pytest log `389 passed, 1 warning in 11.84s`. OpenCode reported compileall and git diff --check clean, architect did not independently run those checks.
+- **What was approved:** parent `POST /urls` captures parent and queues async YouTube show-note `discover`; worker performs metadata and bounded child ingestion offline; discovered playlists link-only but direct playlists expanded; network provider work outside process-local archive lock; `references.md` append and real whole-file enrichment/transcript/migration read-modify-write commit under shared RLock; persisted jobs fail closed on bad structure/UTF8/JSON/NaN/Infinity/1e309, original bytes preserved; batch enqueue, bounded retries/history; worker stop→start handoff resumes queue, and stop→start→stop does NOT resurrect worker. `GET /queue` shows queue counts/corrupt state. Issue #15 IP cooldown and local-transcribe preserved.
+- **Remaining documented limitations:** `archive_lock` is process-local and does not coordinate a second OS process writing directly to `references.md`; discovered Reddit/community-post children may still invoke legacy nested recursion; the separate systemd stop-in-flight `RemoteDisconnected` defect was not fixed. Do not conflate.
+- **Canonical docs:** `.codex/notes/current-task.md` updated to QA PASSED. Original task `d0c54a91`, corrections `7e4c9b12`, `4f29b6c1` and `9b62e0c4` resolved at code QA level.
+- **Authorization boundary:** The issue #15 conditional user authorization does NOT apply to issue #18. **Do not mark PR ready, merge, install packages, stop/restart `ref-api`, modify `~/references` or production data, ingest live URLs, or inspect secrets until the user explicitly authorizes this rollout.**
+- **When authorized:** recheck the then-current PR SHA and exact PR CI, merge via GitHub PR (not direct push), verify exact merged `main` CI, then hand off idle-window minion cutover with `ref-cli[api] @ git+https://github.com/draeician/ref.git@<EXACT_MERGE_SHA>` install, live backups of `references.md` and `show_notes_queue/jobs.json` if it exists, safe API-capable rollback to `799b10f28dd3776a8d9904509d166368e289bb7c`, `/health`, `ref --status`, `GET /queue`, and bounded clean journal inspection. Preserve WIP and archive data. Do not force stop in-flight requests.
+
+## Exactly one recommended next step
+
+User: decide whether to authorize merge and production deployment of QA-approved PR #19. OpenCode should take no additional production/release actions until that decision.
+
+## Archived issue #15 history (historical, may contain superseded state assertions)
+
 ## Current state
 - **IMPLEMENTATION QA PASSED** on exact reviewed SHA `dfb8b50733f21e0fdbbb6d07131ea5a5fa7ab35d` for issue #15 cooldown and all probe corrections. **CUTOVER PREFLIGHT QA previously BLOCKED on unsafe package rollback instructions is now CORRECTED (task c41e90b7):** rollback targets the prior API-capable SHA `276ea2afdfd8ea401f1849ba50b847225487f9ee` (never pre-API `ref-cli==1.6.11`), the SHA-pinned `ref-cli[api]` pipx install/rollback was verified in an isolated temporary pipx environment, and archive data is preserved by default. Draft PR #16 is NOT merged/deployed. The user has conditionally authorized the eventual merge+deploy; independent review, post-merge main-SHA CI, and idle-window production cutover remain OPEN.
 - Repository: https://github.com/draeician/ref
@@ -121,8 +138,6 @@ Blocking finding from architect review of a92d761e: the prior rollback advised p
 - **Execution boundary:** OpenCode completes the existing `c41e90b7` correction and returns `[REVIEW-REQUEST]`, including actual isolated install/rollback evidence and exact final SHA/CI; architect independently reviews and merges via PR after successful gates; after exact-merged-main-SHA CI green, OpenCode may perform operator-authorized **idle-window production cutover** following proven procedure with backups and preserved archive data, then return installation SHA/version, `/health`, `ref --status`, cooldown/queue behavior and journal evidence. Stop and report if the host is busy or any gate fails. No extra confirmation needed for the already-approved overall goal.
 - **No user SSH-key inspection** or secret disclosure required.
 
-## Exactly one recommended next step
-OpenCode: this c41e90b7 correction (corrected rollback docs/PR body + isolated `[api]` pipx smoke evidence) is complete on the existing branch/PR #16 and awaiting independent review. The architect then independently re-reviews the exact final SHA + both green workflows and performs the authorized PR merge; on post-merge `main`-SHA CI success, run the idle-window production cutover exactly as documented, then report installed SHA/version, `/health`, `ref --status`, and cooldown/queue journal evidence.
 
 ## Local/working-tree notes
 - Dedicated worktree `/tmp/opencode/ref-issue-15`; production checkout `/home/draeician/git/personal/ref` untouched (modified `TODO.md`, untracked `BAD`, `advisors.md` intact).

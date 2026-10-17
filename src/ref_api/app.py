@@ -38,7 +38,13 @@ def _bootstrap_archive() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _bootstrap_archive()
-    yield
+    from ref_api import service
+
+    service.start_show_notes_worker()
+    try:
+        yield
+    finally:
+        service.stop_show_notes_worker()
 
 
 def create_app() -> FastAPI:

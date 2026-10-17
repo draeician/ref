@@ -9,6 +9,7 @@ from typing import Optional
 
 from ref_api.schemas import (
     ListResponse,
+    QueueStatusResponse,
     SearchField,
     SearchResponse,
     TranscriptRequest,
@@ -170,3 +171,19 @@ def update_transcript(
         )
     result = service.update_transcript_for_url(body.url)
     return TranscriptResponse(result=result)
+
+
+@router.get(
+    "/queue",
+    response_model=QueueStatusResponse,
+    summary="Show-note background queue status",
+    description=(
+        "Counts of automatically discovered show-note child URLs awaiting/being "
+        "processed by the background worker. Useful after a client read timeout: a "
+        "non-zero ``unfinished`` count means child work is still outstanding."
+    ),
+)
+def queue_status(
+    _auth: None = Depends(require_auth),
+) -> QueueStatusResponse:
+    return QueueStatusResponse(**service.queue_status())
