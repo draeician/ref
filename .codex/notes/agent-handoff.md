@@ -1,22 +1,30 @@
 # Agent handoff — ref-cli
 
-## ACTIVE — Issue #18: QA corrections implemented, awaiting re-review (PR #19)
+## ACTIVE — Issue #18: second independent QA requires corrections on draft PR #19
 
-- **Status:** All five architect blocking defects are **corrected** in commit `559767654a117dcc20564a3f4f39ab321476d20e` on `fix/issue-18-youtube-show-notes-timeout`. Awaiting independent architect QA; **not merge/deploy-approved**. Reviewed-but-rejected SHA was `2b0fba7e64888ce14a700281379a0de0778baf54`; `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c`.
-- **Canonical correction task:** `.codex/tasks/7e4c9b12-issue-18-qa-corrections.md` (IMPLEMENTED). Original task `.codex/tasks/d0c54a91-issue-18-youtube-show-notes-timeout.md` is IN-REVIEW. `.codex/notes/current-task.md` points to this.
-- **Corrections (one per defect):**
-  1. **Concurrency** — `src/ref_cli/cli.py` gained `_archive_lock` (RLock) wrapping only short archive read/write primitives; `service.py` aliases `_write_lock = ref_cli._archive_lock` and no longer holds it across `process_url`, so slow provider/transcript I/O runs outside the lock. Global `redirect_stdout` replaced by a thread-local stdout proxy. Regression `test_worker_slow_child_does_not_block_new_ingest` proves a second `POST /urls` returns <5s while the worker is blocked in a slow child.
-  2. **Discovery off the parent path** — `process_one` enqueues a `discover` job; `_process_discovery_job` fetches the card and batch-enqueues `ingest` jobs. Regression `test_parent_returns_before_slow_discovery` blocks uncached `read_video_card` on an Event; parent returns `added` + `discovery queued` before release.
-  3. **Fail-closed queue** — corrupt/unreadable/schema-invalid `jobs.json` raises `QueueCorruptError`, preserves original bytes, and surfaces via new `/queue` `corrupt` field. Regressions `test_corrupt_jobs_file_fails_closed`, `test_schema_invalid_job_fails_closed`.
-  4. **Bounded history + dedup** — `enqueue` skips `pending/running/done` (failed may retry), terminal history compacted to `MAX_TERMINAL_JOBS`, children batch-enqueued via `enqueue_many`. Regressions `test_enqueue_skips_completed_work`, `test_failed_job_can_be_reenqueued`, `test_terminal_history_is_bounded`, `test_enqueue_many_batches_and_dedupes`.
-  5. **Worker lifecycle fence** — `stop()` returns whether the thread exited; `stop_show_notes_worker` leaves the singleton set during a slow drain so `start()` cannot spawn a duplicate. Regression `test_worker_stop_fence_prevents_overlap`.
-- **Evidence:** `python -m pytest -q` → **362 passed** (355 prior + 7 new); `compileall -q src tests` OK; `git diff --check` clean (Python 3.12.3, venv `/tmp/opencode/ref-issue-18-venv`).
-- **Preserved:** issue #15 IP-block cooldown and local-transcribe queue-first contract, direct-playlist full expansion, discovered-playlist link-only recording, `references.md` integrity, `added/exists/skipped/error` semantics, 50-link cap and safe-link filtering. No production mutation or merge.
-- **Operator incident (unchanged):** production `ref-api` healthy at `g799b10f28`; original YouTube parent recorded, 20 show-note links; ~8-minute pause across one playlist child; client read timeout 300s; cooldown active as expected. Latest PR not installed in production.
+- **Verdict: CHANGES REQUIRED / no merge or production deployment.** Second independent architect review on exact PR HEAD `e83c468964db1e1cb600fb657cd446ab8bbcac99` (code commit `559767654a117dcc20564a3f4f39ab321476d20e`). `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c`. Existing PR https://github.com/draeician/ref/pull/19 remains open/draft.
+- **Verified CI:** exact reviewed SHA PR run https://github.com/draeician/ref/actions/runs/39000511326 SUCCESS, direct pytest job log **362 passed, 1 warning in 9.78s**. OpenCode reported local compileall/diff check but architect did not independently run them.
+- **Progress verified:** worker now handles async `discover` + `ingest` jobs; parent no longer waits on remote `read_video_card`; slow worker child no longer holds old service-global lock over provider I/O; `_archive_lock` protects some CLI primitives; stdout capture now uses thread-local proxy; queue has terminal history compaction, batch writes, and a first layer of fail-closed validation; stop retains worker reference if join times out. Original slow-HTTP symptom better addressed, but archive safety and queue durability are NOT fully verified.
+- **Canonical NEW corrective task:** `.codex/tasks/4f29b6c1-issue-18-qa-archive-persistence-lifecycle.md`. `.codex/notes/current-task.md` points to it; prior QA task `7e4c9b12` implemented but inadequate for three edge cases. **Do not create another PR.**
 
-## Exactly one recommended next step
+### Blocker A — actual archive rewrite bypasses lock (potential silent entry loss)
 
-OpenCode: push `fix/issue-18-youtube-show-notes-timeout`, update draft PR #19 body, verify GitHub PR CI on the exact final remote SHA, then return `[REVIEW-REQUEST]` for independent architect QA.
+`src/ref_cli/cli.py:update_reference_entry` does provider enrichment outside `_archive_lock`, which is correct for remote latency. But `src/ref_cli/enrichment.py:enrich_youtube_reference` invokes `references_format.apply_row_updates` (and unavailable-video handler), whose `open('r')` then `open('w')` whole-file rewrite in `src/ref_cli/references_format.py` is **not under shared `_archive_lock`**. A concurrent request/worker can append and then have the new entry overwritten by the stale snapshot. Current event-gated concurrency regression mocks all process_url behavior and does not exercise actual enrichment/write paths. Audit other reader-rewriter paths and hold one shared lock over read/decide/write commit only, not over network I/O. Deterministic lost-update test must fail on reviewed code and pass on fix.
+
+### Blocker B — parseable malformed job can bypass fail-closed
+
+`ShowNotesQueue._load` flips `_loaded=True` before validation. `_valid_job` checks only id/url/status (and can itself throw `TypeError` on unhashable status); `_normalize_job` does `int(job.get('attempts') or 0)` without exception containment. Existing jobs file with `attempts="bad"` throws during load while `_corrupt` remains False. Next enqueue skips load and can overwrite prior accepted queue bytes. Validate required job fields/bounds/types, set load success only after complete validation or explicit corruption, preserve file on all schema/IO/decode/conversion errors. Test failed load followed by enqueue, with original bytes intact.
+
+### Blocker C — worker can stop forever after an in-process lifespan restart
+
+`stop_show_notes_worker` preserves old worker object if it has not exited within five seconds. `start_show_notes_worker` sees the old still alive (but stop-signaled) and returns without scheduling a new worker. Once the old job unblocks, it exits; the new lifespan then runs without a worker until another restart. Current regression tests only prove there was no overlapping worker, not eventual resumption of new jobs. Add safe successor/handoff state and deterministic blocked-stop/restart/recovery regression.
+
+### Scope, production constraints and exact next step
+
+- **Task details/acceptance:** read `.codex/tasks/4f29b6c1-issue-18-qa-archive-persistence-lifecycle.md`, original tasks, `.codex/AGENTS.md`, `.codex/AGENTS_WORKFLOW.md`, `.codex/modes/CODER.md`; then actual `src/ref_cli/{cli,enrichment,references_format}.py`, `src/ref_api/{service,show_notes_queue,app}.py`, tests.
+- Preserve issue #15 60-minute IP-ban cooldown and local-transcribe queue-first fallback, direct playlist full ingest, discovered-playlist link-only, safe link/50 limit, durable queue and parent quick response. No extra production work or rollout approved.
+- Use isolated OpenCode worktree with external WIP marker, preserve any local modifications and do not inspect SSH keys or secrets. Implement scoped corrections and fail-before/pass-after tests. Run full pytest, compileall and diff check. Push **only same feature branch**, update **same draft PR #19**, verify exact-final-SHA remote PR CI. No main merge or production install/restart/archive mutation.
+- **Exactly one recommended next step:** OpenCode completes `4f29b6c1` and submits `[REVIEW-REQUEST]` with final SHA, PR CI link, deterministic regression evidence, and blockers.
 
 ## Archived issue #15 history (historical, may contain superseded state assertions)
 
