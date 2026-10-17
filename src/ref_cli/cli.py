@@ -33,6 +33,7 @@ import shlex
 import subprocess
 import time
 import select
+import threading
 from urllib3.exceptions import InsecureRequestWarning
 import importlib.resources
 from typing import Deque, List, Optional, Tuple
@@ -1297,6 +1298,12 @@ def ensure_path_exists(file_path: str):
     if not os.path.exists(file_path):
         open(file_path, 'w').close()
 
+# Serialize all reads and writes of the shared references.md archive across
+# concurrent API requests and the background show-note worker. Held only for the
+# short file-access critical section (never across network/provider I/O), so the
+# slow external work of one caller does not block another caller's archive write.
+_archive_lock = threading.RLock()
+
 def append_to_file(file_path: str, line: str) -> None:
     """
     Appends a line to the specified file, ensuring the path exists.
@@ -1305,11 +1312,12 @@ def append_to_file(file_path: str, line: str) -> None:
         file_path (str): The path to the file.
         line (str): The line to append to the file.
     """
-    ensure_path_exists(file_path)
-    with open(file_path, "a") as f:
-        f.write(line)
-        f.flush()
-        os.fsync(f.fileno())
+    with _archive_lock:
+        ensure_path_exists(file_path)
+        with open(file_path, "a") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
 
 def _append_reference_line(line: str) -> None:
     """Append a data line to references.md unless reference writes are suppressed.
@@ -1549,14 +1557,15 @@ def url_exists_in_file(url: str, file_path: str) -> bool:
     """
     simplified_input_url = simplify_url(url)
     
-    with open(file_path, "r") as f:
-        for line in f:
-            match = re.search(r'\[([^\]]+)\]', line)
-            if match:
-                existing_url = match.group(1)
-                simplified_existing_url = simplify_url(existing_url)
-                if simplified_input_url == simplified_existing_url:
-                    return True
+    with _archive_lock:
+        with open(file_path, "r") as f:
+            for line in f:
+                match = re.search(r'\[([^\]]+)\]', line)
+                if match:
+                    existing_url = match.group(1)
+                    simplified_existing_url = simplify_url(existing_url)
+                    if simplified_input_url == simplified_existing_url:
+                        return True
     return False
 
 def should_skip_url(url: str, config: dict) -> bool:
@@ -2246,13 +2255,16 @@ def _record_general_url(simplified_url: str, force: bool, current_time: str) -> 
         log_error("URL Processing", simplified_url, title)
         print(f"Error: Could not fetch {simplified_url} ({title}).")
     elif title and not title.startswith("Error"):
-        if url_exists_in_file(simplified_url, UNIFIED) and not force:
-            print(f"URL {simplified_url} already recorded.")
-            logging.info(f"Duplicate URL: {simplified_url}")
-        else:
-            _append_reference_line(f"{current_time}|[{simplified_url}]|({title})|General|General\n")
-            print(f"{current_time}|[{simplified_url}]|({title})|General|General")
-            logging.info(f"Added URL: {simplified_url}")
+        # Check-then-append is a single critical section so two concurrent
+        # submissions of the same URL cannot both append a duplicate row.
+        with _archive_lock:
+            if url_exists_in_file(simplified_url, UNIFIED) and not force:
+                print(f"URL {simplified_url} already recorded.")
+                logging.info(f"Duplicate URL: {simplified_url}")
+            else:
+                _append_reference_line(f"{current_time}|[{simplified_url}]|({title})|General|General\n")
+                print(f"{current_time}|[{simplified_url}]|({title})|General|General")
+                logging.info(f"Added URL: {simplified_url}")
     elif title.startswith("Error"):
         log_error("URL Processing", simplified_url, title)
         print(f"Error: {simplified_url} returned: {title}")
@@ -2403,10 +2415,11 @@ def process_url(url: str, force: bool) -> None:
             if isinstance(result, tuple) and len(result) >= 3 and isinstance(result[2], list):  # Playlist
                 playlist_title, playlist_uploader, videos = result
                 playlist_url = simplified_url
-                if not url_exists_in_file(playlist_url, UNIFIED) or force:
-                    _append_reference_line(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n")
-                    print(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube")
-                    logging.info(f"Added playlist URL: {playlist_url}")
+                with _archive_lock:
+                    if not url_exists_in_file(playlist_url, UNIFIED) or force:
+                        _append_reference_line(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n")
+                        print(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube")
+                        logging.info(f"Added playlist URL: {playlist_url}")
                 for video_id, title, uploader, published_at in videos:
                     title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -2774,43 +2787,47 @@ def update_reference_entry(
     write_refs = reference_writes_allowed()
     updated = False
     if write_refs:
-        with open(UNIFIED, 'r') as file:
-            lines = file.readlines()
+        # Read-modify-write is a single critical section so concurrent writers
+        # cannot lose each other's rows. Network enrichment runs after, outside
+        # the lock.
+        with _archive_lock:
+            with open(UNIFIED, 'r') as file:
+                lines = file.readlines()
 
-        with open(UNIFIED, 'w') as file:
-            for line in lines:
-                if video_url in line:
-                    row = parse_data_line(line)
-                    if row is not None:
-                        row.title = video_title
-                        if uploader:
-                            row.uploader = uploader
-                        row.source = source or row.source or 'YouTube'
-                        # Transcript / status lives in extra (do not clobber @meta).
-                        row.extra = transcript_file or row.extra
-                        line = format_data_line(row) + '\n'
-                    else:
-                        # Fallback for unparseable legacy lines
-                        parts = line.rstrip().split('|')
-                        if len(parts) >= 6:
-                            parts[2] = f"({video_title})"
-                            # Prefer replacing a trailing non-meta field only
-                            parts[-1] = transcript_file
-                            line = "|".join(parts) + "\n"
+            with open(UNIFIED, 'w') as file:
+                for line in lines:
+                    if video_url in line:
+                        row = parse_data_line(line)
+                        if row is not None:
+                            row.title = video_title
+                            if uploader:
+                                row.uploader = uploader
+                            row.source = source or row.source or 'YouTube'
+                            # Transcript / status lives in extra (do not clobber @meta).
+                            row.extra = transcript_file or row.extra
+                            line = format_data_line(row) + '\n'
                         else:
-                            if line.strip().endswith("|None"):
-                                line = line.replace("|None", f"|{transcript_file}")
-                            elif not line.strip().endswith(f"|{transcript_file}"):
-                                line = line.rstrip() + f"|{transcript_file}\n"
-                    updated = True
-                file.write(line)
+                            # Fallback for unparseable legacy lines
+                            parts = line.rstrip().split('|')
+                            if len(parts) >= 6:
+                                parts[2] = f"({video_title})"
+                                # Prefer replacing a trailing non-meta field only
+                                parts[-1] = transcript_file
+                                line = "|".join(parts) + "\n"
+                            else:
+                                if line.strip().endswith("|None"):
+                                    line = line.replace("|None", f"|{transcript_file}")
+                                elif not line.strip().endswith(f"|{transcript_file}"):
+                                    line = line.rstrip() + f"|{transcript_file}\n"
+                        updated = True
+                    file.write(line)
 
-        if not updated:
-            entry = (
-                f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|"
-                f"[{video_url}]|({video_title})|{uploader}|{source}|{transcript_file}\n"
-            )
-            append_to_file(UNIFIED, entry)
+            if not updated:
+                entry = (
+                    f"{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}|"
+                    f"[{video_url}]|({video_title})|{uploader}|{source}|{transcript_file}\n"
+                )
+                append_to_file(UNIFIED, entry)
 
     logging.info(f"Updated reference entry for URL: {video_url} with transcript file: {transcript_file}")
     print(success(f"Updated reference entry for {url(video_url)}"))

@@ -342,27 +342,32 @@ ref 'https://www.youtube.com/watch?v=zmrPY6S1FwY'
 journalctl --user -u ref-api --since '10 minutes ago' --no-pager | grep 'YouTube notes:'
 ```
 
-Discovered links are **queued** (not processed synchronously) so the parent
-`POST /urls` returns immediately and is not held hostage to slow child work. A
-single background worker inside the `ref-api` process drains a durable,
-restart-recoverable, deduplicating local queue stored beside the archive at
-`~/references/show_notes_queue/jobs.json` (never inside the git repository).
-Each child is retried with bounded backoff; terminal failures remain visible in
-the queue. The request `output` reports `queued=N` (not a misleading `complete`).
+Discovery of outbound links and their ingestion are both **queued** (not
+performed synchronously), so the parent `POST /urls` returns immediately and is
+not held hostage to slow metadata lookup or child work. A single background
+worker inside the `ref-api` process drains a durable, restart-recoverable,
+deduplicating local queue stored beside the archive at
+`~/references/show_notes_queue/jobs.json` (never inside the git repository). The
+worker first fetches the video card (a `discover` job), then records each
+discovered link (`ingest` jobs). Each job is retried with bounded backoff;
+terminal failures remain visible in the queue, and an unreadable/corrupt queue is
+taken read-only (fail-closed) rather than overwritten. The request `output`
+reports `discovery queued video_id=…` (not a misleading `complete`).
 
-Journal entries include `start`, `metadata` (source, description length,
-`timestamps_ignored`, `outbound_links`), one `queued`/`duplicate` line per
-discovered URL with its job id, and a summary with `queued`, `duplicate` and
-`queue_unfinished` counts. Inspect outstanding work:
+Journal entries include `discovery queued` (with job id), `discover start`,
+`metadata` (source, description length, `timestamps_ignored`, `outbound_links`),
+and a `discovered` summary with `queued`, `duplicate` and `queue_unfinished`
+counts. Inspect outstanding work:
 
 ```bash
 curl -sS http://127.0.0.1:8000/queue
-# {"pending":0,"running":0,"done":0,"failed":0,"unfinished":0}
+# {"pending":0,"running":0,"done":0,"failed":0,"unfinished":0,"corrupt":0}
 ```
 
-A non-zero `unfinished` after a client read timeout means child work is still
-outstanding; search `/search` to confirm whether the parent was already
-archived.
+A non-zero `unfinished` after a client read timeout means discovery or child work
+is still outstanding; `corrupt=1` means the queue file is unreadable and has been
+taken read-only pending operator action. Search `/search` to confirm whether the
+parent was already archived.
 
 Only real links are archived: bare chapter timestamps such as `00:37`,
 `1:02:15`, and self-links back to the same video's timestamps are ignored.
@@ -374,7 +379,8 @@ transcripts (which previously caused multi-minute latency); a playlist submitted
 the first 50 links per video to cap fan-out; use `ref-youtube-extract --apply`
 for larger lists. Metadata failures and individual link errors are logged, while
 successful parent video recording remains intact. A video already in the archive
-is still eligible for show-note discovery when it is submitted again.
+whose show notes were already discovered is not rediscovered or re-ingested on a
+repeat submission; only failed children are retried.
 
 After upgrading the pipx-installed `ref-cli`, restart the user service:
 

@@ -106,3 +106,4 @@ class QueueStatusResponse(BaseModel):
     done: int = 0
     failed: int = 0
     unfinished: int = 0
+    corrupt: int = 0

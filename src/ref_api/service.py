@@ -12,7 +12,12 @@ from typing import Any, Dict, List, Optional
 
 from ref_cli import cli as ref_cli
 from ref_api.schemas import SearchHit, TranscriptResult, UrlResult, UrlStatus
-from ref_api.show_notes_queue import ShowNotesQueue
+from ref_api.show_notes_queue import (
+    KIND_DISCOVER,
+    KIND_INGEST,
+    QueueCorruptError,
+    ShowNotesQueue,
+)
 
 logger = logging.getLogger(__name__)
 # Uvicorn often leaves the root logger at WARNING. Opt in to INFO for
@@ -20,8 +25,69 @@ logger = logging.getLogger(__name__)
 # summary without turning on verbose logging across the whole process.
 logger.setLevel(logging.INFO)
 
-# Serialize writes to references.md across concurrent requests.
-_write_lock = threading.Lock()
+# Serialize writes to references.md across concurrent requests. This aliases the
+# CLI's own archive lock (used by its write primitives) so service-level file
+# operations (backup, transcript update) serialize with ``process_url``
+# appends/rewrites, while slow network/provider work runs *outside* the lock.
+_write_lock = ref_cli._archive_lock
+
+# Thread-safe stdout capture. ``process_url`` reports its result via print(); now
+# that callers may run slow provider work concurrently, a global
+# ``contextlib.redirect_stdout`` would race. This proxy routes ``print()`` to a
+# per-thread buffer when one is set and otherwise to the real stdout.
+_stdout_proxy: Optional["_ThreadLocalStdout"] = None
+_stdout_proxy_lock = threading.Lock()
+
+
+class _ThreadLocalStdout:
+    """Route ``write``/``flush`` to a per-thread buffer when set, else real stdout."""
+
+    def __init__(self, real):
+        self._real = real
+        self._local = threading.local()
+
+    def _target(self):
+        buf = getattr(self._local, "capture", None)
+        return buf if buf is not None else self._real
+
+    def write(self, s: str) -> None:
+        self._target().write(s)
+
+    def flush(self) -> None:
+        self._target().flush()
+
+    def isatty(self) -> bool:
+        return self._target().isatty()
+
+    def fileno(self) -> int:
+        return self._real.fileno()
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def _get_stdout_proxy() -> "_ThreadLocalStdout":
+    """Return the process-wide proxy, (re)installing it if stdout was swapped."""
+    import sys
+
+    global _stdout_proxy
+    with _stdout_proxy_lock:
+        if _stdout_proxy is None or sys.stdout is not _stdout_proxy:
+            _stdout_proxy = _ThreadLocalStdout(sys.stdout)
+            sys.stdout = _stdout_proxy
+        return _stdout_proxy
+
+
+@contextlib.contextmanager
+def _capture_stdout(buf: io.StringIO):
+    """Capture this thread's ``print`` output into ``buf`` without a global redirect."""
+    proxy = _get_stdout_proxy()
+    previous = getattr(proxy._local, "capture", None)
+    proxy._local.capture = buf
+    try:
+        yield
+    finally:
+        proxy._local.capture = previous
 
 
 def _classify_stdout(stdout: str) -> UrlStatus:
@@ -123,54 +189,26 @@ def _discover_youtube_show_note_links(
     return video_id, links, "", chapter_count
 
 
-def _enqueue_youtube_show_notes(video_url: str) -> str:
-    """Discover a YouTube video's show-note links and enqueue them for the worker.
+def _enqueue_youtube_discovery(video_url: str, video_id: str) -> str:
+    """Enqueue a background ``discover`` job for a submitted YouTube video.
 
-    Returns a one-line summary. Children are NOT processed inline, so the parent
-    ``POST /urls`` response returns immediately; a background worker drains the
-    durable queue.
+    Card fetch + link extraction is *not* performed here: it runs on the worker,
+    so a slow or uncached card access cannot delay the parent ``POST /urls``
+    response. Returns a one-line summary (empty when already queued/done).
     """
-    video_id, links, error_summary, chapter_count = _discover_youtube_show_note_links(
-        video_url
-    )
-    if video_id is None:
-        return ""
-    if error_summary:
-        return error_summary
-
-    logger.info("YouTube notes: start video_id=%s", video_id)
-    if len(links) > MAX_YOUTUBE_SHOW_NOTE_LINKS:
-        logger.warning(
-            "YouTube notes: capped video_id=%s found=%d limit=%d",
-            video_id, len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS,
-        )
-
     queue = _get_queue()
-    queued = 0
-    duplicate = 0
-    for link in links[:MAX_YOUTUBE_SHOW_NOTE_LINKS]:
-        job_id = queue.enqueue(link, parent_video_id=video_id)
-        if job_id:
-            queued += 1
-            logger.info(
-                "YouTube notes: queued video_id=%s url=%s job=%s",
-                video_id, link, job_id,
-            )
-        else:
-            duplicate += 1
-            logger.info(
-                "YouTube notes: duplicate video_id=%s url=%s",
-                video_id, link,
-            )
-
-    unfinished = queue.unfinished_count()
-    summary = (
-        f"YouTube notes: video_id={video_id} scanned={min(len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS)} "
-        f"found={len(links)} timestamps_ignored={chapter_count} "
-        f"queued={queued} duplicate={duplicate} queue_unfinished={unfinished}"
-    )
-    logger.info("YouTube notes: queued %s", summary)
-    return summary
+    try:
+        job_id = queue.enqueue_discovery(video_url, video_id)
+    except QueueCorruptError as exc:
+        logger.error("YouTube notes: queue corrupt, discovery not queued: %s", exc)
+        return f"YouTube notes: discovery not queued (queue corrupt): {exc}"
+    if job_id:
+        logger.info(
+            "YouTube notes: discovery queued video_id=%s job=%s", video_id, job_id
+        )
+        return f"YouTube notes: discovery queued video_id={video_id} job={job_id}"
+    logger.info("YouTube notes: discovery already queued/done video_id=%s", video_id)
+    return ""
 
 
 def process_one(
@@ -183,9 +221,12 @@ def process_one(
     """
     Apply skip patterns, convert YouTube video IDs, then call process_url.
 
-    Concurrent callers are serialized via a process-wide lock so appends to
-    references.md do not interleave. The parent YouTube capture finishes before
-    show-note child URLs are *enqueued* (not processed) for the background worker.
+    Archive writes are serialized inside ``ref_cli`` (its ``_archive_lock``), not
+    by a lock held across the whole ``process_url`` call, so slow provider/network
+    work for one URL does not block another caller's archive write. A parent
+    YouTube capture only *enqueues* a background ``discover`` job; show-note
+    links are extracted and their children enqueued by the worker, off the
+    request path.
 
     ``_suppress_playlist_expansion`` is set only by the show-note worker so a
     discovered playlist link is recorded without full playlist traversal.
@@ -217,19 +258,19 @@ def process_one(
 
     buf = io.StringIO()
     try:
-        with _write_lock:
-            with contextlib.redirect_stdout(buf):
-                if _suppress_playlist_expansion and _is_youtube_playlist_url(target):
-                    ref_cli.record_youtube_playlist_link(target, force)
-                else:
-                    ref_cli.process_url(target, force)
+        with _capture_stdout(buf):
+            if _suppress_playlist_expansion and _is_youtube_playlist_url(target):
+                ref_cli.record_youtube_playlist_link(target, force)
+            else:
+                ref_cli.process_url(target, force)
         output = buf.getvalue().strip()
         status = _classify_stdout(output)
         if _discover_youtube_links and status in {"added", "exists"}:
             from ref_cli.youtube_extract import youtube_video_id
 
-            if youtube_video_id(target):
-                summary = _enqueue_youtube_show_notes(target)
+            video_id = youtube_video_id(target)
+            if video_id:
+                summary = _enqueue_youtube_discovery(target, video_id)
                 if summary:
                     output = f"{output}\n{summary}" if output else summary
         message = {
@@ -265,7 +306,69 @@ def _is_youtube_playlist_url(url: str) -> bool:
 
 
 def _process_queued_job(queue: ShowNotesQueue, job: Dict[str, Any]) -> None:
-    """Process one claimed show-note child job, then record its terminal state."""
+    """Dispatch one claimed show-note job by kind, then record its terminal state."""
+    if job.get("kind") == KIND_DISCOVER:
+        _process_discovery_job(queue, job)
+    else:
+        _process_ingest_job(queue, job)
+
+
+def _process_discovery_job(queue: ShowNotesQueue, job: Dict[str, Any]) -> None:
+    """Fetch a video's show notes (network, no lock) and enqueue its child links."""
+    job_id = job.get("id", "")
+    video_url = job.get("url", "")
+    logger.info("YouTube notes: discover start id=%s url=%s", job_id, video_url)
+    start = time.monotonic()
+    try:
+        video_id, links, error_summary, chapter_count = _discover_youtube_show_note_links(
+            video_url
+        )
+        elapsed = time.monotonic() - start
+        if video_id is None:
+            queue.mark_done(job_id)
+            logger.info(
+                "YouTube notes: discover id=%s not-a-video elapsed=%.2fs",
+                job_id, elapsed,
+            )
+            return
+        if error_summary:
+            queue.mark_failed(job_id, error_summary, retryable=True)
+            logger.warning(
+                "YouTube notes: discover id=%s unavailable elapsed=%.2fs reason=%s",
+                job_id, elapsed, error_summary,
+            )
+            return
+
+        if len(links) > MAX_YOUTUBE_SHOW_NOTE_LINKS:
+            logger.warning(
+                "YouTube notes: capped video_id=%s found=%d limit=%d",
+                video_id, len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS,
+            )
+
+        queued, duplicate = queue.enqueue_many(
+            links[:MAX_YOUTUBE_SHOW_NOTE_LINKS],
+            parent_video_id=video_id,
+            kind=KIND_INGEST,
+        )
+        queue.mark_done(job_id)
+        summary = (
+            f"YouTube notes: video_id={video_id} "
+            f"scanned={min(len(links), MAX_YOUTUBE_SHOW_NOTE_LINKS)} "
+            f"found={len(links)} timestamps_ignored={chapter_count} "
+            f"queued={queued} duplicate={duplicate} "
+            f"queue_unfinished={queue.unfinished_count()}"
+        )
+        logger.info("YouTube notes: discovered %s", summary)
+    except Exception as exc:  # noqa: BLE001 - a failed discovery must not kill the worker
+        elapsed = time.monotonic() - start
+        queue.mark_failed(job_id, str(exc), retryable=True)
+        logger.exception(
+            "YouTube notes: discover id=%s failed elapsed=%.2fs", job_id, elapsed
+        )
+
+
+def _process_ingest_job(queue: ShowNotesQueue, job: Dict[str, Any]) -> None:
+    """Record one discovered child URL, then record its terminal state."""
     job_id = job.get("id", "")
     url = job.get("url", "")
     logger.info("YouTube notes: job start id=%s url=%s", job_id, url)
@@ -325,23 +428,38 @@ class _ShowNotesWorker:
 
     def _run(self) -> None:
         queue = _get_queue()
-        queue.recover()
+        try:
+            queue.recover()
+        except QueueCorruptError:
+            logger.exception(
+                "show-notes queue is corrupt; worker idle until an operator "
+                "resolves it (never overwriting accepted jobs)"
+            )
+            while not self._stop.is_set():
+                self._stop.wait(self._poll_interval)
+            return
         while not self._stop.is_set():
             try:
                 drained = _drain_show_notes_queue(queue)
+            except QueueCorruptError:
+                logger.error("show-notes queue became corrupt; pausing worker")
+                self._stop.wait(self._poll_interval * 10)
+                drained = False
             except Exception:  # noqa: BLE001 - keep the worker alive across bad jobs
                 logger.exception("show-notes worker iteration failed")
                 drained = False
             if not drained:
                 self._stop.wait(self._poll_interval)
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Signal stop and join; returns True only if the thread fully exited."""
         self._stop.set()
         self._thread.join(timeout)
+        return not self._thread.is_alive()
 
 
 def start_show_notes_worker() -> None:
-    """Start the background show-note worker (idempotent)."""
+    """Start the background show-note worker (idempotent, no overlapping workers)."""
     global _worker
     with _worker_lock:
         if _worker is not None and _worker.is_alive():
@@ -354,9 +472,15 @@ def stop_show_notes_worker() -> None:
     """Stop the background show-note worker (idempotent)."""
     global _worker
     with _worker_lock:
-        if _worker is not None:
-            _worker.stop()
+        worker = _worker
+        if worker is None:
+            return
+        fully_stopped = worker.stop()
+        if fully_stopped:
             _worker = None
+        # If the thread did not exit within the timeout (still in slow child
+        # work), leave ``_worker`` set so a later ``start`` does not spawn a
+        # duplicate while the original thread drains and exits on its own.
 
 
 def process_many(inputs: List[str], force: bool = False) -> List[UrlResult]:
@@ -468,7 +592,7 @@ def update_transcript_for_url(video_url: str) -> TranscriptResult:
     buf = io.StringIO()
     try:
         with _write_lock:
-            with contextlib.redirect_stdout(buf):
+            with _capture_stdout(buf):
                 ref_cli.update_transcript(target)
         output = buf.getvalue().strip()
         status = _classify_transcript_stdout(output)

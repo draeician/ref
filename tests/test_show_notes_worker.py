@@ -1,9 +1,10 @@
 """Deterministic regression tests for the show-note background worker.
 
 These cover the issue #18 contract: the parent response is no longer hostage to
-slow child processing, discovered playlists do not expand, direct playlists still
-do, duplicate submissions do not double-fan-out, and accepted jobs survive a
-restart and are retried with bounded backoff.
+slow discovery or child processing, a slow worker child does not block a *new*
+independent ingest, discovered playlists do not expand, direct playlists still
+do, duplicate submissions do not double-fan-out, accepted jobs survive a restart,
+and worker lifecycle cannot spawn overlapping workers.
 """
 
 from __future__ import annotations
@@ -30,27 +31,28 @@ def isolated(monkeypatch, tmp_path):
     return tmp_path
 
 
-def test_parent_returns_before_slow_child_released(isolated, monkeypatch):
+def _ingest_urls(queue):
+    return [job["url"] for job in queue.jobs() if job["kind"] == "ingest"]
+
+
+def test_parent_returns_before_slow_discovery(isolated, monkeypatch):
+    """Discovery (card fetch) runs on the worker, not on the parent request path."""
     from unittest.mock import patch
     from fastapi.testclient import TestClient
     from ref_api.app import create_app
 
-    child_url = "https://example.org/slow"
     release = threading.Event()
-    child_started = threading.Event()
-    processed = []
+    discovery_started = threading.Event()
 
-    def fake_process(url, force):
-        if url == child_url:
-            child_started.set()
-            release.wait(timeout=15)
-        processed.append(url)
-        print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
+    def slow_card(video_id, base):
+        discovery_started.set()
+        release.wait(timeout=15)
+        return {"description": "https://example.org/slow", "source": "cache"}
 
-    monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
+    monkeypatch.setattr(youtube_extract, "read_video_card", slow_card)
     monkeypatch.setattr(
-        youtube_extract, "read_video_card",
-        lambda *a, **k: {"description": child_url, "source": "cache"},
+        service.ref_cli, "process_url",
+        lambda url, force: print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General"),
     )
 
     try:
@@ -58,24 +60,53 @@ def test_parent_returns_before_slow_child_released(isolated, monkeypatch):
             with TestClient(create_app()) as client:
                 response = client.post("/urls", json={"url": VIDEO_URL})
 
-                # The parent response returns promptly and truthfully reports
-                # queued (not completed) children.
                 assert response.status_code == 200
                 result = response.json()["results"][0]
                 assert result["status"] == "added"
-                assert "queued=1" in result["output"]
-                assert "queue_unfinished=1" in result["output"]
+                # Discovery is off the request path.
+                assert "discovery queued" in result["output"]
+                assert "found=" not in result["output"]
 
-                # The worker has claimed the slow child and is blocked on it, but
-                # the child is not yet recorded.
-                assert child_started.wait(timeout=5)
-                assert child_url not in processed
-
+                # The worker is now blocked inside discovery; parent already returned.
+                assert discovery_started.wait(timeout=5)
                 release.set()
-                deadline = time.time() + 5
-                while child_url not in processed and time.time() < deadline:
-                    time.sleep(0.05)
-                assert child_url in processed
+    finally:
+        release.set()
+
+
+def test_worker_slow_child_does_not_block_new_ingest(isolated, monkeypatch):
+    """A worker stuck in slow child work must not delay a new independent ingest."""
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from ref_api.app import create_app
+
+    slow_url = "https://example.org/slow"
+    other_url = "https://example.org/other"
+    release = threading.Event()
+    slow_started = threading.Event()
+
+    def fake_process(url, force):
+        if url == slow_url:
+            slow_started.set()
+            release.wait(timeout=20)
+        print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
+
+    monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
+
+    try:
+        with patch("ref_api.app._bootstrap_archive"):
+            with TestClient(create_app()) as client:
+                service._get_queue().enqueue(slow_url)
+                assert slow_started.wait(timeout=5)
+
+                started = time.monotonic()
+                response = client.post("/urls", json={"url": other_url})
+                elapsed = time.monotonic() - started
+
+                assert response.status_code == 200
+                assert response.json()["results"][0]["status"] == "added"
+                assert elapsed < 5  # did not wait on the blocked worker child
+                release.set()
     finally:
         release.set()
 
@@ -145,8 +176,11 @@ def test_repeated_parent_submission_no_double_fanout(isolated, monkeypatch):
 
     assert first.status == "added"
     assert second.status == "exists"
-    queued = [job["url"] for job in service._get_queue().jobs()]
-    assert queued == ["https://example.org/a", "https://example.org/b"]
+
+    # Discovery is deduplicated: a single discover job fans out once.
+    queue = service._get_queue()
+    assert service._drain_show_notes_queue(queue) is True
+    assert _ingest_urls(queue) == ["https://example.org/a", "https://example.org/b"]
 
 
 def test_worker_drains_child_and_marks_done(isolated, monkeypatch):
@@ -196,7 +230,7 @@ def test_restart_recovery_then_worker_drains(isolated, monkeypatch):
         lambda *a, **k: {"description": "https://example.org/a", "source": "cache"},
     )
 
-    # Parent enqueues the child durably.
+    # Parent enqueues a discovery job durably.
     service.process_one(VIDEO_URL)
     assert service._get_queue().unfinished_count() == 1
 
@@ -206,9 +240,11 @@ def test_restart_recovery_then_worker_drains(isolated, monkeypatch):
     queue = service._get_queue()
     queue.recover()
 
-    assert service._drain_show_notes_queue(queue) is True
-    assert "https://example.org/a" in processed
-    assert queue.stats()["done"] == 1
+    assert service._drain_show_notes_queue(queue) is True  # discover -> enqueue child
+    assert processed == [VIDEO_URL]  # discovery does not record; only parent so far
+    assert service._drain_show_notes_queue(queue) is True  # child ingest
+    assert processed == [VIDEO_URL, "https://example.org/a"]
+    assert queue.stats()["done"] == 2
 
 
 def test_queue_status_endpoint(isolated, monkeypatch):
@@ -232,5 +268,55 @@ def test_queue_status_endpoint(isolated, monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["pending"] == 1
-    assert body["unfinished"] == 1
+    assert body["unfinished"] >= 1
+    assert body["corrupt"] == 0
+
+
+def test_worker_stop_fence_prevents_overlap(isolated, monkeypatch):
+    """A stop that times out (worker still draining) must not allow a duplicate."""
+    slow_url = "https://example.org/slow"
+    release = threading.Event()
+    slow_started = threading.Event()
+
+    def fake_process(url, force):
+        if url == slow_url:
+            slow_started.set()
+            release.wait(timeout=20)
+        print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
+
+    monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
+
+    original_stop = service._ShowNotesWorker.stop
+
+    def fast_stop(self, timeout=0.1):
+        return original_stop(self, timeout)
+
+    monkeypatch.setattr(service._ShowNotesWorker, "stop", fast_stop)
+
+    service._worker = None
+    try:
+        service.start_show_notes_worker()
+        service._get_queue().enqueue(slow_url)
+        assert slow_started.wait(timeout=5)
+
+        # stop times out (worker stuck in slow child); reference is retained.
+        service.stop_show_notes_worker()
+        assert service._worker is not None
+        assert service._worker.is_alive()
+
+        # A second start must NOT spawn a duplicate worker.
+        service.start_show_notes_worker()
+        worker_threads = [
+            t for t in threading.enumerate() if t.name == "ref-show-notes-worker"
+        ]
+        assert len(worker_threads) == 1
+
+        release.set()
+        deadline = time.time() + 10
+        while service._worker.is_alive() and time.time() < deadline:
+            time.sleep(0.05)
+        assert not service._worker.is_alive()
+    finally:
+        release.set()
+        service.stop_show_notes_worker()
+        service._worker = None

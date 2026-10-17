@@ -5,7 +5,14 @@ from __future__ import annotations
 import json
 import os
 
-from ref_api.show_notes_queue import MAX_ATTEMPTS, ShowNotesQueue
+import pytest
+
+from ref_api.show_notes_queue import (
+    KIND_DISCOVER,
+    MAX_ATTEMPTS,
+    QueueCorruptError,
+    ShowNotesQueue,
+)
 
 
 def _new_queue(tmp_path):
@@ -21,6 +28,7 @@ def test_enqueue_creates_persistent_pending_job(tmp_path):
     assert jobs[0]["status"] == "pending"
     assert jobs[0]["url"] == "https://example.org/a"
     assert jobs[0]["parent_video_id"] == "vid1"
+    assert jobs[0]["kind"] == "ingest"
     assert os.path.exists(queue.jobs_path)
 
 
@@ -33,14 +41,24 @@ def test_enqueue_dedupes_unfinished_duplicate(tmp_path):
     assert len(queue.jobs()) == 1
 
 
-def test_enqueue_allows_reenqueue_after_terminal(tmp_path):
+def test_enqueue_skips_completed_work(tmp_path):
+    """A URL whose job already completed must not be re-enqueued by default."""
     queue = _new_queue(tmp_path)
     first = queue.enqueue("https://example.org/a")
     queue.mark_done(first)
+    assert queue.enqueue("https://example.org/a") is None
+    assert len(queue.jobs()) == 1
+
+
+def test_failed_job_can_be_reenqueued(tmp_path):
+    """A failed job is an intentional retry: re-submission may enqueue again."""
+    queue = _new_queue(tmp_path)
+    first = queue.enqueue("https://example.org/a")
+    queue.next_pending()
+    queue.mark_failed(first, "boom", retryable=False)
     second = queue.enqueue("https://example.org/a")
     assert second is not None
     assert second != first
-    assert len(queue.jobs()) == 2
 
 
 def test_recover_requeues_running_jobs(tmp_path):
@@ -113,17 +131,83 @@ def test_stats_and_unfinished(tmp_path):
     queue.next_pending()
     assert queue.stats()["pending"] == 1
     assert queue.stats()["running"] == 1
+    assert queue.stats()["corrupt"] == 0
     assert queue.unfinished_count() == 2
 
 
-def test_corrupt_jobs_file_treated_as_empty(tmp_path):
+def test_enqueue_many_batches_and_dedupes(tmp_path):
+    queue = _new_queue(tmp_path)
+    queued, skipped = queue.enqueue_many(
+        ["https://example.org/a", "https://example.org/b"], parent_video_id="vid1"
+    )
+    assert queued == 2
+    assert skipped == 0
+    assert len(queue.jobs()) == 2
+
+    queued2, skipped2 = queue.enqueue_many(
+        ["https://example.org/a", "https://example.org/c"]
+    )
+    assert queued2 == 1
+    assert skipped2 == 1
+
+
+def test_discover_job_kind_round_trips(tmp_path):
+    queue = _new_queue(tmp_path)
+    job_id = queue.enqueue_discovery("https://www.youtube.com/watch?v=x", "x")
+    job = {j["id"]: j for j in queue.jobs()}[job_id]
+    assert job["kind"] == KIND_DISCOVER
+    assert job["parent_video_id"] == "x"
+
+
+def test_terminal_history_is_bounded(tmp_path, monkeypatch):
+    import ref_api.show_notes_queue as sq
+
+    monkeypatch.setattr(sq, "MAX_TERMINAL_JOBS", 3)
+    queue = _new_queue(tmp_path)
+    ids = []
+    for i in range(6):
+        job_id = queue.enqueue(f"https://example.org/{i}")
+        queue.mark_done(job_id)
+        ids.append(job_id)
+    terminal_ids = {j["id"] for j in queue.jobs() if j["status"] == "done"}
+    assert len(terminal_ids) <= 3
+    assert ids[-1] in terminal_ids
+    assert ids[0] not in terminal_ids
+
+
+def test_corrupt_jobs_file_fails_closed(tmp_path):
+    queue = _new_queue(tmp_path)
+    os.makedirs(queue.queue_dir, exist_ok=True)
+    original = "{ not valid json"
+    with open(queue.jobs_path, "w", encoding="utf-8") as handle:
+        handle.write(original)
+
+    assert queue.is_corrupt() is True
+    assert queue.stats()["corrupt"] == 1
+    assert "not valid JSON" in queue.corrupt_error()
+
+    # Fail closed: no mutation is allowed, so accepted work is never overwritten.
+    with pytest.raises(QueueCorruptError):
+        queue.enqueue("https://example.org/a")
+    with pytest.raises(QueueCorruptError):
+        queue.recover()
+
+    # Original bytes preserved untouched.
+    with open(queue.jobs_path, encoding="utf-8") as handle:
+        assert handle.read() == original
+
+
+def test_schema_invalid_job_fails_closed(tmp_path):
     queue = _new_queue(tmp_path)
     os.makedirs(queue.queue_dir, exist_ok=True)
     with open(queue.jobs_path, "w", encoding="utf-8") as handle:
-        handle.write("{ not valid json")
-    recovered = queue.recover()
-    assert recovered == 0
-    assert queue.jobs() == []
+        json.dump(
+            {"jobs": {"j1": {"id": "j1", "url": "https://example.org/a", "status": "bogus"}}},
+            handle,
+        )
+    assert queue.is_corrupt() is True
+    with pytest.raises(QueueCorruptError):
+        queue.enqueue("https://example.org/a")
 
 
 def test_enqueue_rejects_empty_url(tmp_path):
