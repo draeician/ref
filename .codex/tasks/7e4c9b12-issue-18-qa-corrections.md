@@ -1,7 +1,7 @@
 # [fix] Issue #18 — architect QA corrections for background show-note queue
 
 - **Task ID:** 7e4c9b12
-- **State:** OPEN — blocking merge and production deployment of PR #19.
+- **State:** IMPLEMENTED — all five defects corrected on `fix/issue-18-youtube-show-notes-timeout`; awaiting independent architect QA (not merge/deploy-approved).
 - **Parent task:** `.codex/tasks/d0c54a91-issue-18-youtube-show-notes-timeout.md`; issue https://github.com/draeician/ref/issues/18.
 - **Existing draft PR:** https://github.com/draeician/ref/pull/19 — keep the SAME PR; no new PR.
 - **Development branch:** `fix/issue-18-youtube-show-notes-timeout` (no push/merge to `main`).
@@ -58,3 +58,62 @@ In `src/ref_api/service.py`, `_process_queued_job` calls `process_one(child, _di
 ## Exactly one next step
 
 OpenCode: implement these narrow QA corrections in existing branch and draft PR #19, then request independent review.
+
+---
+
+## Implementation (OpenCode, corrections)
+
+**Commit:** `559767654a117dcc20564a3f4f39ab321476d20e` — `[fix] Show-note queue: async discovery, fail-closed, bounded history, worker fence`.
+
+### 1. Concurrency — archive write critical section separated from network I/O
+`src/ref_cli/cli.py` gained a module-level `_archive_lock = threading.RLock()`
+wrapping only the short file-access primitives (`append_to_file`,
+`url_exists_in_file`, the `_record_general_url` check-then-append, the playlist
+check-then-append, and `update_reference_entry`'s read-modify-write). `service.py`
+now aliases `_write_lock = ref_cli._archive_lock` and no longer holds it across
+`process_url`, so slow provider/transcript work runs *outside* the lock. The
+global `contextlib.redirect_stdout` was replaced by a thread-local stdout proxy
+(`_ThreadLocalStdout` + `_capture_stdout`) so concurrent callers do not race on a
+shared `sys.stdout`. Regression: `test_worker_slow_child_does_not_block_new_ingest`
+blocks the worker inside slow child work (Event) and asserts a second independent
+`POST /urls` returns in <5s.
+
+### 2. Discovery moved off the parent request path
+`process_one` now enqueues a `discover` job (`_enqueue_youtube_discovery`); the
+worker's `_process_discovery_job` fetches the card and batch-enqueues `ingest`
+jobs. The parent `output` reports `discovery queued video_id=… job=…`.
+Regression: `test_parent_returns_before_slow_discovery` blocks an uncached
+`read_video_card` on an Event and asserts the parent returns `added` with
+`discovery queued` before the gate is released.
+
+### 3. Fail-closed queue
+`ShowNotesQueue._load` now distinguishes fresh (nonexistent) from
+unreadable/malformed/schema-invalid. Corrupt queues raise `QueueCorruptError` on
+any mutation (`enqueue`/`next_pending`/`recover`/`mark_*`), preserve the original
+bytes, and surface `corrupt` via `stats()` and the new `/queue` `corrupt` field.
+Regression: `test_corrupt_jobs_file_fails_closed` and
+`test_schema_invalid_job_fails_closed`.
+
+### 4. Bounded history + completed-work dedup + batch enqueue
+`enqueue` skips `pending`/`running`/`done` (failed jobs may retry), terminal
+history is compacted to `MAX_TERMINAL_JOBS`, and `enqueue_many` writes a single
+snapshot for up to 50 children. Regressions: `test_enqueue_skips_completed_work`,
+`test_failed_job_can_be_reenqueued`, `test_terminal_history_is_bounded`,
+`test_enqueue_many_batches_and_dedupes`.
+
+### 5. Worker lifecycle fence
+`_ShowNotesWorker.stop` returns whether the thread fully exited;
+`stop_show_notes_worker` leaves the singleton set when a slow drain is still in
+flight, so `start_show_notes_worker` cannot spawn a duplicate. Regression:
+`test_worker_stop_fence_prevents_overlap`.
+
+### Evidence (Python 3.12.3, venv `/tmp/opencode/ref-issue-18-venv`)
+- `python -m pytest -q` → **362 passed** (355 prior + 7 new).
+- `python -m compileall -q src tests` → OK.
+- `git diff --check` → clean.
+
+### Preserved
+Issue #15 cooldown/local-transcribe, direct-playlist full expansion,
+discovered-playlist link-only recording, `references.md` integrity, existing
+`added/exists/skipped/error` response semantics, 50-link cap and safe-link
+filtering.

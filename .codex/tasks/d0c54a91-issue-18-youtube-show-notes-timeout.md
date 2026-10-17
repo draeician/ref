@@ -1,7 +1,7 @@
 # [fix] Issue #18 — ref-api show-note fan-out exceeds client timeout
 
 - **Task ID:** d0c54a91
-- **State:** IMPLEMENTED by OpenCode — code + deterministic regressions + docs committed on the feature branch; ONE draft PR opened; awaiting independent architect QA before any merge/deploy.
+- **State:** IN-REVIEW (not QA-approved) — initial implementation was QA-rejected with five blocking defects; corrections implemented in commit `559767654a117dcc20564a3f4f39ab321476d20e` per corrective task `7e4c9b12`, awaiting independent architect QA before any merge/deploy.
 - **Role:** Coder (OpenCode), with independent architect QA before merge.
 - **Issue:** https://github.com/draeician/ref/issues/18
 - **Branch:** `fix/issue-18-youtube-show-notes-timeout` (cut from protected `main` at `799b10f28dd3776a8d9904509d166368e289bb7c`).
@@ -137,3 +137,27 @@ existing `_write_lock`.
 **Rollback.** Revert to `main` `799b10f28dd3776a8d9904509d166368e289bb7c` restores
 the prior synchronous behavior. The new queue state lives under
 `~/references/show_notes_queue/` (never in git) and is inert with old code.
+
+## QA corrections (OpenCode, task 7e4c9b12)
+
+Architect QA rejected the initial implementation with five blocking defects. All
+five were corrected in commit `559767654a117dcc20564a3f4f39ab321476d20e` and
+seven deterministic regressions were added:
+
+1. **Concurrency** — `_write_lock` no longer held across slow provider/network
+   I/O; a CLI-level `_archive_lock` serializes only the short archive read/write
+   critical sections, and stdout capture is thread-local. A second independent
+   `POST /urls` returns while the worker is stuck in slow child work.
+2. **Discovery off the parent path** — `process_one` enqueues a `discover` job;
+   the worker fetches the card and batch-enqueues `ingest` jobs. Parent returns
+   independently of a stalled/uncached `read_video_card`.
+3. **Fail-closed queue** — corrupt/unreadable/schema-invalid `jobs.json` raises
+   `QueueCorruptError` and is never overwritten; `/queue` exposes `corrupt`.
+4. **Bounded history + dedup** — done work is not re-enqueued (failed jobs may
+   retry), terminal history is compacted, and children are batch-enqueued.
+5. **Worker lifecycle fence** — `stop()` leaves the singleton set while a slow
+   drain is still in flight so `start()` cannot spawn a duplicate worker.
+
+Full suite **362 passed** (355 prior + 7 new); `compileall` and `git diff --check`
+clean. See `.codex/tasks/7e4c9b12-issue-18-qa-corrections.md` for the detailed
+evidence.
