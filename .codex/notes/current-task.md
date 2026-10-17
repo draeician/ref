@@ -1,21 +1,19 @@
 # Current task — ref-cli
 
-- **State:** Issue #18 draft PR #19 **FINAL ARCHITECT QA REQUIRES TWO NARROW CORRECTIONS**; do not merge/deploy. Previous second-QA P0 archive integrity, P0 typical queue corruption, and P1 worker restart findings are **source-review accepted** at code SHA `586ef80ddd57174449ddb04e2239de4470811639`, final reviewed PR SHA `3ea816272c71723d4c16b494c3a7bf1411118812`. The current outstanding findings concern non-finite persisted queue deadlines and cancellation of a pending worker restart after another shutdown.
-- **ACTIVE canonical corrective task:** [9b62e0c4 — queue timestamp validation and shutdown fence](../tasks/9b62e0c4-issue-18-final-queue-lifecycle-qa.md) (OPEN).
+- **State:** Issue #18 draft PR #19 **two narrow corrections IMPLEMENTED, awaiting independent architect QA**; do not merge/deploy. Both final-QA findings are corrected on the branch: (1) non-finite persisted queue timestamps (`NaN`/`Infinity`/`-Infinity`/`1e309`) now fail closed via `math.isfinite`; (2) `stop_show_notes_worker` cancels a pending worker restart so a second shutdown cannot resurrect the worker. Previous second-QA P0 archive integrity, P0 typical queue corruption, and P1 worker restart findings remain source-review accepted.
+- **ACTIVE canonical corrective task:** [9b62e0c4 — queue timestamp validation and shutdown fence](../tasks/9b62e0c4-issue-18-final-queue-lifecycle-qa.md) (IMPLEMENTED; awaiting independent QA).
 - **Prior tasks:** [4f29b6c1](../tasks/4f29b6c1-issue-18-qa-archive-persistence-lifecycle.md) (corrected/reviewed), [7e4c9b12](../tasks/7e4c9b12-issue-18-qa-corrections.md), [d0c54a91](../tasks/d0c54a91-issue-18-youtube-show-notes-timeout.md).
 - **Issue:** https://github.com/draeician/ref/issues/18.
 - **Development:** `fix/issue-18-youtube-show-notes-timeout`, existing [draft PR #19](https://github.com/draeician/ref/pull/19), base `main` at `799b10f28dd3776a8d9904509d166368e289bb7c`. No merge.
 - **Handoff:** [agent-handoff.md](agent-handoff.md).
 
-## Independent verification of 4f29b6c1 corrections
+## Implementation of 9b62e0c4 corrections
 
-- PR/dev head independently verified `3ea816272c71723d4c16b494c3a7bf1411118812`; application code `586ef80ddd57174449ddb04e2239de4470811639`. Exact GitHub Actions PR run https://github.com/draeician/ref/actions/runs/39002061973 SUCCESS; job log **372 passed, 1 warning in 10.68s**. OpenCode reports local compileall and diff-check, not independently executed by architect.
-- **Previous blocker A resolved:** `src/ref_cli/archive_lock.py` shared process-local `RLock`; enrichment gather+whole-file rewrite now under same lock as append and `update_reference_entry`; `update_transcript` fetches provider outside lock, re-reads/commits under it. Deterministic archive-rewrite/append regression inspects actual archive file.
-- **Previous blocker B resolved:** `ShowNotesQueue._load` no longer marks healthy before validation and catches malformed JSON/UTF-8/type conversions into corrupt read-only state; regression asserts byte retention.
-- **Previous blocker C resolved for stop→start:** old worker's exit hands off to a successor when pending restart is set; new regression verifies pending jobs resume without simultaneous drain.
-- **New narrow blocker 1:** parseable `NaN`/`Infinity` values in persisted `next_attempt_at` are accepted as valid and can strand queued work forever. `_ts` must reject non-finite numbers, fail closed, preserve original bytes, and gain deterministic tests.
-- **New narrow blocker 2:** worker `_restart_pending` remains set after a *second* stop request. stop→start→stop→release can spawn a successor after the latest shutdown, causing archive work after service shutdown. Cancel pending restart on stop and test both lifecycle sequences.
-- Production still runs the previous issue #15 release and #18 has not been approved for rollout.
+- **Finding 1 (non-finite timestamps):** `ShowNotesQueue._normalize_job._ts` rejects non-finite values via `math.isfinite` (NaN/Infinity/-Infinity/`1e309`→`inf`), fail-closed, original `jobs.json` bytes preserved. Generated writes already use finite `time.time()`/bounded delays.
+- **Finding 2 (pending restart cancel):** `stop_show_notes_worker` clears `_restart_pending` under `_worker_lock`; a second shutdown cancels the successor handoff. Existing stop→start→release successor handoff preserved.
+- **Fail-before/pass-after verified:** 12 non-finite timestamp fixtures + `test_second_stop_cancels_pending_restart` FAIL without the guards, PASS after.
+- **Checks (local, Python 3.12.3):** `pytest -q` → **389 passed, 1 warning** (372 prior + 17 new); `compileall -q src tests get_transcript.py` OK; `git diff --check` clean.
+- Production still runs the previous issue #15 release; #18 has not been approved for rollout.
 
 ## Authorization
 
@@ -23,4 +21,4 @@ OpenCode may implement/code-test on isolated branch and update existing draft PR
 
 ## Exactly one next step
 
-OpenCode: execute task `9b62e0c4`, run full checks and exact-final-SHA PR CI, then return `[REVIEW-REQUEST]` for independent architect QA.
+OpenCode: push the two corrections, update draft PR #19, verify exact-final-SHA PR CI, then return `[REVIEW-REQUEST]` for independent architect QA.

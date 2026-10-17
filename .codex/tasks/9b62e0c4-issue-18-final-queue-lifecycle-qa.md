@@ -1,7 +1,7 @@
 # [fix] Issue #18 — final queue time validation and worker shutdown fence
 
 - **Task ID:** 9b62e0c4
-- **State:** OPEN — two narrow release blockers after independent review of second-QA corrections.
+- **State:** IMPLEMENTED — both narrow release blockers corrected on draft PR #19; awaiting independent architect QA (no merge/deploy).
 - **PR:** https://github.com/draeician/ref/pull/19 (SAME draft PR; no new PR/branch)
 - **Branch:** `fix/issue-18-youtube-show-notes-timeout`
 - **Reviewed application SHA:** `586ef80ddd57174449ddb04e2239de4470811639`
@@ -46,3 +46,24 @@
 ## Exactly one next step
 
 OpenCode: implement these two narrow corrections on existing draft PR #19 and return an exact-final-SHA `[REVIEW-REQUEST]`.
+
+## Implementation (OpenCode, 2026-10-17)
+
+Both findings corrected on `fix/issue-18-youtube-show-notes-timeout`; draft PR #19 updated (no new PR/branch, no main merge).
+
+- **Finding 1** — `src/ref_api/show_notes_queue.py`: `_normalize_job._ts` now rejects any non-finite value via `math.isfinite` (NaN, Infinity, -Infinity, and `1e309` which `json.loads` parses as `inf`), raising `ValueError` inside the existing fail-closed `_load` boundary → queue marked corrupt, original `jobs.json` bytes preserved, `enqueue`/`recover` raise `QueueCorruptError`. Generated writes already use finite `time.time()`/bounded retry delays, so no writer change was needed.
+- **Finding 2** — `src/ref_api/service.py`: `stop_show_notes_worker` now clears `_restart_pending` (under `_worker_lock`, alongside the identity read) so a second shutdown cancels a pending successor handoff; the draining worker's `_worker_exited` clears the singleton instead of spawning a successor. Worker identity/generation fencing is unchanged (`_worker_exited` still checks `_worker is worker`). The existing stop→start→release successor-handoff path is preserved.
+
+### Regression evidence (fail-before → pass-after)
+- New `tests/test_show_notes_queue.py`: 12 non-finite fixtures (`NaN`/`Infinity`/`-Infinity`/`1e309` × `next_attempt_at`/`enqueued_at`/`updated_at`) + 4 finite-timestamp loads-clean fixtures. All 12 non-finite cases FAIL when the `math.isfinite` guard is removed (queue not corrupt), PASS after.
+- New `tests/test_show_notes_worker.py::test_second_stop_cancels_pending_restart`: stop→start→stop→release asserts no successor (`_worker is None`, zero worker threads, queued job stays pending). FAILS when `_restart_pending = False` is removed from `stop_show_notes_worker`; PASSES after. Existing `test_worker_resumes_after_timed_out_stop_and_restart` (successor drains) still passes.
+
+### Checks (local, Python 3.12.3)
+- `python -m pytest -q` → **389 passed, 1 warning** (372 prior + 17 new).
+- `python -m compileall -q src tests get_transcript.py` → OK.
+- `git diff --check` → clean.
+
+### Commits
+- `bdd2916` `[fix] Reject non-finite queue timestamps; cancel pending worker restart on stop` (application + tests).
+- Follow-up `[docs]` commit records this task/current-task/handoff.
+

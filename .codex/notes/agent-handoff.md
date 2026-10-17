@@ -1,10 +1,15 @@
 # Agent handoff — ref-cli
 
-## ACTIVE — Issue #18: third independent QA review, two narrow corrections outstanding
+## ACTIVE — Issue #18: final two narrow corrections IMPLEMENTED, awaiting independent QA
 
-- **Current status:** CHANGES REQUIRED, **no merge or production deploy** for [draft PR #19](https://github.com/draeician/ref/pull/19). Previous second-QA corrections are code-reviewed as implemented on application SHA `586ef80ddd57174449ddb04e2239de4470811639` / reviewed remote SHA `3ea816272c71723d4c16b494c3a7bf1411118812`. Protected `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c`. The prior issue #15 cooldown is present on minion; this issue #18 queue change is NOT installed.
-- **GitHub CI independently checked:** exact reviewed SHA https://github.com/draeician/ref/actions/runs/39002061973 SUCCESS; direct pytest job log **372 passed, 1 warning in 10.68s**. OpenCode reported local compileall/diff-check, not independently executed by architect.
-- **Resolved verified blockers:** `src/ref_cli/archive_lock.py` provides shared process-local RLock; enrichment gathered whole-file commits and transcript update commits now serialize with appends while long provider calls run outside critical section. `ShowNotesQueue._load` correctly fails closed for invalid UTF8/JSON and malformed typical schema, preserving original file bytes. Worker stop→start pending handoff now resumes draining. New `tests/test_archive_integrity.py` verifies genuine row retention under concurrency; focused queue and lifecycle tests exist. Preserve all these accepted improvements.
+- **Current status:** both remaining QA blockers corrected on [draft PR #19](https://github.com/draeician/ref/pull/19); **no merge or production deploy**. Previous second-QA corrections remain code-reviewed as implemented on application SHA `586ef80ddd57174449ddb04e2239de4470811639` / reviewed remote SHA `3ea816272c71723d4c16b494c3a7bf1411118812`. Protected `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c`. The prior issue #15 cooldown is present on minion; this issue #18 queue change is NOT installed.
+- **This cycle's fixes (task 9b62e0c4):**
+  1. `ShowNotesQueue._normalize_job._ts` rejects non-finite persisted timestamps via `math.isfinite` (NaN/Infinity/-Infinity/`1e309`→`inf`), fail-closed, preserving original `jobs.json` bytes.
+  2. `stop_show_notes_worker` clears `_restart_pending` under `_worker_lock`, so a second shutdown cancels a pending successor handoff and no worker resurrects after the latest stop.
+- **Fail-before/pass-after verified** (failures observed with guards removed, passes after): 12 non-finite timestamp fixtures + `test_second_stop_cancels_pending_restart`; existing `test_worker_resumes_after_timed_out_stop_and_restart` still passes.
+- **Local checks (Python 3.12.3):** `pytest -q` → **389 passed, 1 warning** (372 prior + 17 new); `compileall -q src tests get_transcript.py` OK; `git diff --check` clean. Local commit `bdd2916` (fix) + follow-up docs commit.
+- **GitHub CI (prior accepted code, exact reviewed SHA):** https://github.com/draeician/ref/actions/runs/39002061973 SUCCESS; **372 passed, 1 warning in 10.68s**. This cycle's exact-final-SHA CI is recorded after push.
+- **Resolved verified blockers (preserved):** `src/ref_cli/archive_lock.py` shared process-local RLock; enrichment gathered whole-file commits and transcript update commits serialize with appends while long provider calls run outside the critical section. `ShowNotesQueue._load` fails closed for invalid UTF8/JSON and malformed schema, preserving original file bytes. Worker stop→start pending handoff resumes draining. `tests/test_archive_integrity.py` verifies genuine row retention under concurrency.
 
 ### CURRENT canonical task
 
@@ -21,7 +26,7 @@
 
 ## Exactly one recommended next step
 
-OpenCode: implement two corrections from `9b62e0c4` on existing draft PR #19, run deterministic and full checks, and request independent architect QA on exact final remote SHA.
+OpenCode: push the two 9b62e0c4 corrections on existing draft PR #19, update the PR body, verify CI on the exact final remote SHA, and return `[REVIEW-REQUEST]` for independent architect QA. Do not merge or deploy.
 
 ## Archived issue #15 history (historical, may contain superseded state assertions)
 
