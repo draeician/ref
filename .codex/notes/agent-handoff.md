@@ -1,25 +1,27 @@
 # Agent handoff — ref-cli
 
-## ACTIVE — Issue #18: second-QA corrections IMPLEMENTED, awaiting independent re-review
+## ACTIVE — Issue #18: third independent QA review, two narrow corrections outstanding
 
-- **Verdict: no merge or production deployment** until independent architect re-review passes. The three blockers from the second review (archive integrity, complete queue validation, worker resume) are corrected with deterministic fail-before/pass-after regressions. `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c`. Existing PR https://github.com/draeician/ref/pull/19 remains open/draft; use THIS one PR only.
-- **Reviewed (pre-correction) SHA:** `e83c468964db1e1cb600fb657cd446ab8bbcac99` (code `559767654a117dcc20564a3f4f39ab321476d20e`); prior CI run https://github.com/draeician/ref/actions/runs/39000511326 (362 passed).
-- **Canonical corrective task:** `.codex/tasks/4f29b6c1-issue-18-qa-archive-persistence-lifecycle.md` (IMPLEMENTED). `.codex/notes/current-task.md` points to it.
+- **Current status:** CHANGES REQUIRED, **no merge or production deploy** for [draft PR #19](https://github.com/draeician/ref/pull/19). Previous second-QA corrections are code-reviewed as implemented on application SHA `586ef80ddd57174449ddb04e2239de4470811639` / reviewed remote SHA `3ea816272c71723d4c16b494c3a7bf1411118812`. Protected `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c`. The prior issue #15 cooldown is present on minion; this issue #18 queue change is NOT installed.
+- **GitHub CI independently checked:** exact reviewed SHA https://github.com/draeician/ref/actions/runs/39002061973 SUCCESS; direct pytest job log **372 passed, 1 warning in 10.68s**. OpenCode reported local compileall/diff-check, not independently executed by architect.
+- **Resolved verified blockers:** `src/ref_cli/archive_lock.py` provides shared process-local RLock; enrichment gathered whole-file commits and transcript update commits now serialize with appends while long provider calls run outside critical section. `ShowNotesQueue._load` correctly fails closed for invalid UTF8/JSON and malformed typical schema, preserving original file bytes. Worker stop→start pending handoff now resumes draining. New `tests/test_archive_integrity.py` verifies genuine row retention under concurrency; focused queue and lifecycle tests exist. Preserve all these accepted improvements.
 
-### Blocker A — archive integrity (DONE)
-- New `src/ref_cli/archive_lock.py` (`archive_lock = threading.RLock()`); `cli.py` aliases it as `_archive_lock`. `references_format.apply_row_updates` + `migrate_references_file` and `enrichment.enrich_youtube_reference` (gather+apply under one lock, network outside) now commit under the shared lock. `update_transcript` refactored: snapshot + network fetch outside the lock, read/decide/write commit under it (re-reads current state); `service.update_transcript_for_url` no longer holds `_write_lock`.
-- Regression `tests/test_archive_integrity.py` verified fail-before (lock neutered → append clobbered) / pass-after.
+### CURRENT canonical task
 
-### Blocker B — queue validation (DONE)
-- `show_notes_queue._load` reads raw bytes, decodes/parses/validates under one fail-closed boundary; `_loaded` set only after success or explicit corrupt state; full per-field validation (id-consistency, kind, status, attempts, timestamps, url/url_key/parent_video_id/last_error). Original bytes preserved on every malformed path. Tests: 7 parametrized malformed fixtures + undecodable bytes + strict-reload id normalization (all byte-preserving).
+`.codex/tasks/9b62e0c4-issue-18-final-queue-lifecycle-qa.md` (OPEN); `.codex/notes/current-task.md` points to it. **Use SAME `fix/issue-18-youtube-show-notes-timeout` branch and existing draft PR #19**; no new PR.
 
-### Blocker C — worker resume (DONE)
-- `_restart_pending` flag + `_worker_exited` successor handoff; `start_show_notes_worker()` marks pending restart while a prior worker is still draining; exiting worker hands off to a successor (never two draining workers); `stop_show_notes_worker()` joins outside the lock. Test `test_worker_resumes_after_timed_out_stop_and_restart`.
+1. **Non-finite queue deadline bypasses fail-closed:** `src/ref_api/show_notes_queue.py:_normalize_job` `_ts()` accepts JSON `NaN`, `Infinity`, `-Infinity`, `1e309`; `next_pending` then silently skips a `pending` job whose `next_attempt_at` is NaN/Infinity because comparison with `now` never becomes true. This is a durable-job availability/data-integrity defect. Reject nonfinite timestamps in one guarded fail-closed loader, preserve malformed file bytes, assert queue `corrupt` and `enqueue/recover` refusal with deterministic tests.
+2. **Pending restart survives latest shutdown:** `stop_show_notes_worker` does not cancel `_restart_pending`. A slow worker A: stop (timeout) → start (sets restart_pending) → stop again while A is blocked → release A will cause `_worker_exited` to launch successor B **with no active lifespan**, potentially processing queued URLs after shutdown. Cancel pending handoff on newest stop, with worker identity/generation fencing and deterministic Event tests for both stop→start→stop (no successor) and stop→start (must resume).
 
-### Gates and next step
-- `pytest -q` → **372 passed, 1 warning** (was 362); `compileall` clean; `git diff --check` clean.
-- **Remaining limitation (documented):** archive lock is process-local; a concurrent `ref` CLI writing directly to the same archive in a *separate OS process* is not serialized by it.
-- **Exactly one next step:** push the existing branch, verify exact-final-SHA PR CI green, and submit `[REVIEW-REQUEST]` with final SHA, CI link, and focused regression evidence.
+### Execution and safety
+
+- Read `.codex/AGENTS.md`, workflow guide, coder mode, active task and handoff before implementation. Use external WIP marker, isolated worktree; preserve all local unrelated changes. No inspection of `~/.ssh` secrets.
+- No direct push to main, no live minion production ingest, archive writes, pipx upgrade, service restart or deployment; **no #18 release authorization**. Preserve issue #15 cooldown/local-transcribe, parent quick response, direct playlist vs discovered link-only semantics, archive transaction lock and durable job queue.
+- Add fail-before/pass-after regressions, run `python -m pytest -q`, `python -m compileall -q src tests get_transcript.py`, `git diff --check`; update task and handoff, push only feature branch, verify CI on **actual final SHA**. Return `[REVIEW-REQUEST]` with exact SHA/log and limitations. Existing prior QA/test reports should not be presented as the new code's validation.
+
+## Exactly one recommended next step
+
+OpenCode: implement two corrections from `9b62e0c4` on existing draft PR #19, run deterministic and full checks, and request independent architect QA on exact final remote SHA.
 
 ## Archived issue #15 history (historical, may contain superseded state assertions)
 
