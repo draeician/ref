@@ -1,7 +1,7 @@
 # [fix] Issue #18 — second independent QA: archive consistency, queue validation, worker recovery
 
 - **Task ID:** 4f29b6c1
-- **State:** OPEN — 3 confirmed source-level blockers of issue #18 PR #19, awaiting OpenCode corrections and independent re-review.
+- **State:** IMPLEMENTED — 3 confirmed source-level blockers corrected on PR #19; awaiting independent re-review.
 - **Issue:** https://github.com/draeician/ref/issues/18
 - **Existing draft PR:** https://github.com/draeician/ref/pull/19 — use this ONE PR, no new branch/PR.
 - **Branch:** `fix/issue-18-youtube-show-notes-timeout`
@@ -60,3 +60,41 @@ In the first two cases, `_loaded` remains True but `_corrupt=False`; **the next 
 ## Exactly one next step
 
 OpenCode: implement the 3 corrective findings on existing draft PR #19 with deterministic fail-before/pass-after regressions; then request architect review on the exact new SHA.
+
+---
+
+## Implementation results (OpenCode)
+
+- **P0 archive integrity (DONE).** New shared lock `src/ref_cli/archive_lock.py`
+  (`archive_lock = threading.RLock()`), imported as `_archive_lock` in `cli.py`
+  and used by `references_format.apply_row_updates` / `migrate_references_file`
+  and `enrichment.enrich_youtube_reference` (gather+apply under one lock; network
+  stays outside). `update_transcript` refactored: snapshot + network fetch outside
+  the lock, read/decide/write commit under the lock (re-reads current state so a
+  concurrent append is not clobbered); `service.update_transcript_for_url` no
+  longer wraps the call in `_write_lock`.
+- **P0 queue validation (DONE).** `show_notes_queue._load` reads raw bytes,
+  decodes, parses and fully validates under one fail-closed boundary; `_loaded` is
+  set only after complete success or an explicit corrupt state. New
+  `_parse_jobs`/`_normalize_job` validate id-consistency, url, status, kind,
+  attempts, url_key, parent_video_id, last_error and all three timestamps
+  (present-but-invalid → corrupt; missing optional → default).
+- **P1 worker lifecycle (DONE).** `_restart_pending` flag + `_worker_exited`
+  successor handoff: `start_show_notes_worker()` marks a pending restart when the
+  previous worker is still draining; the exiting worker hands off to a successor
+  (never two draining workers). `stop_show_notes_worker()` joins outside the lock.
+- **Regression tests.** `tests/test_archive_integrity.py`
+  (`test_enrichment_rewrite_does_not_drop_concurrent_append`), expanded
+  `tests/test_show_notes_queue.py` (7 parametrized malformed-field fixtures +
+  undecodable bytes + strict-reload id normalization, all asserting byte-for-byte
+  preservation after a failed enqueue), and reworked
+  `tests/test_show_notes_worker.py::test_worker_resumes_after_timed_out_stop_and_restart`.
+- **Fail-before/pass-after.** `test_archive_integrity` verified to FAIL with the
+  lock neutered (append completes during the pause and is clobbered) and PASS with
+  the lock. Queue fixtures assert the architect's `attempts="bad"` and unhashable
+  `status` cases preserve original bytes.
+- **Gates:** `pytest -q` → **372 passed, 1 warning** (was 362); `compileall` clean;
+  `git diff --check` clean.
+- **Remaining limitation (documented):** the archive lock is process-local; a
+  concurrent `ref` CLI writing directly to the same archive in a *separate OS
+  process* is not serialized by it (pre-existing single-writer-on-API-host model).

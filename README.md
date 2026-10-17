@@ -382,6 +382,15 @@ successful parent video recording remains intact. A video already in the archive
 whose show notes were already discovered is not rediscovered or re-ingested on a
 repeat submission; only failed children are retried.
 
+All writes to `references.md` — appends, transcript updates, and the whole-file
+rewrites driven by enrichment (`@meta` stamping / unavailable-video cleanup) —
+commit their read/decide/write section under a single process-local archive lock,
+so concurrent requests and the background worker cannot silently lose each
+other's rows. Slow network/provider work runs outside that lock. The lock is
+**process-local**: it serializes threads inside `ref-api`, but a `ref` CLI
+command writing directly to the same archive in a *separate OS process* is not
+coordinated by it (the single-writer-on-the-API-host model).
+
 After upgrading the pipx-installed `ref-cli`, restart the user service:
 
 ```bash
