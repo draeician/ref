@@ -1,7 +1,7 @@
 # [fix] Issue #18 — final queue time validation and worker shutdown fence
 
 - **Task ID:** 9b62e0c4
-- **State:** IMPLEMENTED — both narrow release blockers corrected on draft PR #19; awaiting independent architect QA (no merge/deploy).
+- **State:** **IMPLEMENTED AND INDEPENDENT ARCHITECT QA PASSED** at exact reviewed PR SHA `8711cf473b73c8fee34e4c635efe78dd109926ba`; waiting for fresh user authorization before any merge/deployment.
 - **PR:** https://github.com/draeician/ref/pull/19 (SAME draft PR; no new PR/branch)
 - **Branch:** `fix/issue-18-youtube-show-notes-timeout`
 - **Reviewed application SHA:** `586ef80ddd57174449ddb04e2239de4470811639`
@@ -10,6 +10,12 @@
 - **CI:** https://github.com/draeician/ref/actions/runs/39002061973 — independently verified SUCCESS, exact reviewed SHA, actual pytest log **372 passed, 1 warning in 10.68s**.
 - **Prior canonical tasks:** `d0c54a91`, `7e4c9b12`, `4f29b6c1`. The previous three P0/P1 issues are **resolved on code review**: real whole-file archive rewrites use shared `archive_lock`, malformed typical queue records fail closed, and timed-out stop/restart can hand off worker.
 - **Verdict:** CHANGES REQUIRED solely for two remaining correctness gaps; no merge or production deployment authorized.
+
+## Final independent architect QA verdict (2026-10-17 UTC)
+
+**PASSED** at app/tests commit `bdd2916`, reviewed PR HEAD `8711cf473b73c8fee34e4c635efe78dd109926ba`. Both requested corrections are present and source-reviewed; deterministic regression tests cover nonfinite persisted timestamps plus worker stop→start→stop cancellation, while the earlier stop→start resumption remains covered. Exact-SHA GitHub Actions https://github.com/draeician/ref/actions/runs/39002946373 SUCCESS; independently checked pytest job log **389 passed, 1 warning in 11.84s**. Review comment: https://github.com/draeician/ref/pull/19#issuecomment-6229705014. The connected GitHub user is PR author and GitHub disallows formal self-APPROVE (422), so architect approval was posted as a review comment.
+
+**No issue #18 merge or production deployment authorized yet.** PR #19 remains draft/open; prior issue #15 authorization does not apply. Keep previously documented risks: process-local archive lock does not serialize a separate OS process; Reddit/community child nested processing remains; stop-in-flight RemoteDisconnected is separate and not fixed. The below problem statement is preserved as historical QA rationale.
 
 ## Finding 1 — Non-finite persisted timestamps silently strand queue jobs
 
