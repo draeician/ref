@@ -4,7 +4,7 @@
 - **Canonical task:** [d0c54a91 — bounded, reliable YouTube show-note child processing](../tasks/d0c54a91-issue-18-youtube-show-notes-timeout.md).
 - **Issue:** https://github.com/draeician/ref/issues/18
 - **New isolated implementation branch:** `fix/issue-18-youtube-show-notes-timeout`, created from merged `main` `799b10f28dd3776a8d9904509d166368e289bb7c`.
-- **Draft PR:** ONE draft PR to `main` with `Fixes #18` (exact number/URL + final SHA in [agent-handoff.md](agent-handoff.md)).
+- **Draft PR:** **PR #19** https://github.com/draeician/ref/pull/19 (draft, `Fixes #18`, against `main`). Final head SHA + CI evidence in [agent-handoff.md](agent-handoff.md).
 - **Canonical agent handoff:** [agent-handoff.md](agent-handoff.md) (latest section at top; archived issue #15 history below).
 - **Previous release:** issue #15 cooldown code merged with PR #16 on main commit `799b10f28dd3776a8d9904509d166368e289bb7c`; post-merge CI passed 336 tests; issue #17 tracks the operational deployment. On 2026-10-16 the operator's `ref --version` and `/health` **both** reported `1.6.12b1.dev79+g799b10f28`, proving new cooldown code active in running production. Operator journal observed exactly one 3600-second cooldown after an IP block.
 
