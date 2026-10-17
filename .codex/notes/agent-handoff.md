@@ -1,32 +1,19 @@
 # Agent handoff — ref-cli
 
-## ACTIVE — Issue #18: final two narrow corrections IMPLEMENTED, awaiting independent QA
+## ACTIVE — Issue #18: architect QA PASSED, explicit user release approval required
 
-- **Current status:** both remaining QA blockers corrected on [draft PR #19](https://github.com/draeician/ref/pull/19); **no merge or production deploy**. Previous second-QA corrections remain code-reviewed as implemented on application SHA `586ef80ddd57174449ddb04e2239de4470811639` / reviewed remote SHA `3ea816272c71723d4c16b494c3a7bf1411118812`. Protected `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c`. The prior issue #15 cooldown is present on minion; this issue #18 queue change is NOT installed.
-- **This cycle's fixes (task 9b62e0c4):**
-  1. `ShowNotesQueue._normalize_job._ts` rejects non-finite persisted timestamps via `math.isfinite` (NaN/Infinity/-Infinity/`1e309`→`inf`), fail-closed, preserving original `jobs.json` bytes.
-  2. `stop_show_notes_worker` clears `_restart_pending` under `_worker_lock`, so a second shutdown cancels a pending successor handoff and no worker resurrects after the latest stop.
-- **Fail-before/pass-after verified** (failures observed with guards removed, passes after): 12 non-finite timestamp fixtures + `test_second_stop_cancels_pending_restart`; existing `test_worker_resumes_after_timed_out_stop_and_restart` still passes.
-- **Local checks (Python 3.12.3):** `pytest -q` → **389 passed, 1 warning** (372 prior + 17 new); `compileall -q src tests get_transcript.py` OK; `git diff --check` clean. Local commit `bdd2916` (fix) + follow-up docs commit.
-- **GitHub CI (prior accepted code, exact reviewed SHA):** https://github.com/draeician/ref/actions/runs/39002061973 SUCCESS; **372 passed, 1 warning in 10.68s**. This cycle's exact-final-SHA CI is recorded after push.
-- **Resolved verified blockers (preserved):** `src/ref_cli/archive_lock.py` shared process-local RLock; enrichment gathered whole-file commits and transcript update commits serialize with appends while long provider calls run outside the critical section. `ShowNotesQueue._load` fails closed for invalid UTF8/JSON and malformed schema, preserving original file bytes. Worker stop→start pending handoff resumes draining. `tests/test_archive_integrity.py` verifies genuine row retention under concurrency.
-
-### CURRENT canonical task
-
-`.codex/tasks/9b62e0c4-issue-18-final-queue-lifecycle-qa.md` (OPEN); `.codex/notes/current-task.md` points to it. **Use SAME `fix/issue-18-youtube-show-notes-timeout` branch and existing draft PR #19**; no new PR.
-
-1. **Non-finite queue deadline bypasses fail-closed:** `src/ref_api/show_notes_queue.py:_normalize_job` `_ts()` accepts JSON `NaN`, `Infinity`, `-Infinity`, `1e309`; `next_pending` then silently skips a `pending` job whose `next_attempt_at` is NaN/Infinity because comparison with `now` never becomes true. This is a durable-job availability/data-integrity defect. Reject nonfinite timestamps in one guarded fail-closed loader, preserve malformed file bytes, assert queue `corrupt` and `enqueue/recover` refusal with deterministic tests.
-2. **Pending restart survives latest shutdown:** `stop_show_notes_worker` does not cancel `_restart_pending`. A slow worker A: stop (timeout) → start (sets restart_pending) → stop again while A is blocked → release A will cause `_worker_exited` to launch successor B **with no active lifespan**, potentially processing queued URLs after shutdown. Cancel pending handoff on newest stop, with worker identity/generation fencing and deterministic Event tests for both stop→start→stop (no successor) and stop→start (must resume).
-
-### Execution and safety
-
-- Read `.codex/AGENTS.md`, workflow guide, coder mode, active task and handoff before implementation. Use external WIP marker, isolated worktree; preserve all local unrelated changes. No inspection of `~/.ssh` secrets.
-- No direct push to main, no live minion production ingest, archive writes, pipx upgrade, service restart or deployment; **no #18 release authorization**. Preserve issue #15 cooldown/local-transcribe, parent quick response, direct playlist vs discovered link-only semantics, archive transaction lock and durable job queue.
-- Add fail-before/pass-after regressions, run `python -m pytest -q`, `python -m compileall -q src tests get_transcript.py`, `git diff --check`; update task and handoff, push only feature branch, verify CI on **actual final SHA**. Return `[REVIEW-REQUEST]` with exact SHA/log and limitations. Existing prior QA/test reports should not be presented as the new code's validation.
+- **Application QA verdict:** **PASSED / ready for release planning** on exact reviewed feature SHA `8711cf473b73c8fee34e4c635efe78dd109926ba` (app/tests commit `bdd2916`). Earlier three QA cycles now accepted; no identified blocker in the reviewed code scope. Issue https://github.com/draeician/ref/issues/18; same draft https://github.com/draeician/ref/pull/19. `main` remains `799b10f28dd3776a8d9904509d166368e289bb7c` and production remains previous issue #15 build.
+- **PR review comment:** https://github.com/draeician/ref/pull/19#issuecomment-6229705014. GitHub REST returned 422 when submitting formal APPROVE because connected account is also PR author; the detailed independent architect QA approval was successfully posted as a PR comment instead.
+- **Exact-source CI:** https://github.com/draeician/ref/actions/runs/39002946373 SUCCESS on `8711cf473b73c8fee34e4c635efe78dd109926ba`, actual pytest log `389 passed, 1 warning in 11.84s`. OpenCode reported compileall and git diff --check clean, architect did not independently run those checks.
+- **What was approved:** parent `POST /urls` captures parent and queues async YouTube show-note `discover`; worker performs metadata and bounded child ingestion offline; discovered playlists link-only but direct playlists expanded; network provider work outside process-local archive lock; `references.md` append and real whole-file enrichment/transcript/migration read-modify-write commit under shared RLock; persisted jobs fail closed on bad structure/UTF8/JSON/NaN/Infinity/1e309, original bytes preserved; batch enqueue, bounded retries/history; worker stop→start handoff resumes queue, and stop→start→stop does NOT resurrect worker. `GET /queue` shows queue counts/corrupt state. Issue #15 IP cooldown and local-transcribe preserved.
+- **Remaining documented limitations:** `archive_lock` is process-local and does not coordinate a second OS process writing directly to `references.md`; discovered Reddit/community-post children may still invoke legacy nested recursion; the separate systemd stop-in-flight `RemoteDisconnected` defect was not fixed. Do not conflate.
+- **Canonical docs:** `.codex/notes/current-task.md` updated to QA PASSED. Original task `d0c54a91`, corrections `7e4c9b12`, `4f29b6c1` and `9b62e0c4` resolved at code QA level.
+- **Authorization boundary:** The issue #15 conditional user authorization does NOT apply to issue #18. **Do not mark PR ready, merge, install packages, stop/restart `ref-api`, modify `~/references` or production data, ingest live URLs, or inspect secrets until the user explicitly authorizes this rollout.**
+- **When authorized:** recheck the then-current PR SHA and exact PR CI, merge via GitHub PR (not direct push), verify exact merged `main` CI, then hand off idle-window minion cutover with `ref-cli[api] @ git+https://github.com/draeician/ref.git@<EXACT_MERGE_SHA>` install, live backups of `references.md` and `show_notes_queue/jobs.json` if it exists, safe API-capable rollback to `799b10f28dd3776a8d9904509d166368e289bb7c`, `/health`, `ref --status`, `GET /queue`, and bounded clean journal inspection. Preserve WIP and archive data. Do not force stop in-flight requests.
 
 ## Exactly one recommended next step
 
-OpenCode: push the two 9b62e0c4 corrections on existing draft PR #19, update the PR body, verify CI on the exact final remote SHA, and return `[REVIEW-REQUEST]` for independent architect QA. Do not merge or deploy.
+User: decide whether to authorize merge and production deployment of QA-approved PR #19. OpenCode should take no additional production/release actions until that decision.
 
 ## Archived issue #15 history (historical, may contain superseded state assertions)
 
