@@ -507,10 +507,19 @@ def start_show_notes_worker() -> None:
 
 
 def stop_show_notes_worker() -> None:
-    """Stop the background show-note worker (idempotent)."""
-    global _worker
+    """Stop the background show-note worker (idempotent).
+
+    A shutdown request also cancels any pending restart, so a worker that is
+    still draining on its way out does not hand off to a successor after the
+    *latest* shutdown (only a still-active lifespan may have requested restart).
+    Worker identity/generation fencing is handled by ``_worker_exited`` checking
+    ``_worker is worker`` before acting.
+    """
+    global _worker, _restart_pending
     with _worker_lock:
         worker = _worker
+        # A shutdown supersedes any earlier restart request.
+        _restart_pending = False
     if worker is None:
         return
     # Join outside the lock so the exiting thread can acquire it for its
@@ -522,8 +531,8 @@ def stop_show_notes_worker() -> None:
         if _worker is worker and fully_stopped:
             _worker = None
         # If the thread did not exit within the timeout (still in slow child
-        # work), leave ``_worker`` set; a later ``start`` marks a pending restart
-        # and the exiting thread hands off to a successor on its own.
+        # work), leave ``_worker`` set; ``_restart_pending`` is now False, so its
+        # eventual exit clears the singleton instead of spawning a successor.
 
 
 def process_many(inputs: List[str], force: bool = False) -> List[UrlResult]:

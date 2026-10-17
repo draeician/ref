@@ -269,6 +269,54 @@ def test_undecodable_queue_fails_closed_and_preserves_bytes(tmp_path):
     _assert_fail_closed_preserves_bytes(queue, raw)
 
 
+@pytest.mark.parametrize("field", ["next_attempt_at", "enqueued_at", "updated_at"])
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity", "1e309"])
+def test_nonfinite_timestamp_fails_closed_and_preserves_bytes(tmp_path, field, token):
+    """Python ``json.loads`` accepts NaN/Infinity/-Infinity and parses ``1e309``
+    as an infinite float. A non-finite persisted deadline must be rejected (fail
+    closed, bytes intact) rather than stranding a pending job forever."""
+    raw = (
+        '{"jobs": {"j1": {"id": "j1", "url": "https://example.org/a", '
+        '"kind": "ingest", "status": "pending", "attempts": 0, "'
+        + field
+        + '": '
+        + token
+        + "}}}"
+    ).encode("utf-8")
+    queue = _write_raw_jobs(tmp_path, raw)
+    _assert_fail_closed_preserves_bytes(queue, raw)
+
+
+@pytest.mark.parametrize("timestamp", [0, 0.0, 1234567890.5, 1750000000.123])
+def test_finite_timestamp_loads_clean(tmp_path, timestamp):
+    """Explicit finite timestamps (incl. integer 0) load without corruption."""
+    queue = _new_queue(tmp_path)
+    os.makedirs(queue.queue_dir, exist_ok=True)
+    with open(queue.jobs_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "jobs": {
+                    "j1": {
+                        "id": "j1",
+                        "url": "https://example.org/a",
+                        "kind": "ingest",
+                        "status": "pending",
+                        "attempts": 0,
+                        "next_attempt_at": timestamp,
+                        "enqueued_at": timestamp,
+                        "updated_at": timestamp,
+                    }
+                }
+            },
+            handle,
+        )
+    assert queue.is_corrupt() is False
+    jobs = {j["id"]: j for j in queue.jobs()}
+    assert jobs["j1"]["next_attempt_at"] == float(timestamp)
+    assert jobs["j1"]["enqueued_at"] == float(timestamp)
+    assert jobs["j1"]["updated_at"] == float(timestamp)
+
+
 def test_valid_queue_reloads_and_normalizes_id(tmp_path):
     """A well-formed queue survives strict validation and keeps id==outer key."""
     queue = _new_queue(tmp_path)

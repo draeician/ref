@@ -350,3 +350,85 @@ def test_worker_resumes_after_timed_out_stop_and_restart(isolated, monkeypatch):
         if worker is not None:
             worker._thread.join(timeout=5)
         service._worker = None
+
+
+def test_second_stop_cancels_pending_restart(isolated, monkeypatch):
+    """stop -> start -> stop -> release must NOT hand off to a successor.
+
+    The second shutdown cancels the pending restart, so the draining worker exits
+    cleanly and clears the singleton instead of spawning a new worker. This is the
+    narrow release blocker: without the cancel, ``_worker_exited`` would see a
+    still-set ``_restart_pending`` and resurrect the worker after the final stop.
+    """
+    slow_url = "https://example.org/slow"
+    other_url = "https://example.org/other"
+    release = threading.Event()
+    slow_started = threading.Event()
+    processed = []
+
+    def fake_process(url, force):
+        if url == slow_url:
+            slow_started.set()
+            release.wait(timeout=20)
+        processed.append(url)
+        print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
+
+    monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
+
+    original_stop = service._ShowNotesWorker.stop
+
+    def fast_stop(self, timeout=0.1):
+        return original_stop(self, timeout)
+
+    monkeypatch.setattr(service._ShowNotesWorker, "stop", fast_stop)
+
+    service._worker = None
+    service._restart_pending = False
+    try:
+        service.start_show_notes_worker()
+        first_worker = service._worker
+        service._get_queue().enqueue(slow_url)
+        assert slow_started.wait(timeout=5)
+
+        # First stop times out (worker stuck in slow child); reference retained.
+        service.stop_show_notes_worker()
+        assert service._worker is first_worker
+        assert service._restart_pending is False
+
+        # In-process restart while draining marks a pending restart.
+        service.start_show_notes_worker()
+        assert service._restart_pending is True
+
+        # Second stop must cancel that pending restart.
+        service.stop_show_notes_worker()
+        assert service._restart_pending is False
+        assert service._worker is first_worker
+
+        # Release the slow child; the worker exits WITHOUT spawning a successor.
+        release.set()
+        first_worker._thread.join(timeout=10)
+        assert not first_worker.is_alive()
+
+        # The singleton is cleared (no successor took over).
+        deadline = time.time() + 5
+        while service._worker is not None and time.time() < deadline:
+            time.sleep(0.05)
+        assert service._worker is None
+
+        worker_threads = [
+            t for t in threading.enumerate() if t.name == "ref-show-notes-worker"
+        ]
+        assert worker_threads == []
+
+        # No successor: newly queued work stays pending (never drained).
+        service._get_queue().enqueue(other_url)
+        time.sleep(0.3)
+        assert other_url not in processed
+    finally:
+        release.set()
+        service.stop_show_notes_worker()
+        worker = service._worker
+        if worker is not None:
+            worker._thread.join(timeout=5)
+        service._worker = None
+        service._restart_pending = False

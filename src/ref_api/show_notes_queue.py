@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -219,7 +220,13 @@ class ShowNotesQueue:
                 return now
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"job {job_id!r} has invalid {field} {value!r}")
-            return float(value)
+            result = float(value)
+            # ``json.loads`` accepts NaN/Infinity/-Infinity and parses ``1e309``
+            # as an infinite float; a non-finite deadline would silently strand a
+            # pending job forever (``NaN <= now`` is never true). Reject it.
+            if not math.isfinite(result):
+                raise ValueError(f"job {job_id!r} has non-finite {field} {value!r}")
+            return result
 
         return {
             "id": job_id,
