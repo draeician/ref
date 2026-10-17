@@ -1,10 +1,10 @@
 # Current task — ref-cli
 
-- **State:** NEW PRODUCTION LATENCY BUG **#18 OPEN**, root cause strongly localized to synchronous YouTube show-note child fan-out; **no new fix coded or deployed**. OpenCode implementation + draft PR required; independent architect QA before merge.
+- **State:** IMPLEMENTED on `fix/issue-18-youtube-show-notes-timeout` — parent API response decoupled from slow show-note children via a durable local queue; deterministic regressions added; ONE draft PR opened; **independent architect QA pending** (no merge/deploy).
 - **Canonical task:** [d0c54a91 — bounded, reliable YouTube show-note child processing](../tasks/d0c54a91-issue-18-youtube-show-notes-timeout.md).
 - **Issue:** https://github.com/draeician/ref/issues/18
 - **New isolated implementation branch:** `fix/issue-18-youtube-show-notes-timeout`, created from merged `main` `799b10f28dd3776a8d9904509d166368e289bb7c`.
-- **Draft PR:** Not yet opened; OpenCode to open ONE draft PR to `main` with `Fixes #18`.
+- **Draft PR:** ONE draft PR to `main` with `Fixes #18` (exact number/URL + final SHA in [agent-handoff.md](agent-handoff.md)).
 - **Canonical agent handoff:** [agent-handoff.md](agent-handoff.md) (latest section at top; archived issue #15 history below).
 - **Previous release:** issue #15 cooldown code merged with PR #16 on main commit `799b10f28dd3776a8d9904509d166368e289bb7c`; post-merge CI passed 336 tests; issue #17 tracks the operational deployment. On 2026-10-16 the operator's `ref --version` and `/health` **both** reported `1.6.12b1.dev79+g799b10f28`, proving new cooldown code active in running production. Operator journal observed exactly one 3600-second cooldown after an IP block.
 
@@ -23,4 +23,4 @@ OpenCode owns code. Use isolated worktree, WIP marker outside repo, preserve use
 
 ## Exactly one next step
 
-OpenCode: implement canonical task `d0c54a91` in the existing isolated feature branch and return a draft PR `[REVIEW-REQUEST]` with exact-SHA source/tests/CI evidence.
+Independent architect: review the issue #18 draft PR (exact head SHA in the handoff), verify CI, and decide on merge/deploy. OpenCode must not merge or deploy without a fresh specific approval.

@@ -1,11 +1,11 @@
 # [fix] Issue #18 — ref-api show-note fan-out exceeds client timeout
 
 - **Task ID:** d0c54a91
-- **State:** OPEN / READY FOR OPENCODE IMPLEMENTATION — architect diagnosed and queued; code NOT changed.
+- **State:** IMPLEMENTED by OpenCode — code + deterministic regressions + docs committed on the feature branch; ONE draft PR opened; awaiting independent architect QA before any merge/deploy.
 - **Role:** Coder (OpenCode), with independent architect QA before merge.
 - **Issue:** https://github.com/draeician/ref/issues/18
 - **Branch:** `fix/issue-18-youtube-show-notes-timeout` (cut from protected `main` at `799b10f28dd3776a8d9904509d166368e289bb7c`).
-- **PR:** Not yet created; OpenCode should create exactly ONE **draft** PR against `main` after implementation.
+- **PR:** ONE draft PR against `main` (exact number/URL recorded in `.codex/notes/agent-handoff.md` and current-task).
 - **Canonical notes:** `.codex/notes/current-task.md` and `.codex/notes/agent-handoff.md`.
 - **Priority:** High — confirmed production UX defect; no production deployment authorized for this new change.
 
@@ -78,3 +78,62 @@ Parent video success is no longer hostage to automatic 20–50 link fan-out; a s
 ## Exactly one next step
 
 OpenCode: implement task d0c54a91 on `fix/issue-18-youtube-show-notes-timeout`, open a single draft PR to `main`, and request independent code/CI review.
+
+---
+
+## Implementation (OpenCode, issue #18)
+
+**Approach.** The synchronous `_process_youtube_show_notes` loop was replaced with
+`_enqueue_youtube_show_notes`: the parent `process_url` records the video and the
+discovery step enqueues each discovered link into a durable local queue, then
+returns immediately with a summary that reports `queued=N` (never a misleading
+`complete`). A single daemon worker thread (started/stopped in the FastAPI
+lifespan) drains the queue, routing every child through `process_one` under the
+existing `_write_lock`.
+
+**New files / changed paths.**
+
+- `src/ref_api/show_notes_queue.py` (new) — file-backed, atomic-rewrite queue
+  (`<references>/show_notes_queue/jobs.json`), dedup by URL for unfinished jobs,
+  at-least-once `recover()` for `running` jobs, bounded retry/backoff up to
+  `MAX_ATTEMPTS=5`, explicit `done`/`failed` terminal states.
+- `src/ref_api/service.py` — enqueue path, `_suppress_playlist_expansion` flag,
+  worker thread + `_drain_show_notes_queue`, `queue_status()`.
+- `src/ref_api/app.py` — lifespan starts/stops the worker.
+- `src/ref_api/routes.py` + `schemas.py` — `GET /queue` status endpoint.
+- `src/ref_cli/cli.py` — `record_youtube_playlist_link` (single playlist entry
+  without `playlistItems` expansion) + `_youtube_playlist_metadata`.
+- `src/ref_cli/youtube_extract.py` — `is_youtube_playlist_url` (list= param,
+  excludes radio/mix).
+- `tests/test_show_notes_queue.py`, `tests/test_show_notes_worker.py` (new) and
+  `tests/test_youtube_api_notes.py` (updated to the queued contract).
+
+**Key behavior guarantees.**
+1. Parent returns independently of slow children (tested with a `threading.Event`
+   gate: `POST /urls` returns while the child is still blocked).
+2. Discovered playlist children are recorded as a single entry (no expansion);
+   directly submitted playlists keep `process_url` full expansion (both tested).
+3. Dedup prevents double-fan-out on repeated/concurrent parent submissions.
+4. Accepted jobs survive restart (`recover()`) and are retried with backoff.
+5. Issue #15 cooldown/local-transcribe and `_write_lock` semantics unchanged.
+
+**Local test evidence (Python 3.12.3, venv `/tmp/opencode/ref-issue-18-venv`).**
+- `python -m pytest -q` → **355 passed** (336 prior + 19 new; 1 warning from
+  Starlette/httpx deprecation, unrelated).
+- `python -m compileall -q src get_transcript.py` → OK.
+- `git diff --check` → clean.
+
+**Risks / limitations.**
+- The worker is single-process (the `ref-api` host); the queue is not intended to
+  be shared across hosts. `redirect_stdout` remains global but all archive writes
+  stay serialized under `_write_lock`, so concurrent request/worker processing is
+  safe.
+- Pre-existing, unchanged: a discovered *Reddit/community-post* child still uses
+  `process_url`, whose internal outbound-link recursion is out of scope here
+  (the incident was a playlist link, which is now explicitly handled).
+- A discovered playlist still needs `YOUTUBE_API_KEY` (same as the parent video
+  path); without it the child job retries then lands in the visible `failed` state.
+
+**Rollback.** Revert to `main` `799b10f28dd3776a8d9904509d166368e289bb7c` restores
+the prior synchronous behavior. The new queue state lives under
+`~/references/show_notes_queue/` (never in git) and is inert with old code.
