@@ -272,16 +272,20 @@ def test_queue_status_endpoint(isolated, monkeypatch):
     assert body["corrupt"] == 0
 
 
-def test_worker_stop_fence_prevents_overlap(isolated, monkeypatch):
-    """A stop that times out (worker still draining) must not allow a duplicate."""
+def test_worker_resumes_after_timed_out_stop_and_restart(isolated, monkeypatch):
+    """A timed-out stop + in-process restart must neither overlap workers nor
+    leave the queue idle: the exiting worker hands off to a successor."""
     slow_url = "https://example.org/slow"
+    other_url = "https://example.org/other"
     release = threading.Event()
     slow_started = threading.Event()
+    processed = []
 
     def fake_process(url, force):
         if url == slow_url:
             slow_started.set()
             release.wait(timeout=20)
+        processed.append(url)
         print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
@@ -296,27 +300,53 @@ def test_worker_stop_fence_prevents_overlap(isolated, monkeypatch):
     service._worker = None
     try:
         service.start_show_notes_worker()
+        first_worker = service._worker
         service._get_queue().enqueue(slow_url)
         assert slow_started.wait(timeout=5)
 
         # stop times out (worker stuck in slow child); reference is retained.
         service.stop_show_notes_worker()
-        assert service._worker is not None
+        assert service._worker is first_worker
         assert service._worker.is_alive()
 
-        # A second start must NOT spawn a duplicate worker.
+        # In-process restart while draining must NOT spawn a duplicate worker.
         service.start_show_notes_worker()
         worker_threads = [
             t for t in threading.enumerate() if t.name == "ref-show-notes-worker"
         ]
         assert len(worker_threads) == 1
 
+        # Release the slow child; the old worker finishes, exits, and hands off.
         release.set()
-        deadline = time.time() + 10
-        while service._worker.is_alive() and time.time() < deadline:
+        first_worker._thread.join(timeout=10)
+        assert not first_worker.is_alive()
+
+        # A successor worker has taken over and must be the only one running.
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            successor = service._worker
+            if successor is not None and successor is not first_worker and successor.is_alive():
+                break
             time.sleep(0.05)
-        assert not service._worker.is_alive()
+        assert service._worker is not None
+        assert service._worker is not first_worker
+        assert service._worker.is_alive()
+
+        worker_threads = [
+            t for t in threading.enumerate() if t.name == "ref-show-notes-worker"
+        ]
+        assert len(worker_threads) == 1
+
+        # The successor resumes draining: a newly queued job is processed.
+        service._get_queue().enqueue(other_url)
+        deadline = time.time() + 5
+        while other_url not in processed and time.time() < deadline:
+            time.sleep(0.05)
+        assert other_url in processed
     finally:
         release.set()
         service.stop_show_notes_worker()
+        worker = service._worker
+        if worker is not None:
+            worker._thread.join(timeout=5)
         service._worker = None

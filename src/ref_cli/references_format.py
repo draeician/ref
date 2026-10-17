@@ -38,6 +38,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable, Iterator, List, Optional, Sequence, Tuple
 
+from ref_cli.archive_lock import archive_lock
+
 # ---------------------------------------------------------------------------
 # Current on-disk contract
 # ---------------------------------------------------------------------------
@@ -435,47 +437,50 @@ def migrate_references_file(
     if not steps:
         return False, f'Already at version {start_version}'
 
-    with open(path, 'r', encoding='utf-8', errors='replace') as handle:
-        original_lines = handle.readlines()
+    # Migration rewrites the entire file, so its read/backup/write commit runs
+    # under the shared archive lock to avoid clobbering a concurrent writer.
+    with archive_lock:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            original_lines = handle.readlines()
 
-    state = MigrationState(
-        lines=list(original_lines),
-        version=start_version,
-        notes=[],
-    )
+        state = MigrationState(
+            lines=list(original_lines),
+            version=start_version,
+            notes=[],
+        )
 
-    # Apply each hop. Steps are responsible for body transforms; header is
-    # normalized once at the end so intermediate versions don't thrash disk.
-    path_labels: List[str] = []
-    for frm, to, fn in steps:
-        if state.version != frm:
-            raise ValueError(
-                f'Migration invariant broken: about to run {frm}→{to} but '
-                f'state.version is {state.version}'
-            )
-        state = fn(state)
-        if state.version != to:
-            raise ValueError(
-                f'Migration step {frm}→{to} left state.version={state.version}'
-            )
-        path_labels.append(f'{frm}→{to}')
+        # Apply each hop. Steps are responsible for body transforms; header is
+        # normalized once at the end so intermediate versions don't thrash disk.
+        path_labels: List[str] = []
+        for frm, to, fn in steps:
+            if state.version != frm:
+                raise ValueError(
+                    f'Migration invariant broken: about to run {frm}→{to} but '
+                    f'state.version is {state.version}'
+                )
+            state = fn(state)
+            if state.version != to:
+                raise ValueError(
+                    f'Migration step {frm}→{to} left state.version={state.version}'
+                )
+            path_labels.append(f'{frm}→{to}')
 
-    # Strip managed header lines from body, then write fresh header + body.
-    body: List[str] = []
-    for line in state.lines:
-        stripped = line.strip()
-        if any(stripped.startswith(p) for p in _MANAGED_HEADER_PREFIXES):
-            continue
-        body.append(line if line.endswith('\n') else line + '\n')
+        # Strip managed header lines from body, then write fresh header + body.
+        body: List[str] = []
+        for line in state.lines:
+            stripped = line.strip()
+            if any(stripped.startswith(p) for p in _MANAGED_HEADER_PREFIXES):
+                continue
+            body.append(line if line.endswith('\n') else line + '\n')
 
-    backup_path = ''
-    if backup:
-        from ref_cli.backup_util import backup_file
-        backup_path = backup_file(path, compress=compress, style='suffix')
+        backup_path = ''
+        if backup:
+            from ref_cli.backup_util import backup_file
+            backup_path = backup_file(path, compress=compress, style='suffix')
 
-    with open(path, 'w', encoding='utf-8') as handle:
-        handle.write(build_header(target_version, migration_path=path_labels or None))
-        handle.writelines(body)
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write(build_header(target_version, migration_path=path_labels or None))
+            handle.writelines(body)
 
     hops = '; '.join(path_labels) if path_labels else f'{start_version}→{target_version}'
     msg = (
@@ -573,31 +578,34 @@ def apply_row_updates(
     if not by_line and not delete_set:
         return 0, 0
 
-    if backup:
-        from ref_cli.backup_util import backup_file
-        backup_file(path, compress=compress, style='suffix')
+    # The whole read/decide/write commit runs under the ONE shared archive lock
+    # so a concurrent append or whole-file rewrite cannot be silently lost.
+    with archive_lock:
+        if backup:
+            from ref_cli.backup_util import backup_file
+            backup_file(path, compress=compress, style='suffix')
 
-    with open(path, 'r', encoding='utf-8', errors='replace') as handle:
-        lines = handle.readlines()
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            lines = handle.readlines()
 
-    new_lines: List[str] = []
-    updated = 0
-    deleted = 0
-    for idx, line in enumerate(lines):
-        line_no = idx + 1
-        if line_no in delete_set:
-            deleted += 1
-            continue
-        if line_no in by_line:
-            new_line = format_data_line(by_line[line_no]) + '\n'
-            if line != new_line:
-                updated += 1
-            new_lines.append(new_line)
-        else:
-            new_lines.append(line)
+        new_lines: List[str] = []
+        updated = 0
+        deleted = 0
+        for idx, line in enumerate(lines):
+            line_no = idx + 1
+            if line_no in delete_set:
+                deleted += 1
+                continue
+            if line_no in by_line:
+                new_line = format_data_line(by_line[line_no]) + '\n'
+                if line != new_line:
+                    updated += 1
+                new_lines.append(new_line)
+            else:
+                new_lines.append(line)
 
-    with open(path, 'w', encoding='utf-8') as handle:
-        handle.writelines(new_lines)
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.writelines(new_lines)
     return updated, deleted
 
 

@@ -33,7 +33,6 @@ import shlex
 import subprocess
 import time
 import select
-import threading
 from urllib3.exceptions import InsecureRequestWarning
 import importlib.resources
 from typing import Deque, List, Optional, Tuple
@@ -1299,10 +1298,12 @@ def ensure_path_exists(file_path: str):
         open(file_path, 'w').close()
 
 # Serialize all reads and writes of the shared references.md archive across
-# concurrent API requests and the background show-note worker. Held only for the
-# short file-access critical section (never across network/provider I/O), so the
-# slow external work of one caller does not block another caller's archive write.
-_archive_lock = threading.RLock()
+# concurrent API requests and the background show-note worker. This is the ONE
+# shared process-local lock used by every archive read/modify/write commit
+# (appends, update_reference_entry, update_transcript, and the enrichment
+# whole-file rewrite in references_format.apply_row_updates). Held only for the
+# short file-access critical section (never across network/provider I/O).
+from ref_cli.archive_lock import archive_lock as _archive_lock
 
 def append_to_file(file_path: str, line: str) -> None:
     """
@@ -1391,40 +1392,66 @@ def update_transcript(video_url: str) -> None:
         video_url (str): The URL of the YouTube video to update.
     """
     verbose_logger.log(f"Starting transcript update for URL: {video_url}")
-    
-    with open(UNIFIED, 'r') as file:
-        lines = file.readlines()
+
+    # Snapshot which rows still need a transcript (short critical section; no
+    # network here).
+    with _archive_lock:
+        with open(UNIFIED, 'r') as file:
+            lines = file.readlines()
+        pending = any(
+            video_url in line and line.strip().endswith("|None") for line in lines
+        )
         verbose_logger.log(f"Read {len(lines)} lines from references file")
+
+    if not pending:
+        verbose_logger.log("No transcript update needed or possible")
+        print(warning(f"No matching entry found for {url(video_url)} or transcript already exists."))
+        return
+
+    video_id_match = re.search(r'v=([^&]+)', video_url)
+    video_id = video_id_match.group(1) if video_id_match else None
+    verbose_logger.log(f"Extracted video ID: {video_id}")
+
+    # Network/provider fetch happens OUTSIDE the archive lock so a slow
+    # transcript fetch cannot block other references.md writes.
+    print(info(f"Fetching transcript for: {url(video_url)}"))
+    transcript_file = None
+    failure_info = None
+    if video_id:
+        transcript_file, failure_info = fetch_youtube_transcript(video_id)
 
     updated = False
     failure_recorded = False
-    with open(UNIFIED, 'w') as file:
-        for line in lines:
-            if video_url in line and line.strip().endswith("|None"):
-                verbose_logger.log("Found matching entry without transcript")
-                video_id = re.search(r'v=([^&]+)', video_url).group(1)
-                verbose_logger.log(f"Extracted video ID: {video_id}")
-                print(info(f"Fetching transcript for: {url(video_url)}"))
-                transcript_file, failure_info = fetch_youtube_transcript(video_id)
-                if transcript_file:
-                    verbose_logger.log(f"Successfully fetched transcript: {transcript_file}")
-                    line = line.replace("|None", f"|{transcript_file}")
-                    updated = True
-                    logging.info(f"Transcript updated for URL: {video_url}")
+    if transcript_file:
+        verbose_logger.log(f"Successfully fetched transcript: {transcript_file}")
+        replacement = f"|{transcript_file}"
+        updated = True
+        logging.info(f"Transcript updated for URL: {video_url}")
+    else:
+        verbose_logger.log("Failed to fetch transcript")
+        formatted_failure = resolve_transcript_failure_placeholder(
+            failure_info, video_url, video_id
+        )
+        replacement = f"|{formatted_failure}"
+        failure_recorded = True
+        print(warning(f"{formatted_failure} for {url(video_url)}"))
+        if failure_info:
+            method_display = failure_info[0].replace('_', ' ').title()
+            logging.info(
+                f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
+            )
+
+    # Commit under the archive lock, re-reading the current state so a
+    # concurrent append/rewrite is not clobbered by a stale snapshot.
+    with _archive_lock:
+        with open(UNIFIED, 'r') as file:
+            current_lines = file.readlines()
+        with open(UNIFIED, 'w') as file:
+            for line in current_lines:
+                if video_url in line and line.strip().endswith("|None"):
+                    file.write(line.replace("|None", replacement))
                 else:
-                    verbose_logger.log("Failed to fetch transcript")
-                    formatted_failure = resolve_transcript_failure_placeholder(
-                        failure_info, video_url, video_id
-                    )
-                    line = line.replace("|None", f"|{formatted_failure}")
-                    failure_recorded = True
-                    print(warning(f"{formatted_failure} for {url(video_url)}"))
-                    if failure_info:
-                        method_display = failure_info[0].replace('_', ' ').title()
-                        logging.info(
-                            f"Failed to fetch transcript for {video_id} ({method_display} method: {failure_info[1]})"
-                        )
-            file.write(line)
+                    file.write(line)
 
     if updated:
         verbose_logger.log("Transcript update completed successfully")

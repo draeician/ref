@@ -115,6 +115,11 @@ _QUEUE_DIRNAME = "show_notes_queue"
 _worker: Optional["_ShowNotesWorker"] = None
 _worker_lock = threading.Lock()
 
+# Set when ``start_show_notes_worker`` is called while the previous worker is
+# still draining (a prior ``stop_show_notes_worker`` timed out). The exiting
+# worker then hands off to a successor so the queue never stalls silently.
+_restart_pending = False
+
 # Lazily-constructed queue, keyed to the current archive location so tests that
 # repoint ``ref_cli.UNIFIED`` to a temp path get an isolated queue.
 _queue: Optional[ShowNotesQueue] = None
@@ -427,6 +432,12 @@ class _ShowNotesWorker:
         return self._thread.is_alive()
 
     def _run(self) -> None:
+        try:
+            self._drain()
+        finally:
+            _worker_exited(self)
+
+    def _drain(self) -> None:
         queue = _get_queue()
         try:
             queue.recover()
@@ -458,12 +469,39 @@ class _ShowNotesWorker:
         return not self._thread.is_alive()
 
 
+def _worker_exited(worker: "_ShowNotesWorker") -> None:
+    """Run on a worker thread's way out (see ``_ShowNotesWorker._run``).
+
+    Hands off to a successor when a restart was requested while this worker was
+    still draining; otherwise clears the singleton. This is the explicit
+    lifecycle fence that prevents both (a) overlapping workers and (b) a silently
+    idle queue after a timed-out stop followed by a lifespan restart.
+    """
+    global _worker, _restart_pending
+    with _worker_lock:
+        if _worker is not worker:
+            # A newer worker already took over; this stale exit is a no-op.
+            return
+        if _restart_pending:
+            _restart_pending = False
+            successor = _ShowNotesWorker()
+            _worker = successor
+            successor.start()
+        else:
+            _worker = None
+
+
 def start_show_notes_worker() -> None:
     """Start the background show-note worker (idempotent, no overlapping workers)."""
-    global _worker
+    global _worker, _restart_pending
     with _worker_lock:
         if _worker is not None and _worker.is_alive():
+            # Previous worker is still draining (a prior stop timed out). Mark a
+            # pending restart so it hands off to a successor on its way out
+            # instead of leaving the queue idle.
+            _restart_pending = True
             return
+        _restart_pending = False
         _worker = _ShowNotesWorker()
         _worker.start()
 
@@ -473,14 +511,19 @@ def stop_show_notes_worker() -> None:
     global _worker
     with _worker_lock:
         worker = _worker
-        if worker is None:
-            return
-        fully_stopped = worker.stop()
-        if fully_stopped:
+    if worker is None:
+        return
+    # Join outside the lock so the exiting thread can acquire it for its
+    # successor handoff (``_worker_exited``) without deadlocking.
+    fully_stopped = worker.stop()
+    with _worker_lock:
+        # ``_worker_exited`` already ran on the worker thread if it exited, so
+        # only clear when this worker is somehow still current and fully gone.
+        if _worker is worker and fully_stopped:
             _worker = None
         # If the thread did not exit within the timeout (still in slow child
-        # work), leave ``_worker`` set so a later ``start`` does not spawn a
-        # duplicate while the original thread drains and exits on its own.
+        # work), leave ``_worker`` set; a later ``start`` marks a pending restart
+        # and the exiting thread hands off to a successor on its own.
 
 
 def process_many(inputs: List[str], force: bool = False) -> List[UrlResult]:
@@ -591,9 +634,11 @@ def update_transcript_for_url(video_url: str) -> TranscriptResult:
 
     buf = io.StringIO()
     try:
-        with _write_lock:
-            with _capture_stdout(buf):
-                ref_cli.update_transcript(target)
+        # ``ref_cli.update_transcript`` now manages its own archive lock (network
+        # fetch outside the lock, read/decide/write commit inside it), so no
+        # service-level lock is held here.
+        with _capture_stdout(buf):
+            ref_cli.update_transcript(target)
         output = buf.getvalue().strip()
         status = _classify_transcript_stdout(output)
         message = {

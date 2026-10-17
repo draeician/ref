@@ -24,6 +24,8 @@ from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from ref_cli.archive_lock import archive_lock
+
 # ---------------------------------------------------------------------------
 # Rate limiting (client-side, same idea as oEmbed 10/min in cli.py)
 # ---------------------------------------------------------------------------
@@ -899,25 +901,32 @@ def enrich_youtube_reference(
             )
         except Exception as exc:  # noqa: BLE001
             reason = classify_youtube_fetch_failure(str(exc))
-            rows = [
-                r for r in iter_data_rows(references_path)
-                if video_id in r.url or video_url in r.url
-            ]
-            if reason and rows:
-                updates, deletes, summary = handle_unavailable_youtube_rows(
-                    references_path,
-                    video_id,
-                    rows,
-                    references_base=base,
-                    reason=reason,
-                    detail=str(exc)[:300],
-                )
-                apply_row_updates(
-                    references_path,
-                    updates,
-                    backup=False,
-                    delete_line_numbers=deletes,
-                )
+            # references.md gather + apply run under the shared archive lock so
+            # the gathered line numbers stay consistent with the file state that
+            # apply_row_updates reads and rewrites. Enrichment card/index writes
+            # below are unrelated to references.md and stay outside the lock.
+            summary = None
+            with archive_lock:
+                rows = [
+                    r for r in iter_data_rows(references_path)
+                    if video_id in r.url or video_url in r.url
+                ]
+                if reason and rows:
+                    updates, deletes, summary = handle_unavailable_youtube_rows(
+                        references_path,
+                        video_id,
+                        rows,
+                        references_base=base,
+                        reason=reason,
+                        detail=str(exc)[:300],
+                    )
+                    apply_row_updates(
+                        references_path,
+                        updates,
+                        backup=False,
+                        delete_line_numbers=deletes,
+                    )
+            if summary is not None:
                 append_index(
                     base,
                     platform='youtube',
@@ -945,22 +954,23 @@ def enrich_youtube_reference(
         )
 
     updates = []
-    for row in iter_data_rows(references_path):
-        if video_id not in row.url and video_url not in row.url:
-            continue
-        if row.has_meta and not force:
-            # Still refresh empty pieces if card has better data
-            if row.category and row.role and row.channel_id:
+    with archive_lock:
+        for row in iter_data_rows(references_path):
+            if video_id not in row.url and video_url not in row.url:
                 continue
-        updates.append((
-            row.line_number,
-            with_meta(
-                row,
-                category=enrichment.category,
-                role=enrichment.role,
-                channel_id=enrichment.channel_id,
-            ),
-        ))
-    if updates:
-        apply_row_updates(references_path, updates, backup=False)
+            if row.has_meta and not force:
+                # Still refresh empty pieces if card has better data
+                if row.category and row.role and row.channel_id:
+                    continue
+            updates.append((
+                row.line_number,
+                with_meta(
+                    row,
+                    category=enrichment.category,
+                    role=enrichment.role,
+                    channel_id=enrichment.channel_id,
+                ),
+            ))
+        if updates:
+            apply_row_updates(references_path, updates, backup=False)
     return enrichment

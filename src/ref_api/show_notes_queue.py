@@ -71,13 +71,6 @@ class QueueCorruptError(RuntimeError):
     """The on-disk queue exists but is unreadable, malformed, or schema-invalid."""
 
 
-def _as_float(value: Any, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 class ShowNotesQueue:
     """File-backed, deduplicating queue of show-note discovery/ingest jobs."""
 
@@ -93,47 +86,48 @@ class ShowNotesQueue:
     # -- persistence -----------------------------------------------------
 
     def _load(self) -> None:
-        """Read jobs from disk once.
+        """Read jobs from disk once, failing closed on any malformed file.
 
         A nonexistent file is a fresh queue. An existing file that cannot be
-        read, parsed, or validated is marked corrupt; no mutation is allowed
-        afterwards and the original bytes are never overwritten.
+        read, decoded, parsed, or fully validated is marked corrupt; no mutation
+        is allowed afterwards and the original bytes are never overwritten.
+
+        ``_loaded`` is set only after validation completes (success or an
+        explicit corrupt state), so a failed load can never leave the queue in a
+        state where a later ``enqueue`` skips loading and silently overwrites the
+        original ``jobs.json``.
         """
         if self._loaded:
             return
-        self._loaded = True
 
         try:
-            with open(self.jobs_path, "r", encoding="utf-8") as handle:
-                raw = handle.read()
+            with open(self.jobs_path, "rb") as handle:
+                raw_bytes = handle.read()
         except FileNotFoundError:
             self._jobs = {}
             self._corrupt = False
             self._corrupt_error = ""
+            self._loaded = True
             return
         except OSError as exc:  # noqa: BLE001 - permission/IO error is not fresh
             self._mark_corrupt(f"queue file is unreadable: {exc}")
+            self._loaded = True
             return
 
+        # Decode, parse and validate under one boundary so UnicodeDecodeError,
+        # JSONDecodeError and any per-field ValueError/TypeError all fail closed.
         try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError) as exc:  # noqa: BLE001
-            self._mark_corrupt(f"queue file is not valid JSON: {exc}")
+            data = json.loads(raw_bytes.decode("utf-8"))
+            jobs = self._parse_jobs(data)
+        except Exception as exc:  # noqa: BLE001 - any malformation is corrupt
+            self._mark_corrupt(f"queue file is malformed: {exc}")
+            self._loaded = True
             return
 
-        if not isinstance(data, dict) or not isinstance(data.get("jobs"), dict):
-            self._mark_corrupt("queue file schema invalid (missing 'jobs' map)")
-            return
-
-        jobs: Dict[str, Dict[str, Any]] = {}
-        for job_id, job in data["jobs"].items():
-            if not self._valid_job(job_id, job):
-                self._mark_corrupt(f"queue file has an invalid job entry ({job_id})")
-                return
-            jobs[str(job_id)] = self._normalize_job(job)
         self._jobs = jobs
         self._corrupt = False
         self._corrupt_error = ""
+        self._loaded = True
 
     def _mark_corrupt(self, message: str) -> None:
         self._corrupt = True
@@ -147,36 +141,98 @@ class ShowNotesQueue:
         )
 
     @staticmethod
-    def _valid_job(job_id: Any, job: Any) -> bool:
-        if not isinstance(job, dict):
-            return False
-        if not isinstance(job_id, str) or not job_id:
-            return False
-        if not isinstance(job.get("url"), str) or not job["url"].strip():
-            return False
-        if job.get("status") not in ALLOWED_STATUSES:
-            return False
-        return True
+    def _parse_jobs(data: Any) -> Dict[str, Dict[str, Any]]:
+        """Validate the top-level schema and every job, returning normalized jobs."""
+        if not isinstance(data, dict) or not isinstance(data.get("jobs"), dict):
+            raise ValueError("missing 'jobs' map")
+        jobs: Dict[str, Dict[str, Any]] = {}
+        for job_id, job in data["jobs"].items():
+            if not isinstance(job_id, str) or not job_id:
+                raise ValueError(f"invalid job id {job_id!r}")
+            jobs[job_id] = ShowNotesQueue._normalize_job(job_id, job)
+        return jobs
 
     @staticmethod
-    def _normalize_job(job: Dict[str, Any]) -> Dict[str, Any]:
-        url = str(job.get("url", ""))
+    def _normalize_job(job_id: str, job: Any) -> Dict[str, Any]:
+        """Fully validate one persisted job and return its normalized form.
+
+        Raises ``ValueError`` on any type/range/kind/status/id inconsistency so
+        the caller's fail-closed boundary marks the whole queue corrupt rather
+        than silently repairing (or dropping) an invalid entry. Missing optional
+        fields default; present-but-wrong-typed fields are corrupt.
+        """
+        if not isinstance(job, dict):
+            raise ValueError(f"job {job_id!r} is not an object")
+
+        # The outer key is authoritative; a mismatched inner id is corrupt.
+        inner_id = job.get("id")
+        if inner_id is not None and (
+            not isinstance(inner_id, str) or inner_id != job_id
+        ):
+            raise ValueError(f"job {job_id!r} has mismatched id {inner_id!r}")
+
+        url = job.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError(f"job {job_id!r} has no valid url")
+        url = url.strip()
+
+        status = job.get("status", "pending")
+        if not isinstance(status, str) or status not in ALLOWED_STATUSES:
+            raise ValueError(f"job {job_id!r} has invalid status {status!r}")
+
         kind = job.get("kind")
-        if kind not in (KIND_DISCOVER, KIND_INGEST):
+        if kind is None:
             kind = KIND_INGEST
+        if kind not in (KIND_DISCOVER, KIND_INGEST):
+            raise ValueError(f"job {job_id!r} has invalid kind {kind!r}")
+
+        attempts = job.get("attempts")
+        if attempts is None:
+            attempts = 0
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            raise ValueError(f"job {job_id!r} has invalid attempts {attempts!r}")
+
+        url_key = job.get("url_key")
+        if url_key is None:
+            url_key = url
+        elif not isinstance(url_key, str):
+            raise ValueError(f"job {job_id!r} has invalid url_key {url_key!r}")
+
+        parent_video_id = job.get("parent_video_id")
+        if parent_video_id is None:
+            parent_video_id = ""
+        elif not isinstance(parent_video_id, str):
+            raise ValueError(
+                f"job {job_id!r} has invalid parent_video_id {parent_video_id!r}"
+            )
+
+        last_error = job.get("last_error")
+        if last_error is None:
+            last_error = ""
+        elif not isinstance(last_error, str):
+            raise ValueError(f"job {job_id!r} has invalid last_error {last_error!r}")
+
         now = time.time()
+
+        def _ts(value: Any, field: str) -> float:
+            if value is None:
+                return now
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"job {job_id!r} has invalid {field} {value!r}")
+            return float(value)
+
         return {
-            "id": str(job.get("id", "")),
+            "id": job_id,
             "url": url,
-            "url_key": str(job.get("url_key") or url.strip()),
-            "parent_video_id": str(job.get("parent_video_id") or ""),
+            "url_key": url_key,
+            "parent_video_id": parent_video_id,
             "kind": kind,
-            "status": job.get("status", "pending"),
-            "attempts": int(job.get("attempts") or 0),
-            "next_attempt_at": _as_float(job.get("next_attempt_at"), now),
-            "last_error": str(job.get("last_error") or ""),
-            "enqueued_at": _as_float(job.get("enqueued_at"), now),
-            "updated_at": _as_float(job.get("updated_at"), now),
+            "status": status,
+            "attempts": attempts,
+            "next_attempt_at": _ts(job.get("next_attempt_at"), "next_attempt_at"),
+            "last_error": last_error,
+            "enqueued_at": _ts(job.get("enqueued_at"), "enqueued_at"),
+            "updated_at": _ts(job.get("updated_at"), "updated_at"),
         }
 
     def _check_not_corrupt(self) -> None:

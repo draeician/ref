@@ -184,7 +184,7 @@ def test_corrupt_jobs_file_fails_closed(tmp_path):
 
     assert queue.is_corrupt() is True
     assert queue.stats()["corrupt"] == 1
-    assert "not valid JSON" in queue.corrupt_error()
+    assert "malformed" in queue.corrupt_error()
 
     # Fail closed: no mutation is allowed, so accepted work is never overwritten.
     with pytest.raises(QueueCorruptError):
@@ -208,6 +208,82 @@ def test_schema_invalid_job_fails_closed(tmp_path):
     assert queue.is_corrupt() is True
     with pytest.raises(QueueCorruptError):
         queue.enqueue("https://example.org/a")
+
+
+# ---------------------------------------------------------------------------
+# Fail-before regressions: a malformed existing jobs.json must fail closed and
+# must never be overwritten by a later enqueue, for every field the worker
+# persists. Each fixture writes a deliberately invalid queue, confirms the queue
+# is corrupt, attempts an enqueue (which must raise, not overwrite), and asserts
+# the original bytes are byte-for-byte intact.
+# ---------------------------------------------------------------------------
+
+
+def _write_raw_jobs(tmp_path, raw: bytes) -> ShowNotesQueue:
+    queue = _new_queue(tmp_path)
+    os.makedirs(queue.queue_dir, exist_ok=True)
+    with open(queue.jobs_path, "wb") as handle:
+        handle.write(raw)
+    return queue
+
+
+def _assert_fail_closed_preserves_bytes(queue, original: bytes) -> None:
+    assert queue.is_corrupt() is True
+    assert queue.stats()["corrupt"] == 1
+    with pytest.raises(QueueCorruptError):
+        queue.enqueue("https://example.org/new")
+    with pytest.raises(QueueCorruptError):
+        queue.recover()
+    with open(queue.jobs_path, "rb") as handle:
+        assert handle.read() == original
+
+
+@pytest.mark.parametrize(
+    "bad_jobs",
+    [
+        # attempts is not an integer (the architect's canonical example).
+        {"j1": {"id": "j1", "url": "https://example.org/a", "status": "pending", "attempts": "bad"}},
+        # status is unhashable -> old code raised TypeError mid-validation.
+        {"j1": {"id": "j1", "url": "https://example.org/a", "status": ["pending"]}},
+        # inner id does not match the authoritative outer key.
+        {"j1": {"id": "j2", "url": "https://example.org/a", "status": "pending"}},
+        # unknown job kind.
+        {"j1": {"id": "j1", "url": "https://example.org/a", "status": "pending", "kind": "weird"}},
+        # non-numeric timestamp.
+        {"j1": {"id": "j1", "url": "https://example.org/a", "status": "pending", "enqueued_at": "soon"}},
+        # url is not a string.
+        {"j1": {"id": "j1", "url": 123, "status": "pending"}},
+        # job entry is not an object.
+        {"j1": "not-an-object"},
+    ],
+)
+def test_malformed_job_field_fails_closed_and_preserves_bytes(tmp_path, bad_jobs):
+    payload = json.dumps({"jobs": bad_jobs}, sort_keys=True).encode("utf-8")
+    queue = _write_raw_jobs(tmp_path, payload)
+    _assert_fail_closed_preserves_bytes(queue, payload)
+
+
+def test_undecodable_queue_fails_closed_and_preserves_bytes(tmp_path):
+    raw = b'{"jobs": {"j1": {"id": "j1", "url": "https://example.org/a", "status": "pending"}}}\xff\xfe'
+    queue = _write_raw_jobs(tmp_path, raw)
+    _assert_fail_closed_preserves_bytes(queue, raw)
+
+
+def test_valid_queue_reloads_and_normalizes_id(tmp_path):
+    """A well-formed queue survives strict validation and keeps id==outer key."""
+    queue = _new_queue(tmp_path)
+    job_id = queue.enqueue("https://example.org/a", parent_video_id="vid1")
+    queue.next_pending()  # -> running
+
+    restarted = _new_queue(tmp_path)
+    restarted.recover()
+    jobs = {j["id"]: j for j in restarted.jobs()}
+    assert jobs[job_id]["id"] == job_id
+    assert jobs[job_id]["status"] == "pending"
+    assert jobs[job_id]["attempts"] == 1
+    # State transitions still resolve by id after a strict reload.
+    restarted.mark_done(job_id)
+    assert {j["id"]: j for j in restarted.jobs()}[job_id]["status"] == "done"
 
 
 def test_enqueue_rejects_empty_url(tmp_path):
