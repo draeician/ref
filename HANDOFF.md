@@ -1,7 +1,7 @@
 # HANDOFF — YouTube transcript routing investigation
 
 **Date:** 2026-10-26 (UTC)  
-**Mode:** diagnostics only; one authorized live fetch was performed. No application code, production config, service, queue, or archive changes were made.
+**Mode:** corrective implementation; one authorized live fetch was performed during diagnosis. No production config, service, queue, or archive changes were made.
 **Repository:** https://github.com/draeician/ref  
 **Scope:** why recent YouTube ingests are routed to local-transcribe/Whisper instead of using captions directly.
 
@@ -9,7 +9,7 @@
 
 **Primary cause (confirmed): YouTube is blocking direct caption retrieval from `minion-26`.** A controlled single-video test at **2026-10-26T18:13:09Z** returned `youtube_transcript_api._errors.IpBlocked` after 1.257s. `IpBlocked` is a subclass of `RequestBlocked` and represents an IP-level block; this library raises it for HTTP 429 or a reCAPTCHA challenge page. The numeric status was not exposed. The block began by **2026-10-26T00:38:09Z** and was still active at 18:13Z. The cooldown then suppressed every subsequent transcript provider call for one hour; each recovery probe was blocked again, so the cycle repeated at 05:46, 11:30, 12:31, and 14:37 UTC.
 
-**Secondary cause (high confidence): the local-transcribe queue is not reachable from the running service.** The service virtualenv does not contain `local_transcribe`, and the systemd service `PATH` does not contain `lt`; `lt` also has no configured queue path on this host. Every failure therefore takes the final fallback: append to `transcript-pending.md`. No new local-transcribe/Whisper queue job has been created since **2026-10-24T21:03:29Z**, and none of the recent sample video IDs appear in the queue.
+**Secondary cause (high confidence): the local-transcribe queue is not reachable from the running service.** The service virtualenv does not contain `local_transcribe`, and the systemd service `PATH` does not contain `lt`; `lt` also has no configured queue path on this host. Every failure therefore takes the final fallback: append to `transcript-pending.md`. No new local-transcribe/Whisper queue job has been created since **2026-10-24T21:03:29Z**, and none of the recent sample video IDs appear in the queue. The corrective implementation adds explicit absolute `lt`/queue configuration, queue identity verification, and a `local_only` mode so the producer does not need `local_transcribe` installed in its own venv. Deployment is still required.
 
 **Latent defect (high confidence): the enhanced `get_transcript.py` handler is not packaged and cannot be imported in production.** `ref_cli.cli.get_youtube_transcript_with_metadata` is `None` in the running service. The legacy provider path still worked until the IP block, so this is not the trigger, but it removes the enhanced path and contributes to poor diagnostics.
 
@@ -140,11 +140,11 @@ Additional measurements:
 2. During an active cooldown/backoff/lease, `begin_probe()` returns `allowed=False`; no provider call occurs, and the caller receives `("blocked", message)`.
 3. `_fetch_youtube_transcript_provider()` also rechecks `is_blocked()` before the legacy fallback, so a block discovered during the enhanced attempt cannot be bypassed by the legacy path.
 4. `resolve_transcript_failure_placeholder()` calls `add_url_to_pending_file()` for blocked or no-transcript failures.
-5. `add_url_to_pending_file()` tries `local_transcribe.queue_api.enqueue_youtube_safe`; in the service venv this raises `ImportError`.
-6. It then checks `shutil.which("lt")`; the service `PATH` has no `lt`, so it skips the CLI path and calls `_pending_file_fallback_result()`.
+5. `add_url_to_pending_file()` tries `local_transcribe.queue_api.enqueue_youtube_safe`; in the deployed service venv this raises `ImportError`.
+6. It then resolves an explicit `lt` path from `REF_LOCAL_TRANSCRIBE_LT` / config; the deployed service has neither, so it skips the CLI path and calls `_pending_file_fallback_result()`.
 7. The reference row becomes `Transcript unavailable (queued in transcript-pending.md)`.
 
-Even if `lt` were on `PATH`, `lt queue path` on this host reports no configured queue directory, so the CLI path would also fall back. The durable queue exists at `/opt/md2/music/youtube/transcripts/transcription-queue` and has a valid `queue.id`, but the producer environment is not configured to use it.
+Even if `lt` were on `PATH`, `lt queue path` on this host reports no configured queue directory, so the CLI path would also fall back. The durable queue exists at `/opt/md2/music/youtube/transcripts/transcription-queue` and has a valid `queue.id`, but the deployed producer environment is not configured to use it. The corrective code adds that explicit configuration; deployment is pending.
 
 ## Root cause and unresolved hypotheses
 
@@ -152,7 +152,7 @@ Even if `lt` were on `PATH`, `lt queue path` on this host reports no configured 
 
 1. The provider returned `IpBlocked` to this host's IP at 2026-10-26T18:13:09Z; the block was already active at 2026-10-26T00:38:09Z and persisted through the controlled test. The cooldown then suppresses all requests for an hour.
 2. Every request inside the cooldown is treated as unavailable and sent to the pending-file fallback without a caption attempt.
-3. The service cannot reach the durable local-transcribe queue (missing module and missing `lt`/queue config), so failures accumulate in `transcript-pending.md` rather than becoming Whisper jobs.
+3. The service cannot reach the durable local-transcribe queue (missing module and missing `lt`/queue config), so failures accumulate in `transcript-pending.md` rather than becoming Whisper jobs. The corrective code adds explicit `lt`/queue configuration and verification; deployment is pending.
 4. The enhanced handler is not importable in any normal installation; production is using only the legacy path.
 5. Current logs do not preserve the provider exception class/message or successful retrieval events; the controlled test bypassed this gap by calling the library directly.
 
@@ -165,14 +165,76 @@ Even if `lt` were on `PATH`, `lt queue path` on this host reports no configured 
 
 There is no evidence that successfully fetched captions are being misclassified as unavailable. The misclassification is limited to (a) cooldown skips being reported as unavailable and (b) non-block unexpected errors being rendered as “No transcript available”.
 
+## Corrective implementation (2026-10-26)
+
+Branch: `fix/durable-transcript-queue` (based on `main` at `53f4c0c`). No production deployment.
+
+- Added `src/ref_cli/transcript_queue.py`: mode resolution, absolute-path validation, queue-directory resolution, `queue.id` parsing, and expected-UUID verification.
+- Added `REF_YOUTUBE_TRANSCRIPT_MODE` / `youtube_transcript_mode` with `remote_first` (default) and `local_only`.
+- `local_only` reuses an existing transcript JSON or queues the video; it never calls `youtube-transcript-api` and does not read or modify cooldown markers.
+- Queue order is in-process `enqueue_youtube_safe` → explicit `lt queue add --queue-dir` → `lt` on `PATH` → `transcript-pending.md`.
+- Explicit queue settings: `REF_LOCAL_TRANSCRIBE_LT`, `REF_LOCAL_TRANSCRIBE_QUEUE_DIR`, `REF_LOCAL_TRANSCRIBE_QUEUE_UUID` (and matching config keys). Explicit paths must be absolute.
+- CLI output parsing tolerates warnings and ANSI decoration; malformed output fails safely to the pending file.
+- Status messages distinguish YouTube block, no captions, local-only skip, durable enqueue, duplicate/already-completed, and pending-file-only fallback.
+- Pending-file writes now return a failure result if the file cannot be updated; ref does not claim the URL was recorded when it was not.
+- Updated `README.md`, `docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`, and both config templates.
+- Added `tests/test_transcript_queue_modes.py` (17 tests) and updated blocking expectations in `tests/test_transcript_blocking.py`.
+- Full suite: **406 passed, 1 warning** in the isolated test venv. Wheel build succeeds and reports `1.6.12b1.dev108+g53f4c0c4a.d20261026` (newer than production `dev104`); the post-commit build is expected to report `dev109`.
+
+## Worker / backlog findings (read-only)
+
+- Worker host `aether`: PID `2696`, `lt worker run --standby`, systemd user unit `local-transcribe-worker.service`, active since **2026-10-25T15:28:03Z**, holds the NLM lock.
+- Worker `state.json` heartbeat is **2026-10-25T15:28:05Z**. This is normal while idle; the heartbeat updates only when a job is claimed, so it is not a liveness indicator.
+- Worker config `/home/draeician/.config/local-transcribe/config.yaml` contains:
+  ```yaml
+  queue:
+    path: /opt/md2/music/youtube/transcripts/transcription-queue
+    expected_uuid: 8c6fc098-8cbe-41ae-9689-dd759797a582
+    expected_nfs_version: 3
+    expected_server: depot.draeician.com
+    expected_export: /mnt/tank/md2
+  ```
+- `queue.legacy_pending_file` is unset. The default `~/references/transcripts/transcript-pending.md` does not exist on `aether`.
+- The real pending file is `/opt/md2/music/youtube/transcripts/transcript-pending.md` and currently has **792 URLs**. The worker therefore never imports this backlog; it is running, but it is not watching that file.
+- Queue counts at inspection: pending 0, processing 1, retry 0, completed 1593, failed 183, cancelled 21.
+- Do **not** set `legacy_pending_file` as part of this change: it would immediately import the 792-URL backlog. That requires separate authorization and an explicit capacity/priority decision.
+
+## Safe deployment plan (not executed)
+
+1. Add these values to `~/.config/ref/ref-api.env` on `minion-26`:
+   ```bash
+   REF_YOUTUBE_TRANSCRIPT_MODE=local_only
+   REF_LOCAL_TRANSCRIBE_LT=/home/draeician/.local/bin/lt
+   REF_LOCAL_TRANSCRIBE_QUEUE_DIR=/opt/md2/music/youtube/transcripts/transcription-queue
+   REF_LOCAL_TRANSCRIBE_QUEUE_UUID=8c6fc098-8cbe-41ae-9689-dd759797a582
+   ```
+2. Install the merged ref-cli build into the `ref-api` venv using the established service-upgrade procedure, then restart `ref-api.service` **only with separate authorization**.
+3. Verify a new capture reports `local_only`/queued status, the queue UUID matches, and a new pending queue record appears. Do not probe YouTube from `minion-26`.
+4. Leave the worker configuration unchanged for now. The worker is already active and consumes durable queue jobs; the 792-URL backlog remains untouched.
+
+## Rollback
+
+- Set `REF_YOUTUBE_TRANSCRIPT_MODE=remote_first` (or remove the mode variable), restore the previous package build, and restart `ref-api.service`.
+- Queue jobs already submitted remain valid and are not rolled back. Pending-file entries remain untouched.
+- If the explicit queue path/UUID is wrong, remove those variables to return to legacy `lt`-on-`PATH`/pending-file behavior.
+
+## Risks and limitations
+
+- `local_only` intentionally disables direct caption retrieval even after YouTube unblocks this IP. Switch back to `remote_first` to resume caption attempts.
+- The pipx `lt` is `local-transcribe 0.7.0`; `--queue-dir` support must remain available. A future downgrade would fall back to the pending file.
+- Queue identity depends on the NFS mount and `queue.id`; a mismatch or unavailable mount fails safely to the pending file.
+- The 792-URL backlog is still not imported. Draining it may create a large burst of local transcription work.
+- The worker heartbeat can look stale while idle; check the process/unit and lock, not just `state.json`.
+- No live production verification of the new producer path has been performed.
+
 ## Exactly one recommended next action
 
-**Authorize a single corrective change: route IP-blocked YouTube URLs into the durable local-transcribe/Whisper queue instead of `transcript-pending.md`, and do not probe YouTube from `minion-26` again until the block is resolved.** The controlled test confirms that retrying direct retrieval from this IP cannot succeed; the current pending-file fallback is the correct policy but does not reach the queue. No corrective change is implemented in this task.
+**Authorize deployment of the merged corrective change to `minion-26` with `REF_YOUTUBE_TRANSCRIPT_MODE=local_only` and the explicit queue path/UUID above; do not probe YouTube from this host and do not import the 792-URL backlog until separately approved.** The code change is complete; production deployment is the remaining step.
 
 ## Safety
 
-One authorized live YouTube probe was run at 2026-10-26T18:13:09Z. It returned `IpBlocked`; no retry was made. No transcript text was printed, downloaded, or archived. No cookies, proxies, bulk requests, queue mutations, archive edits, service restarts, package installs, or production configuration changes were made. The cooldown marker was read only.
+One authorized live YouTube probe was run at 2026-10-26T18:13:09Z. It returned `IpBlocked`; no retry was made. No transcript text was printed, downloaded, or archived. No cookies, proxies, bulk requests, queue mutations, archive edits, service restarts, package installs, or production configuration changes were made. The cooldown marker was read only. Worker/queue inspection was read-only. The corrective code was developed and tested in an isolated worktree/venv.
 
 ## Code change status
 
-No application code change was made. The controlled test confirms the primary issue is external IP blocking, not a ref code defect. The latent packaging, logging, and queue-integration defects remain; the next action above is the only recommendation. The `references.md` parser observation remains non-causal and out of scope.
+The corrective implementation is complete on `fix/durable-transcript-queue`: configurable `remote_first`/`local_only` mode, explicit durable queue submission, safe pending fallback, tests, and docs. It is not deployed. The enhanced `get_transcript.py` packaging defect remains out of scope. The `references.md` parser observation remains non-causal and out of scope.

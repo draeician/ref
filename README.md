@@ -20,11 +20,23 @@ pipx install 'ref-cli==1.6.11'
 
 ### Local transcription queue (optional)
 
-When YouTube captions are unavailable, `ref` records the URL in
-`transcript-pending.md` (the GPU worker can auto-import that file into the
-durable queue). If [local-transcribe](https://github.com/draeician/local_transcribe)
-(≥ 0.5.0) is available, `ref` may also enqueue directly. No install prompt is
-shown when it is missing. See `docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`.
+When YouTube captions are unavailable, `ref` enqueues the URL for local
+transcription. It prefers the in-process
+[local-transcribe](https://github.com/draeician/local_transcribe) queue API,
+then an explicitly configured `lt` executable (`REF_LOCAL_TRANSCRIBE_LT`), then
+`lt` on `PATH`. The durable queue directory can be pinned with
+`REF_LOCAL_TRANSCRIBE_QUEUE_DIR` and `REF_LOCAL_TRANSCRIBE_QUEUE_UUID`;
+explicit paths must be absolute. `transcript-pending.md` remains the final
+fallback, and `ref` never reports a durable enqueue when only that file was
+updated. No install prompt is shown when local-transcribe is missing. See
+`docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`.
+
+Set `REF_YOUTUBE_TRANSCRIPT_MODE=local_only` (or
+`youtube_transcript_mode: local_only`) to stop calling `youtube-transcript-api`
+entirely on a blocked host. Existing transcript JSON is reused; otherwise the
+video is queued for local transcription. The default `remote_first` preserves
+direct-caption behavior. Metadata enrichment and show-note discovery continue in
+both modes.
 
 ### HTTP API (`ref-api`, optional)
 
@@ -229,6 +241,9 @@ without stampeding.
   ```bash
   rm ~/references/transcripts/.youtube-transcript-block.json
   ```
+- `REF_YOUTUBE_TRANSCRIPT_MODE=local_only` bypasses the cooldown/provider path
+  entirely without reading or modifying the marker. Use `remote_first` to
+  resume normal direct-caption attempts.
 
 ## Usage
 

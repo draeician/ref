@@ -11,7 +11,12 @@ from youtube_transcript_api._errors import RequestBlocked
 from ref_cli import cli
 import get_transcript
 
-QUEUED_GENERIC = "Transcript unavailable (queued for local-transcribe)"
+QUEUED_BLOCKED = (
+    "Transcript unavailable (YouTube blocked; queued for local-transcribe)"
+)
+QUEUED_NO_CAPTIONS = (
+    "Transcript unavailable (no captions; queued for local-transcribe)"
+)
 QUEUED_WORKER = (
     "Transcript unavailable (queued for local-transcribe worker; execution exec-1)"
 )
@@ -53,7 +58,7 @@ def test_fetch_youtube_transcript_returns_blocked(monkeypatch, tmp_path):
     assert method == "blocked"
 
     formatted = cli.format_transcript_failure(failure_info)
-    assert QUEUED_GENERIC in formatted
+    assert formatted == QUEUED_BLOCKED
     assert "No transcript available" not in formatted
     assert cli.should_queue_transcript_pending(failure_info)
 
@@ -66,7 +71,7 @@ def test_legacy_no_transcript_failure_queues_and_formats():
     assert cli.is_no_transcript_failure(failure_info)
     assert cli.should_queue_transcript_pending(failure_info)
     formatted = cli.format_transcript_failure(failure_info)
-    assert formatted == QUEUED_GENERIC
+    assert formatted == QUEUED_NO_CAPTIONS
     assert "No transcript available" not in formatted
 
 
@@ -76,7 +81,7 @@ def test_enhanced_no_transcript_failure_queues():
         "No transcript available for video abcd1234567: subtitles are disabled",
     )
     assert cli.should_queue_transcript_pending(failure_info)
-    assert cli.format_transcript_failure(failure_info) == QUEUED_GENERIC
+    assert cli.format_transcript_failure(failure_info) == QUEUED_NO_CAPTIONS
 
 
 def test_format_transcript_failure_uses_queue_message():
