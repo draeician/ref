@@ -179,7 +179,7 @@ Branch: `fix/durable-transcript-queue` (based on `main` at `53f4c0c`). No produc
 - Pending-file writes now return a failure result if the file cannot be updated; ref does not claim the URL was recorded when it was not.
 - Updated `README.md`, `docs/LOCAL_TRANSCRIBE_QUEUE_INTEGRATION.md`, and both config templates.
 - Added `tests/test_transcript_queue_modes.py` (17 tests) and updated blocking expectations in `tests/test_transcript_blocking.py`.
-- Full suite: **406 passed, 1 warning** in the isolated test venv. Wheel build succeeds and reports `1.6.12b1.dev108+g53f4c0c4a.d20261026` (newer than production `dev104`); the post-commit build is expected to report `dev109`.
+- Full suite: **406 passed, 1 warning** in the isolated test venv. A post-change wheel build succeeded at `1.6.12b1.dev109+gf158f2d1c` (newer than production `dev104`).
 
 ## Worker / backlog findings (read-only)
 
