@@ -1,19 +1,40 @@
 # HANDOFF — YouTube transcript routing investigation
 
 **Date:** 2026-10-26 (UTC)  
-**Mode:** diagnostics only; no application code, production config, service, queue, or archive changes were made.  
+**Mode:** diagnostics only; one authorized live fetch was performed. No application code, production config, service, queue, or archive changes were made.
 **Repository:** https://github.com/draeician/ref  
 **Scope:** why recent YouTube ingests are routed to local-transcribe/Whisper instead of using captions directly.
 
 ## Executive diagnosis
 
-**Primary cause (high confidence): a real YouTube provider IP block, amplified by the cooldown design.** Direct caption retrieval worked through **2026-10-25T18:36:26Z**. The first post-success failure was **2026-10-26T00:38:09Z**, when the provider returned a block-family error (`RequestBlocked`/`IpBlocked`). The cooldown then suppressed every subsequent transcript provider call for one hour. Each recovery probe after cooldown expiry was blocked again, so the cycle repeated at 05:46, 11:30, 12:31, and 14:37 UTC.
+**Primary cause (confirmed): YouTube is blocking direct caption retrieval from `minion-26`.** A controlled single-video test at **2026-10-26T18:13:09Z** returned `youtube_transcript_api._errors.IpBlocked` after 1.257s. `IpBlocked` is a subclass of `RequestBlocked` and represents an IP-level block; this library raises it for HTTP 429 or a reCAPTCHA challenge page. The numeric status was not exposed. The block began by **2026-10-26T00:38:09Z** and was still active at 18:13Z. The cooldown then suppressed every subsequent transcript provider call for one hour; each recovery probe was blocked again, so the cycle repeated at 05:46, 11:30, 12:31, and 14:37 UTC.
 
 **Secondary cause (high confidence): the local-transcribe queue is not reachable from the running service.** The service virtualenv does not contain `local_transcribe`, and the systemd service `PATH` does not contain `lt`; `lt` also has no configured queue path on this host. Every failure therefore takes the final fallback: append to `transcript-pending.md`. No new local-transcribe/Whisper queue job has been created since **2026-10-24T21:03:29Z**, and none of the recent sample video IDs appear in the queue.
 
 **Latent defect (high confidence): the enhanced `get_transcript.py` handler is not packaged and cannot be imported in production.** `ref_cli.cli.get_youtube_transcript_with_metadata` is `None` in the running service. The legacy provider path still worked until the IP block, so this is not the trigger, but it removes the enhanced path and contributes to poor diagnostics.
 
-**Diagnostics gap (high confidence): the original provider exception is hidden.** `finish_probe` logs only a generic cooldown warning; the provider exception class/message is logged at `debug`/`info` levels that are not emitted by the service. The exact block subtype (429 `IpBlocked` vs bot-detection `RequestBlocked` vs another cause) cannot be established from current logs.
+**Diagnostics gap (high confidence): production logs hide the provider exception.** The controlled test identified `IpBlocked`, but the running service logs only the generic cooldown warning; it does not record the exception class/message. The test also confirmed that the exception object does not expose a numeric HTTP status.
+
+## Controlled live test — 2026-10-26T18:13:09Z
+
+Authorized test: exactly one `YouTubeTranscriptApi().fetch("rRtN1pN6KQw")` invocation with zero retries, using the production interpreter and the library directly (not `ref` and not the `/urls` endpoint). No proxy configuration was supplied, so the library's internal retry path was disabled.
+
+| Field | Result |
+|---|---|
+| Timestamp | Started **2026-10-26T18:13:09Z**; finished **2026-10-26T18:13:11Z** |
+| Outcome | **Failure** |
+| Exception class | **`IpBlocked`** |
+| Exception module | `youtube_transcript_api._errors` |
+| Exception MRO | `IpBlocked` → `RequestBlocked` → `CouldNotRetrieveTranscript` → `YouTubeTranscriptApiException` → `Exception` |
+| Sanitized message | `Could not retrieve a transcript for the video <url> This is most likely caused by: | YouTube is blocking requests from your IP. This usually is due to one of the following reasons:` |
+| Sanitized cause | `YouTube is blocking requests from your IP. This usually is due to one of the following reasons: | - You have done too many requests and your IP has been blocked by YouTube` |
+| HTTP status | **Not exposed** (`null` on the exception object). This library raises `IpBlocked` for HTTP 429 or a reCAPTCHA challenge page; the invocation did not expose which condition occurred. |
+| Caption segments | Not applicable (failure) |
+| Elapsed time | **1.257 s** |
+| Preflight | Marker expired (`blocked_until` = 2026-10-26T15:37:13Z), `lease_expires_at` = 0.0, `lease_owner` = null, `next_probe_at` = 0.0; no active transcript/provider probe process; no recent transcript/cooldown journal lines |
+| Transcript text | Not printed, downloaded, or archived |
+
+This resolves the earlier `RequestBlocked` vs `IpBlocked` ambiguity: the provider returned **`IpBlocked`**, not the playability-level bot-detection `RequestBlocked` class.
 
 ## Verified production runtime
 
@@ -78,6 +99,7 @@ Journal retention begins 2026-10-22T21:55Z.
 | Block warning 3 | 2026-10-26T11:30:50Z | cooldown until 12:30:50Z |
 | Block warning 4 | 2026-10-26T12:31:57Z | cooldown until 13:31:57Z |
 | Block warning 5 | 2026-10-26T14:37:13Z | cooldown until 15:37:13Z |
+| Controlled live test | **2026-10-26T18:13:09Z** | `IpBlocked` after 1.257s; no retry; block still active |
 
 There were 10 cooldown warnings total in the retained journal since 2026-10-22, including 5 on 2026-10-24 and 5 on 2026-10-26.
 
@@ -105,7 +127,7 @@ Additional measurements:
 
 ## Failure classification
 
-- **`RequestBlocked` / `IpBlocked` family:** confirmed 5 times in the last 50 (plus 5 earlier warnings on 2026-10-24). The code only records the generic `("blocked", message)` failure and emits one warning; the exact subclass and provider message are not in the journal. A 429 would surface as `IpBlocked`; bot detection would surface as `RequestBlocked`. This distinction is unresolved.
+- **`RequestBlocked` / `IpBlocked` family:** confirmed 5 times in the last 50 (plus 5 earlier warnings on 2026-10-24). The code only records the generic `("blocked", message)` failure and emits one warning, so the historical subclass was not in the journal. The controlled test on the same host/path returned `IpBlocked`, which is the best current classification for this block. In this library, HTTP 429 and a reCAPTCHA challenge both surface as `IpBlocked`; playability-level bot detection surfaces as `RequestBlocked`.
 - **`NoTranscriptFound` / `TranscriptsDisabled`:** not explicitly evidenced. The 3 pre-block pending rows (`RPrgNFnbAhQ`, `Jy7FMagiTFk`, `_vaNn_xFS_Y`) could be genuine missing captions, but the logs do not retain the method/message. No `TranscriptsDisabled` or `NoTranscriptFound` text appears in the journal.
 - **Network / unexpected:** one row (`_sY20BGB1Tg`, 2026-10-25T15:32:12Z) stores `No transcript available (Legacy method: no element found: line 1, column 0)`. This is an XML/response parse failure, not a confirmed missing caption; it was not queued because the message does not match the no-transcript phrase list.
 - **Import error:** enhanced handler `ModuleNotFoundError` is present in production, but it is a packaging defect, not a per-video failure. The legacy path is used.
@@ -128,15 +150,15 @@ Even if `lt` were on `PATH`, `lt queue path` on this host reports no configured 
 
 **Established:**
 
-1. The provider is returning a block-family error to this host's IP; the cooldown then suppresses all requests for an hour.
+1. The provider returned `IpBlocked` to this host's IP at 2026-10-26T18:13:09Z; the block was already active at 2026-10-26T00:38:09Z and persisted through the controlled test. The cooldown then suppresses all requests for an hour.
 2. Every request inside the cooldown is treated as unavailable and sent to the pending-file fallback without a caption attempt.
 3. The service cannot reach the durable local-transcribe queue (missing module and missing `lt`/queue config), so failures accumulate in `transcript-pending.md` rather than becoming Whisper jobs.
 4. The enhanced handler is not importable in any normal installation; production is using only the legacy path.
-5. Current logs do not preserve the provider exception class/message or successful retrieval events.
+5. Current logs do not preserve the provider exception class/message or successful retrieval events; the controlled test bypassed this gap by calling the library directly.
 
 **Unresolved:**
 
-- Is the block a 429 rate limit (`IpBlocked`) or bot/recaptcha detection (`RequestBlocked`)? The cooldown warning cannot distinguish them.
+- What caused YouTube to classify this IP as blocked (request history vs cloud/provider reputation) is not exposed. The class confirms an IP-level block (`IpBlocked`), but does not distinguish HTTP 429 from a reCAPTCHA challenge page.
 - Are the 3 pre-block pending rows genuine missing captions or another failure? Logs are insufficient.
 - Are the blocked/skipped videos actually caption-capable? No provider attempt was made for 26 of them, so availability is unknown.
 - Is the pending file being imported by the GPU worker? No queue evidence exists since 2026-10-24T21:03:29Z; the queue worker state shows a last heartbeat of 2026-10-25T15:28:05Z.
@@ -145,21 +167,12 @@ There is no evidence that successfully fetched captions are being misclassified 
 
 ## Exactly one recommended next action
 
-**Authorize one controlled, single-video live diagnostic — and only one — now that the cooldown is expired.** Use a known-captioned video such as `rRtN1pN6KQw` (last confirmed direct success), call the legacy `YouTubeTranscriptApi().fetch()` path once, and capture the raw exception class/message and result. Do not enqueue, do not touch the pending file, do not use cookies/proxies, and do not make bulk requests.
-
-This one test distinguishes a persistent IP-level block from a code/packaging defect. If it returns `RequestBlocked`/`IpBlocked`, the next work is IP/block remediation; if it succeeds, the next work is tracing why the ref path fails despite direct library access. No code change should be made before that result.
+**Authorize a single corrective change: route IP-blocked YouTube URLs into the durable local-transcribe/Whisper queue instead of `transcript-pending.md`, and do not probe YouTube from `minion-26` again until the block is resolved.** The controlled test confirms that retrying direct retrieval from this IP cannot succeed; the current pending-file fallback is the correct policy but does not reach the queue. No corrective change is implemented in this task.
 
 ## Safety
 
-No live YouTube probe was run during this investigation. No cookies, proxies, bulk requests, queue mutations, archive edits, service restarts, package installs, or production configuration changes were made. The cooldown marker was read only.
+One authorized live YouTube probe was run at 2026-10-26T18:13:09Z. It returned `IpBlocked`; no retry was made. No transcript text was printed, downloaded, or archived. No cookies, proxies, bulk requests, queue mutations, archive edits, service restarts, package installs, or production configuration changes were made. The cooldown marker was read only.
 
 ## Code change status
 
-No application code change is recommended yet. After the controlled test, likely follow-ups are:
-
-- package `get_transcript.py` as an importable module (or move the handler into `ref_cli`);
-- log the provider exception class/message at warning/error level and log direct successes;
-- fix the pending-file queue integration or explicitly configure the producer to use the durable queue;
-- correct the `references.md` parser's greedy title match, which currently misparses rows whose placeholder contains parentheses (observed during sampling; not causal to this issue).
-
-These are diagnostics findings, not authorized changes.
+No application code change was made. The controlled test confirms the primary issue is external IP blocking, not a ref code defect. The latent packaging, logging, and queue-integration defects remain; the next action above is the only recommendation. The `references.md` parser observation remains non-causal and out of scope.
