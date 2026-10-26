@@ -52,6 +52,22 @@ removable_keys:
 rumble_cookies_from_browser: null
 
 # ---------------------------------------------------------------------------
+# YouTube transcripts and durable local transcription
+# ---------------------------------------------------------------------------
+# remote_first (default): try captions remotely, then queue locally on failure.
+# local_only: never call youtube-transcript-api; reuse on-disk JSON or queue locally.
+# Env override: REF_YOUTUBE_TRANSCRIPT_MODE
+youtube_transcript_mode: remote_first
+
+# Optional absolute paths for the local-transcribe queue producer.
+# Needed when ref-api's venv cannot import local_transcribe and `lt` is not on PATH.
+# Env overrides: REF_LOCAL_TRANSCRIBE_LT, REF_LOCAL_TRANSCRIBE_QUEUE_DIR,
+#                REF_LOCAL_TRANSCRIBE_QUEUE_UUID
+local_transcribe_lt: null
+local_transcribe_queue_dir: null
+local_transcribe_queue_uuid: null
+
+# ---------------------------------------------------------------------------
 # Skip patterns — URLs matching these are not recorded
 # ---------------------------------------------------------------------------
 # Exact match or glob (*). Checked locally for `ref --file`; also on the server

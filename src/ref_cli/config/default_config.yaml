@@ -19,6 +19,20 @@ removable_keys:
 # For Rumble 403: set to browser name (e.g. firefox, chrome) to use its cookies with yt-dlp.
 # Some systems require the browser to be closed when using this. Env override: REF_RUMBLE_COOKIES_BROWSER
 rumble_cookies_from_browser: null
+# YouTube transcript retrieval:
+#   remote_first (default) — try captions remotely, then queue for local transcription.
+#   local_only — never call youtube-transcript-api; reuse on-disk JSON or queue locally.
+# Env override: REF_YOUTUBE_TRANSCRIPT_MODE
+youtube_transcript_mode: remote_first
+
+# Durable local-transcribe queue (optional). Absolute paths only.
+# When the Python package is unavailable, ref invokes `lt queue add --queue-dir`.
+# Env overrides: REF_LOCAL_TRANSCRIBE_LT, REF_LOCAL_TRANSCRIBE_QUEUE_DIR,
+#                REF_LOCAL_TRANSCRIBE_QUEUE_UUID
+local_transcribe_lt: null
+local_transcribe_queue_dir: null
+local_transcribe_queue_uuid: null
+
 skip_patterns:
   # URLs to skip during processing (exact matches or glob patterns)
   # Examples:

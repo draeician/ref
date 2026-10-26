@@ -1,9 +1,9 @@
 # local-transcribe queue integration (ref-cli)
 
 **Audience:** ref-cli maintainers  
-**Depends on:** [local-transcribe](https://github.com/draeician/local_transcribe) **≥ 0.5.0**  
+**Depends on:** [local-transcribe](https://github.com/draeician/local_transcribe) **≥ 0.7.0**
 **Primary hook today:** `src/ref_cli/cli.py` → `add_url_to_pending_file()`  
-**Status:** Partial wiring exists (task 035 draft). This document specifies the complete contract, including **user-visible reporting when the source is already in the queue**.
+**Status:** Implemented. This document specifies the complete contract, including **user-visible reporting when the source is already in the queue**.
 
 ---
 
@@ -55,29 +55,51 @@ local_transcribe.queue_api.enqueue_youtube_safe(url, origin="ref", …)
         └─ queue unavailable ──► append transcript-pending.md ──► report fallback
 ```
 
-### Recommended path: pending file only (no local-transcribe in ref)
+### Producer path (queue-first)
 
-ref can keep appending URLs to:
+`ref` tries the durable queue in this order:
 
-`~/references/transcripts/transcript-pending.md`
+1. In-process `local_transcribe.queue_api.enqueue_youtube_safe(...)`.
+2. An explicitly configured absolute `lt` executable, using
+   `lt queue add ... --queue-dir ...`.
+3. `lt` on `PATH` (legacy behavior).
+4. `transcript-pending.md` as the final fallback.
 
-The **GPU worker** watches that file and auto-imports into the durable queue
-(`queue.watch_legacy_pending: true`, default). Ref does **not** need
-`local-transcribe` installed or `pipx inject`.
+When the durable queue succeeds, `ref` reports the queue kind and execution ID.
+When only the pending file is updated, the status says so explicitly. `ref`
+never reports a durable enqueue for a pending-file write.
 
-### Optional: direct enqueue from ref
+### Producer configuration
 
-1. Either `lt` on `PATH`, or `local-transcribe` importable / inject into ref.
-2. Same `~/.config/local-transcribe/config.yaml` (`queue.path` + UUID) as the worker.
-3. Shared NFS mount for the queue path.
+Absolute paths are required for explicit configuration:
 
-If direct enqueue is unavailable, ref falls back to `transcript-pending.md`
-(and the worker imports it).
+| Setting | Environment | Config key |
+|---|---|---|
+| Transcript mode | `REF_YOUTUBE_TRANSCRIPT_MODE` | `youtube_transcript_mode` |
+| `lt` executable | `REF_LOCAL_TRANSCRIBE_LT` | `local_transcribe_lt` |
+| Durable queue directory | `REF_LOCAL_TRANSCRIBE_QUEUE_DIR` | `local_transcribe_queue_dir` |
+| Expected queue UUID (optional pin) | `REF_LOCAL_TRANSCRIBE_QUEUE_UUID` | `local_transcribe_queue_uuid` |
 
-ref does **not** start the worker. The GPU host runs:
+`REF_YOUTUBE_TRANSCRIPT_MODE` values:
+
+- `remote_first` (default): preserve direct-caption retrieval, then queue on
+  block/no-captions.
+- `local_only`: never call `youtube-transcript-api`; reuse an existing
+  transcript JSON or enqueue for local transcription. Cooldown markers are not
+  read or modified in this mode.
+
+Before invoking `lt`, `ref` verifies that the configured queue directory exists,
+contains a parseable `queue.id`, and matches the optional expected UUID. Any
+missing executable, identity mismatch, unavailable NFS path, CLI failure, or
+unparseable output falls back to `transcript-pending.md` with a clear status.
+
+Example service environment (`~/.config/ref/ref-api.env`):
 
 ```bash
-systemctl --user enable --now local-transcribe-worker.service
+REF_YOUTUBE_TRANSCRIPT_MODE=local_only
+REF_LOCAL_TRANSCRIBE_LT=/home/draeician/.local/bin/lt
+REF_LOCAL_TRANSCRIBE_QUEUE_DIR=/opt/md2/music/youtube/transcripts/transcription-queue
+REF_LOCAL_TRANSCRIBE_QUEUE_UUID=8c6fc098-8cbe-41ae-9689-dd759797a582
 ```
 
 ### API to call (preferred)
@@ -92,13 +114,15 @@ outcome = enqueue_youtube_safe(
     url,
     origin="ref",
     priority=20,                 # interactive / capture priority
+    queue_dir=Path("/path/to/transcription-queue"),  # optional explicit queue
     pending_fallback=PENDING,
 )
 ```
 
 - Prefer **`enqueue_youtube_safe`** over bare `enqueue_youtube`.
 - Bare `enqueue_youtube` raises on config/NFS errors; capture must not die for that.
-- CLI equivalent for operators: `lt queue add "$URL" --origin ref --priority 20`.
+- CLI equivalent for operators:
+  `lt queue add "$URL" --origin ref --priority 20 --queue-dir /path/to/queue`.
 
 ---
 
@@ -172,35 +196,32 @@ Also log at INFO with `kind`, `execution_id`, and `source_key` for operators.
 
 ### 4.1 `add_url_to_pending_file` (`src/ref_cli/cli.py`)
 
-**Today (gaps):**
-- Calls `enqueue_youtube` (raises) instead of `enqueue_youtube_safe`.
-- Logs `result.kind` but does not surface `existing_active` to the end user.
-- User-facing failure text still says `transcript-pending.md` even when the durable queue succeeded.
-- Fallback append format may not match local-transcribe’s markdown `- url` style (prefer using `append_pending_url` from `queue_api`, or keep ref’s format consistently).
-
-**Required behavior:**
+**Implemented behavior:**
 
 1. If `video_id` and transcript JSON already on disk → skip (unchanged).
-2. Call `enqueue_youtube_safe(..., pending_fallback=TRANSCRIPT_PENDING_FILE)`.
-3. Return or propagate enough info for the caller to print §3 messages (either return `SafeEnqueueOutcome`, or set a thread-local / return a small result dataclass — today the function returns `None`).
-4. On `existing_active` / `enqueued` / etc., **do not** also append to `transcript-pending.md`.
-5. Only use the pending file when `fell_back_to_pending` is true (or `ImportError` before the API exists).
+2. Resolve and verify explicit queue settings, then try
+   `enqueue_youtube_safe(..., pending_fallback=TRANSCRIPT_PENDING_FILE)`.
+3. If the package is unavailable, use an explicitly configured `lt` executable
+   (or `lt` on `PATH`) with `--queue-dir`.
+4. Return `PendingQueueResult` for every path so callers can show the exact
+   outcome: enqueued, existing active, already completed, requires force,
+   pending-file fallback, or pending-file failure.
+5. Do not also append to `transcript-pending.md` when the durable queue
+   succeeded.
+6. Only use the pending file when the queue is unavailable or submission fails.
+7. Never report a durable enqueue when the URL was only written to the pending
+   file.
 
-**Suggested signature upgrade:**
+The stable result shape is:
 
 ```python
 @dataclass
 class PendingQueueResult:
-    action: str  # enqueued | existing_active | already_completed | requires_force | pending_file | skipped_on_disk
+    action: str  # enqueued | existing_active | already_completed | requires_force | pending_file | pending_file_failed | skipped_on_disk
     message: str
     execution_id: str | None = None
     source_key: str | None = None
-
-def add_url_to_pending_file(url: str, video_id: str | None = None) -> PendingQueueResult:
-    ...
 ```
-
-Call sites that currently ignore the return value should print `result.message` (or fold it into `format_transcript_failure`).
 
 ### 4.2 User-visible strings
 
@@ -212,15 +233,19 @@ Call sites that currently ignore the return value should print `result.message` 
 
 ### 4.3 Packaging / runtime
 
-Document for operators:
+The producer does **not** need `local_transcribe` installed in its own venv.
+Configure an absolute `lt` path and queue directory instead:
 
 ```bash
-# After installing/upgrading both tools
-pipx inject ref-cli local-transcribe
-# or reinstall ref against an env that already has local-transcribe 0.5.0+
+REF_LOCAL_TRANSCRIBE_LT=/home/you/.local/bin/lt
+REF_LOCAL_TRANSCRIBE_QUEUE_DIR=/path/to/transcription-queue
+REF_LOCAL_TRANSCRIBE_QUEUE_UUID=<queue-uuid>
 ```
 
-Without inject, `ImportError` → silent fallback to the pending file forever.
+`pipx inject ref-cli local-transcribe` remains optional for in-process API use,
+but is not required for the supported CLI path. A missing executable, invalid
+path, or identity mismatch falls back to `transcript-pending.md` with an
+explicit message.
 
 ### 4.4 Optional: pre-check without enqueue
 
@@ -275,16 +300,19 @@ sequenceDiagram
 
 ## 6. Acceptance checklist
 
-- [x] `local-transcribe>=0.5.0` importable from the ref runtime (`pipx inject` documented).
 - [x] `add_url_to_pending_file` uses `enqueue_youtube_safe` with pending fallback.
+- [x] Explicit absolute `lt`/queue configuration works without importing `local_transcribe`.
+- [x] Queue directory and optional expected UUID are verified before enqueue.
+- [x] `local_only` never calls `youtube-transcript-api` and does not modify cooldown markers.
 - [x] When source is already `pending`/`processing`/`retry`, user sees **“already in the transcription queue”** (with status + execution id when available).
 - [x] New enqueue reports **queued for worker**, not “queued in transcript-pending.md”.
 - [x] Fallback path still writes pending file and says so explicitly.
 - [x] Enrichment / tests updated for new message strings.
-- [ ] Manual smoke:
+- [ ] Manual smoke (requires deployment authorization):
   1. `ref` capture a URL with no captions → message shows enqueued + id.
   2. Capture the **same** URL again → message shows `existing_active` / already in queue.
   3. Stop NFS / break queue config → message shows pending-file fallback; capture still succeeds.
+  4. `local_only` capture → no provider request; message shows local-only reason and queue/pending outcome.
 
 ---
 
