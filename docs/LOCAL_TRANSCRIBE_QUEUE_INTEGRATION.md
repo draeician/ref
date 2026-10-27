@@ -265,6 +265,42 @@ Enqueue itself already performs reservation / active-job checks and returns `exi
 
 ---
 
+## 4.6 Automatic reconciliation of completed executions
+
+Once a queued execution completes, `ref-api` reconciles the corresponding
+placeholder in `references.md`. The implementation lives in
+`src/ref_cli/transcript_reconcile.py`; the API lifecycle starts/stops a
+background worker in `src/ref_api/service.py`.
+
+- Runs once at startup and then every
+  `REF_TRANSCRIPT_RECONCILE_INTERVAL_SECONDS`
+  (`transcript_reconcile_interval_seconds`, default **300 s**).
+- Enabled by default; set `REF_TRANSCRIPT_RECONCILE_ENABLED=false`
+  (`transcript_reconcile_enabled: false`) to disable.
+- Recognizes durable-queue placeholders containing
+  `queued for local-transcribe worker` or `already in transcription queue`
+  plus an execution UUID.
+- Looks up only that execution ID in the queue state directories (never scans
+  historical completed jobs). It requires `status: completed`, matching
+  `source_key`/`source` video, a valid execution generation, and a queue key
+  record whose generation and `current_execution_id` identify the same
+  execution. Missing or conflicting generation data is rejected.
+- Reads `<paths.transcripts>/<video_id>.json`, **not** the worker-local
+  `output_path` in older queue records. The JSON must have nonempty
+  `transcript` text and `metadata.id == video_id`.
+- Replaces only the placeholder field in `extra`; timestamp, URL, title,
+  uploader, source, `@meta` fields, and other extras are preserved.
+- Re-reads and revalidates target rows under the shared archive lock, writes a
+  compressed backup before the first change in a pass, and makes no write when
+  nothing changes.
+- Queue state is read-only. Reconciliation never writes queue files, never
+  re-enqueues, never calls YouTube, never downloads media, and never invokes
+  Whisper. It does not touch `transcript-pending.md` or the legacy backlog.
+
+The archive lock is process-local. Run reconciliation only in the single
+`ref-api` host process that owns archive writes; a separate CLI process writing
+the same archive is outside that lock (the existing single-writer convention).
+
 ## 5. Interaction summary (sequence)
 
 ```mermaid

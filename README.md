@@ -245,6 +245,41 @@ without stampeding.
   entirely without reading or modifying the marker. Use `remote_first` to
   resume normal direct-caption attempts.
 
+### Automatic transcript reconciliation
+
+When a video is queued for local transcription, `references.md` keeps a
+placeholder such as `Transcript unavailable (queued for local-transcribe
+worker; execution <id>)`. Once the durable queue reports that execution
+`completed` and its JSON is present in the configured shared transcript
+directory, `ref-api` replaces only that status field with the transcript path.
+No YouTube request, media download, or Whisper invocation is involved.
+
+Reconciliation runs once at `ref-api` startup and then periodically. It is
+enabled by default, but does nothing unless a durable queue directory is
+configured. Configure it with environment variables in
+`~/.config/ref/ref-api.env` (or the matching `config.yaml` keys):
+
+| Setting | Environment | Config key | Default |
+|---|---|---|---|
+| Enable reconciler | `REF_TRANSCRIPT_RECONCILE_ENABLED` | `transcript_reconcile_enabled` | `true` |
+| Interval (seconds) | `REF_TRANSCRIPT_RECONCILE_INTERVAL_SECONDS` | `transcript_reconcile_interval_seconds` | `300` |
+
+The shared transcript directory is the existing `paths.transcripts` setting
+(not the worker-local `output_path` recorded in older queue executions).
+Completed executions are accepted only when the row video ID matches the
+execution's `source_key`/`source`, the execution generation is valid, and the
+queue key record identifies that same execution as the current generation.
+Missing/conflicting generation data, pending/failed/cancelled executions,
+malformed or empty transcripts, and mismatched transcript metadata are skipped.
+
+The pass only reads queue state; it never writes queue files, never re-enqueues
+jobs, and never touches `transcript-pending.md`. Before the first archive change
+in a pass it writes a compressed `references.md.bak-<timestamp>.gz` backup and
+then re-reads/revalidates target rows under the process-local archive lock. A
+pass with no changes writes nothing. Set the enable flag to `false` to disable
+automatic reconciliation; restart `ref-api` after changing environment
+variables.
+
 ## Usage
 
 ### Interactive Mode

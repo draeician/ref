@@ -41,9 +41,11 @@ async def lifespan(_app: FastAPI):
     from ref_api import service
 
     service.start_show_notes_worker()
+    service.start_transcript_reconciler()
     try:
         yield
     finally:
+        service.stop_transcript_reconciler()
         service.stop_show_notes_worker()
 
 
