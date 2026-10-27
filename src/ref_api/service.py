@@ -535,6 +535,151 @@ def stop_show_notes_worker() -> None:
         # eventual exit clears the singleton instead of spawning a successor.
 
 
+# ---------------------------------------------------------------------------
+# Automatic transcript reconciliation
+# ---------------------------------------------------------------------------
+#
+# The durable local-transcribe queue completes work asynchronously. A periodic
+# pass replaces queued placeholders in references.md with the validated shared
+# transcript path. The core logic lives in ``ref_cli.transcript_reconcile`` so it
+# can be tested without the API. This worker only schedules it.
+
+_reconcile_worker: Optional["_TranscriptReconcileWorker"] = None
+_reconcile_worker_lock = threading.Lock()
+
+
+def _reconcile_config() -> Dict[str, Any]:
+    """Load transcript-reconciliation config without failing the service."""
+    config_file = getattr(ref_cli, "CONFIG_FILE", "")
+    if not config_file or not os.path.exists(config_file):
+        return {}
+    try:
+        config = ref_cli.load_config()
+        return config if isinstance(config, dict) else {}
+    except Exception:  # noqa: BLE001 - config is advisory only
+        logger.warning(
+            "Transcript reconciliation: unable to load config", exc_info=True
+        )
+        return {}
+
+
+def _run_transcript_reconciliation_once(
+    config: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Run one reconciliation pass against the service archive."""
+    from ref_cli.transcript_reconcile import reconcile_transcripts
+
+    if config is None:
+        config = _reconcile_config()
+
+    result = reconcile_transcripts(
+        archive_path=ref_cli.UNIFIED,
+        config=config,
+    )
+    if result.updated:
+        logger.info("Transcript reconciliation: %s", result.summary())
+    elif result.candidates or result.errors:
+        logger.info("Transcript reconciliation: %s", result.summary())
+    else:
+        logger.debug("Transcript reconciliation: no queued placeholders")
+    return result
+
+
+class _TranscriptReconcileWorker:
+    """Background daemon thread that runs reconciliation on an interval."""
+
+    def __init__(
+        self,
+        interval_seconds: float,
+        reconcile_once=None,
+    ) -> None:
+        self._interval = max(float(interval_seconds), 0.001)
+        self._reconcile_once = reconcile_once or _run_transcript_reconciliation_once
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="ref-transcript-reconciler", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set():
+                try:
+                    self._reconcile_once()
+                except Exception:  # noqa: BLE001 - keep the reconciler alive
+                    logger.exception("Transcript reconciliation iteration failed")
+                self._stop.wait(self._interval)
+        finally:
+            _reconcile_worker_exited(self)
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Signal stop and join; True only if the thread fully exited."""
+        self._stop.set()
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+
+def _reconcile_worker_exited(worker: "_TranscriptReconcileWorker") -> None:
+    global _reconcile_worker
+    with _reconcile_worker_lock:
+        if _reconcile_worker is worker:
+            _reconcile_worker = None
+
+
+def start_transcript_reconciler(
+    *,
+    interval_seconds: Optional[float] = None,
+    reconcile_once=None,
+) -> bool:
+    """Start the reconciler (idempotent). Returns False when disabled."""
+    from ref_cli.transcript_reconcile import (
+        resolve_enabled,
+        resolve_interval_seconds,
+    )
+
+    global _reconcile_worker
+    config = _reconcile_config()
+    if not resolve_enabled(config):
+        logger.info("Transcript reconciliation disabled")
+        return False
+
+    interval = (
+        interval_seconds
+        if interval_seconds is not None
+        else resolve_interval_seconds(config)
+    )
+    with _reconcile_worker_lock:
+        if _reconcile_worker is not None and _reconcile_worker.is_alive():
+            return True
+        _reconcile_worker = _TranscriptReconcileWorker(
+            interval, reconcile_once=reconcile_once
+        )
+        _reconcile_worker.start()
+        logger.info(
+            "Transcript reconciliation started (interval=%ss)", interval
+        )
+        return True
+
+
+def stop_transcript_reconciler(*, timeout: float = 5.0) -> None:
+    """Stop the reconciler cleanly (idempotent)."""
+    global _reconcile_worker
+    with _reconcile_worker_lock:
+        worker = _reconcile_worker
+    if worker is None:
+        return
+    fully_stopped = worker.stop(timeout=timeout)
+    with _reconcile_worker_lock:
+        if _reconcile_worker is worker and fully_stopped:
+            _reconcile_worker = None
+    logger.info("Transcript reconciliation stopped")
+
+
 def process_many(inputs: List[str], force: bool = False) -> List[UrlResult]:
     """Process each input in order; ingest is serialized per URL via process_one."""
     return [process_one(item, force=force) for item in inputs]

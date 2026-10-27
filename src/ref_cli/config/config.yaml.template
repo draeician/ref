@@ -67,6 +67,16 @@ local_transcribe_lt: null
 local_transcribe_queue_dir: null
 local_transcribe_queue_uuid: null
 
+# Automatic reconciliation of completed durable-queue placeholders in
+# references.md. A pass runs at ref-api startup and then every interval seconds.
+# It reads only queue state and the shared transcripts directory; it does not
+# call YouTube, download media, invoke Whisper, re-enqueue jobs, or modify the
+# local-transcribe queue. Set enabled: false to disable.
+# Env overrides: REF_TRANSCRIPT_RECONCILE_ENABLED,
+#                REF_TRANSCRIPT_RECONCILE_INTERVAL_SECONDS
+transcript_reconcile_enabled: true
+transcript_reconcile_interval_seconds: 300
+
 # ---------------------------------------------------------------------------
 # Skip patterns — URLs matching these are not recorded
 # ---------------------------------------------------------------------------

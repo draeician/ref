@@ -57,6 +57,25 @@ def test_parse_and_format_with_meta() -> None:
     assert again.uploader == "Aim To Head Official"
 
 
+def test_status_field_with_parentheses_does_not_swallow_columns() -> None:
+    line = (
+        "2026-10-27T00:42:08|[https://www.youtube.com/watch?v=jNQXAC9IVRw]|"
+        "(Me at the zoo)|jawed|YouTube|Transcript unavailable (local-only mode; "
+        "queued for local-transcribe worker; execution "
+        "5d7be5b4-8401-4d4c-a9fd-77081c874b38)|"
+        f"{META_SENTINEL}|Film & Animation|media|UC4QobU6STFB0P71PMvOGN5A"
+    )
+    row = parse_data_line(line, 1)
+    assert row is not None
+    assert row.title == "Me at the zoo"
+    assert row.uploader == "jawed"
+    assert row.source == "YouTube"
+    assert row.extra.startswith("Transcript unavailable (local-only mode")
+    assert row.category == "Film & Animation"
+    assert row.role == "media"
+    assert row.channel_id == "UC4QobU6STFB0P71PMvOGN5A"
+
+
 def test_uploader_with_pipe_still_parses() -> None:
     line = (
         "2026-07-08T01:42:40|[https://www.youtube.com/watch?v=KX0GurmgAoo]|"

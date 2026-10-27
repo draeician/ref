@@ -56,7 +56,9 @@ META_SENTINEL = '@meta'
 _LINE_RE = re.compile(
     r'^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})'
     r'\|\[(?P<url>[^\]]+)\]'
-    r'\|\((?P<title>.*)\)\|'
+    # Title is delimited by ``)|``; keep this non-greedy so a status/extra field
+    # that itself contains parentheses cannot swallow the uploader/source fields.
+    r'\|\((?P<title>.*?)\)\|'
     r'(?P<rest>.*)$'
 )
 

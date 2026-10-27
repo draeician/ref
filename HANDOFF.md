@@ -15,6 +15,83 @@
 
 **Diagnostics gap (high confidence): production logs hide the provider exception.** The controlled test identified `IpBlocked`, but the running service logs only the generic cooldown warning; it does not record the exception class/message. The test also confirmed that the exception object does not expose a numeric HTTP status.
 
+## Phase 3 — automatic transcript reconciliation (implemented, not deployed)
+
+**Status:** Implemented and tested on a feature branch; **no production deployment,
+service restart, or live archive modification was performed under this task.**
+
+The storage-related findings below are **superseded** by the verified migration:
+Aether now has a symlink from `~/references/transcripts` to
+`/opt/md2/music/youtube/transcripts`, and the 542 missing `.generations` files
+were copied with SHA-256 verification and zero conflicts. `minion-26` can read
+all three smoke-test transcript JSON files. The remaining work was stale queued
+placeholders in `references.md`.
+
+### Implementation
+
+- Core reconciler: `src/ref_cli/transcript_reconcile.py`.
+- API lifecycle: startup pass plus periodic pass in `src/ref_api/service.py`;
+  started/stopped by the FastAPI lifespan in `src/ref_api/app.py`.
+- Only rows containing `queued for local-transcribe worker` or
+  `already in transcription queue` with an execution UUID are considered.
+- Only the referenced execution ID is loaded from the queue state directories;
+  historical completed jobs are never enumerated.
+- Requires `status: completed`, matching execution `source_key`/`source` video,
+  a valid execution generation, and a matching queue key record whose generation
+  and `current_execution_id` identify that execution. Missing or conflicting
+  generation data is rejected.
+- Reads the configured shared `paths.transcripts/<video_id>.json`, never the
+  worker-local `output_path`; requires nonempty transcript text and
+  `metadata.id == video_id`.
+- Replaces only the placeholder field in `extra`, preserving timestamp, URL,
+  title, uploader, source, `@meta`, and other extra fields.
+- Re-reads/revalidates target rows under the shared archive lock and writes a
+  compressed backup before the first change in a pass. Repeated passes are
+  idempotent and write nothing when no row changes.
+- Queue files are read-only; no re-enqueue, YouTube call, media download, or
+  Whisper invocation occurs. `transcript-pending.md` and the 792-URL legacy
+  backlog are untouched.
+
+### Configuration
+
+| Setting | Environment | Config key | Default |
+|---|---|---|---|
+| Enable reconciler | `REF_TRANSCRIPT_RECONCILE_ENABLED` | `transcript_reconcile_enabled` | `true` |
+| Interval (seconds) | `REF_TRANSCRIPT_RECONCILE_INTERVAL_SECONDS` | `transcript_reconcile_interval_seconds` | `300` |
+
+The reconciler is a no-op when no durable queue directory is configured. It uses
+the existing `REF_LOCAL_TRANSCRIBE_QUEUE_DIR` / `REF_LOCAL_TRANSCRIBE_QUEUE_UUID`
+settings and `paths.transcripts`.
+
+### Smoke-test acceptance cases
+
+On the first pass after deployment, these existing completed executions should
+replace their placeholders with the corresponding shared transcript JSON paths,
+without re-transcription:
+
+| Video ID | Execution ID | Expected transcript |
+|---|---|---|
+| `jNQXAC9IVRw` | `5d7be5b4-8401-4d4c-a9fd-77081c874b38` | `<paths.transcripts>/jNQXAC9IVRw.json` |
+| `0PT5c1z3LL8` | `0e5878f4-af13-4b6d-a43e-2811ecf5be48` | `<paths.transcripts>/0PT5c1z3LL8.json` |
+| `RRBN_4L09Mg` | `0b2f2e45-e793-485b-afd2-4d7d71d76f91` | `<paths.transcripts>/RRBN_4L09Mg.json` |
+
+### Deployment and rollback (future, separately authorized)
+
+1. Merge and install the package on `minion-26`; keep the queue settings already
+   in `~/.config/ref/ref-api.env`. Optionally add the reconciliation settings.
+2. Restart `ref-api.service` in an idle window. Verify `/health` and journal
+   lines showing the reconciler started, then confirm only the three placeholder
+   rows changed and a `.bak-<timestamp>.gz` backup exists.
+3. To roll back behavior without downgrading: set
+   `REF_TRANSCRIPT_RECONCILE_ENABLED=false` and restart. To roll back code,
+   restore the prior wheel/source revision and restart. Do not restore an archive
+   snapshot over newer captures; use the generated backup only if the rewritten
+   rows need manual recovery.
+
+Cross-process limitation: the archive lock is process-local. Reconciliation
+must run only in the single `ref-api` writer process; a separate CLI process
+writing the same archive is outside that lock (pre-existing single-writer model).
+
 ## Controlled live test — 2026-10-26T18:13:09Z
 
 Authorized test: exactly one `YouTubeTranscriptApi().fetch("rRtN1pN6KQw")` invocation with zero retries, using the production interpreter and the library directly (not `ref` and not the `/urls` endpoint). No proxy configuration was supplied, so the library's internal retry path was disabled.
@@ -267,13 +344,13 @@ Rollback was not required. If needed:
 - Queue identity depends on the NFS mount and `queue.id`; a mismatch or unavailable mount fails safely to the pending file.
 - The 792-URL backlog is still not imported. Draining it may create a large burst of local transcription work.
 - The worker heartbeat can look stale while idle; check the process/unit and lock, not just `state.json`. During the smoke test it updated and reported the active child execution.
-- **Remaining issue:** the worker writes completed transcript JSON to its local `aether:/home/draeician/references/transcripts` path, not the shared NFS archive. The primary job completed and produced `jNQXAC9IVRw.json` there, but `minion-26` cannot yet consume that file; `references.md` retains the queued placeholder. This is a worker output-path configuration gap outside PR #22.
+- ~~**Remaining issue:** the worker writes completed transcript JSON to its local `aether:/home/draeician/references/transcripts` path, not the shared NFS archive.~~ **Superseded:** Aether's `~/references/transcripts` now symlinks to `/opt/md2/music/youtube/transcripts`, the missing `.generations` files were copied and SHA-256 verified with zero conflicts, and `minion-26` can read all three smoke-test transcripts. The Phase 3 reconciler consumes the configured shared path rather than the old queue `output_path`.
 - The two show-note child jobs completed after the smoke capture; the queue drained cleanly on `aether`.
 - The NFS filesystem is 99% used (1.2T free); continued queue growth should be monitored.
 
 ## Exactly one recommended next action
 
-**Authorize a separate follow-up to make the `aether` worker publish completed transcript JSON to the shared archive (or configure its output path), because jobs currently complete into `aether`’s local `~/references/transcripts` and are not visible to `minion-26`; do not change worker configuration or import the 792-URL backlog under this deployment.**
+**Authorize a separately scheduled production deployment of Phase 3 on `minion-26` (install the merged package, restart `ref-api`, and verify the three smoke-test rows plus the backup), because the reconciler is implemented and tested but this task did not deploy it; do not import the 792-URL backlog or change Aether's worker configuration.**
 
 ## Safety
 
