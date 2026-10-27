@@ -244,10 +244,10 @@ One manual `POST /urls` at `2026-10-27T00:42:09Z` for **`jNQXAC9IVRw`** (“Me a
 
 **Side effect:** the single submitted URL triggered the existing show-note discovery worker, which automatically added two child YouTube rows and queue jobs:
 
-- `youtube:0PT5c1z3LL8` — execution `0e5878f4-af13-4b6d-a43e-2811ecf5be48` (processing)
-- `youtube:RRBN_4L09Mg` — execution `0b2f2e45-e793-485b-afd2-4d7d71d76f91` (pending)
+- `youtube:0PT5c1z3LL8` — execution `0e5878f4-af13-4b6d-a43e-2811ecf5be48` (completed)
+- `youtube:RRBN_4L09Mg` — execution `0b2f2e45-e793-485b-afd2-4d7d71d76f91` (completed)
 
-No additional manual captures were run. These child jobs are legitimate output of the existing show-note feature, not a retry of the smoke test.
+No additional manual captures were run. These child jobs are legitimate output of the existing show-note feature, not a retry of the smoke test. All three queue executions (primary and both children) were completed by the worker.
 
 **Backlog:** `/opt/md2/music/youtube/transcripts/transcript-pending.md` remained unchanged: 792 lines, SHA-256 `ba80807504d6d13c5a495453e04fb8c4f6ee61ba8277e6930e55fcc02f50713d`. No `queue.legacy_pending_file` change was made on `aether`.
 
@@ -268,7 +268,7 @@ Rollback was not required. If needed:
 - The 792-URL backlog is still not imported. Draining it may create a large burst of local transcription work.
 - The worker heartbeat can look stale while idle; check the process/unit and lock, not just `state.json`. During the smoke test it updated and reported the active child execution.
 - **Remaining issue:** the worker writes completed transcript JSON to its local `aether:/home/draeician/references/transcripts` path, not the shared NFS archive. The primary job completed and produced `jNQXAC9IVRw.json` there, but `minion-26` cannot yet consume that file; `references.md` retains the queued placeholder. This is a worker output-path configuration gap outside PR #22.
-- Two show-note child jobs are still processing/pending after the smoke capture; they are expected to drain on `aether`.
+- The two show-note child jobs completed after the smoke capture; the queue drained cleanly on `aether`.
 - The NFS filesystem is 99% used (1.2T free); continued queue growth should be monitored.
 
 ## Exactly one recommended next action
