@@ -526,8 +526,12 @@ left untouched. Final state: `HEAD` = `main` = `origin/main` = **`dd15d8ad444a91
 clean tree.
 
 **Post-merge documentation path.** Direct commits to `main` are prohibited, so these records were committed on
-`docs/record-url-dump-merge-cleanup` (branched at merged main) and opened as a **documentation-only PR left open for review**; it is
-not merged without authorization. Documentation only — no code, tests, or archive data changed; gate unchanged at 542 passed.
+`docs/record-url-dump-merge-cleanup` (branched at merged main) and opened as **documentation-only PR
+https://github.com/draeician/ref/pull/27** (`[docs] Record url-dump merge and cleanup evidence`, base `main`, 2 files, +118/−6), left
+open for review and not merged without authorization. Documentation only — no code, tests, README, or archive data changed; gate
+unchanged at 542 passed (local: 13.02s). CI on that PR head `772cd23…`: run `41395113827` (`pull_request`) success, job `pytest`
+05:37:33Z → 05:38:05Z, log line **`542 passed, 1 warning in 12.40s`**, `gh pr checks 27 --watch` → `pytest pass 32s`, then
+`MERGEABLE` / `CLEAN`.
 
 **Roll back.** `git revert -m 1 dd15d8ad444a91c2f5d81175bdf435c64395c6db` — no migration, schema, config, or archive-data change
 to unwind. Nothing was deployed to `minion-26`, so there is nothing to unwind in production.
@@ -542,6 +546,8 @@ to unwind. Nothing was deployed to `minion-26`, so there is nothing to unwind in
 
 ## Exactly one next step
 
-**Authorize the deployment decision only:** install the merged code (`main` @ `dd15d8ad444a91c2f5d81175bdf435c64395c6db`) on
-`minion-26`, restart `ref-api`, and smoke-test `ref --url-dump DOMAIN` against the live API. Deployment was **not** authorized in
-the merge/cleanup task; nothing has been installed, upgraded, or restarted, and do not do so until separately authorized.
+**Reviewer reviews and authorizes merging documentation PR #27 (https://github.com/draeician/ref/pull/27, head
+`772cd2305463b9f3c2c2c75505c5286dadb5c87e`, CI green)** — direct commits to `main` are prohibited, so this record can only land
+through that PR. The **deployment** decision (install the merged code on `minion-26`, restart `ref-api`, smoke-test
+`ref --url-dump DOMAIN`) is a separate authorization that was not granted; nothing has been installed, upgraded, or restarted, and it
+must not be done until separately authorized.

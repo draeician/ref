@@ -188,9 +188,16 @@ every other command/route is unaffected. No production action was taken, so noth
 ## Post-merge documentation record
 
 Direct commits to `main` are prohibited, so these post-merge records are delivered from branch
-`docs/record-url-dump-merge-cleanup` (branched at merged main `dd15d8a…`) through a separate **documentation-only PR**, which is
-left open for review and **not** merged without authorization. Documentation only: no code, tests, or archive data changed; the
-local gate re-run on this branch is unchanged (**542 passed, 1 warning**).
+`docs/record-url-dump-merge-cleanup` (branched at merged main `dd15d8a…`) through the **documentation-only PR
+https://github.com/draeician/ref/pull/27** (`[docs] Record url-dump merge and cleanup evidence`; base `main`, 2 files, +118/−6),
+which is left open for review and **not** merged without authorization. Documentation only: no code, tests, README, or archive data
+changed; the local gate re-run on this branch is unchanged (**542 passed, 1 warning in 13.02s**).
+
+CI for that documentation PR at head `772cd2305463b9f3c2c2c75505c5286dadb5c87e`: workflow `tests` run `41395113827` (event
+`pull_request`) → **conclusion success**, job `pytest` 05:37:33Z → 05:38:05Z, no failed steps, log line
+**`542 passed, 1 warning in 12.40s`**; `gh pr checks 27 --repo draeician/ref --watch` reported `pytest pass 32s`, and afterwards
+`mergeable=MERGEABLE` / `mergeStateStatus=CLEAN`. A follow-up documentation commit advances that head again, so confirm
+`gh pr checks 27 --repo draeician/ref` is green against the then-current head before merging it.
 
 ## Known limits / risks (not claimed fixed)
 
@@ -205,6 +212,8 @@ local gate re-run on this branch is unchanged (**542 passed, 1 warning**).
 
 ## Exactly one next step
 
-Authorize the **deployment** decision only: install the merged code (`main` @ `dd15d8ad444a91c2f5d81175bdf435c64395c6db`) on
-`minion-26`, restart `ref-api`, and smoke-test `ref --url-dump DOMAIN` against the live API. Deployment was **not** authorized in
-the merge/cleanup task, so nothing has been installed, upgraded, or restarted; do not do it until separately authorized.
+Reviewer: review **documentation PR #27** (https://github.com/draeician/ref/pull/27, head `772cd2305463b9f3c2c2c75505c5286dadb5c87e`,
+CI green) and authorize its merge — direct commits to `main` are prohibited, so this record can only land through that PR. The
+**deployment** decision (install the merged code on `minion-26`, restart `ref-api`, smoke-test `ref --url-dump DOMAIN`) is a separate
+authorization that was **not** granted in the merge/cleanup task; nothing has been installed, upgraded, or restarted, and do not do
+it until separately authorized.
