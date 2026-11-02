@@ -8,6 +8,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+from ref_cli.domain_match import hostname_matches, normalize_domain
 from ref_cli.references_format import iter_data_rows
 
 _LIST_DURATION_RE = re.compile(
@@ -68,3 +69,24 @@ def list_urls(
         rows = sorted(filtered, key=lambda r: r.timestamp, reverse=True)
 
     return [row.url for row in rows]
+
+
+def list_urls_by_domain(*, domain: str, file_path: str) -> List[str]:
+    """Return stored URLs whose host is ``domain`` or a subdomain of it.
+
+    Read-only: the archive is only parsed, never written or migrated. Matching is
+    on the parsed hostname (case-insensitive, label-anchored), and URL strings are
+    returned exactly as stored — paths, query strings, and fragments intact.
+    Newest first; ties keep archive order. Raises ``ValueError`` when ``domain``
+    is not a valid bare domain.
+    """
+    normalized = normalize_domain(domain)
+
+    if not os.path.isfile(file_path):
+        return []
+
+    matches = [
+        row for row in iter_data_rows(file_path) if hostname_matches(row.url, normalized)
+    ]
+    matches.sort(key=lambda row: row.timestamp, reverse=True)
+    return [row.url for row in matches]

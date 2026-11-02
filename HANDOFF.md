@@ -359,3 +359,139 @@ The deployment was explicitly authorized. One manual smoke capture was submitted
 ## Code change status
 
 PR #22 is merged and deployed. The corrective implementation is active on `minion-26`: configurable `remote_first`/`local_only` mode, explicit durable queue submission, safe pending fallback, tests, and docs. The enhanced `get_transcript.py` packaging defect remains out of scope. The `references.md` parser observation remains non-causal and out of scope.
+
+---
+
+# HANDOFF — `ref --url-dump DOMAIN` read-only domain URL dump (feature)
+
+**Date:** 2026-11-02 (UTC)
+**Mode:** Implementation complete on branch `feat/url-dump-domain`, including the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`. **PR #26 opened against `main` (https://github.com/draeician/ref/pull/26) at head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`; the repository CI check passed.** Nothing merged, deployed, or cleaned up.
+**Repository:** https://github.com/draeician/ref
+**Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[REVIEW-REQUEST]`)
+
+## What was built
+
+`ref --url-dump DOMAIN` prints every stored URL whose parsed hostname is `DOMAIN` or a subdomain of it, one raw URL per stdout line, newest first. It is a thin client over `GET /urls?domain=DOMAIN` on the configured ref-api (`api_url` / `REF_API_URL`). Matching is label-anchored on the parsed hostname (case-insensitive), never substring; stored URL strings are returned exactly as-is (paths, queries with spaces/unicode, fragments). No matches → exit 0 with empty stdout. Missing config, malformed domain, API error, or network failure → message on **stderr** only and exit 1. Strictly read-only: the CLI dispatch runs before any archive bootstrap/migration, and the server route only parses `references.md`.
+
+## Exact commands and results (all actually run)
+
+- Baseline gate on unmodified `main` (`5565ab59da3179841f8caddc0a54e30df5c1b8ce`):
+  `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` → **450 passed, 1 warning in 18.36s**.
+- Test env: `uv venv /tmp/opencode/ref-url-dump-venv --python 3.12` (CPython 3.12.15) + `VIRTUAL_ENV=/tmp/opencode/ref-url-dump-venv uv pip install -e ".[api,test]"`.
+- Focused feature tests: `pytest tests/test_url_dump_matching.py tests/test_url_dump_api_cli.py -q` → **69 passed**.
+- Full gate after changes (same command as CI): `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` → **519 passed, 1 warning in 13.52s** (the one pre-existing StarletteDeprecationWarning).
+- `--help` smoke: `--url-dump DOMAIN` renders in usage, options, and epilog.
+- Live-server integration (`/tmp/opencode/url-dump-smoke`, uvicorn `--factory 'ref_api.app:create_app'` on 127.0.0.1:8765 with isolated server HOME + seeded temp archive; scripts `run_checks.sh`, `run_checks2.sh`):
+  - `curl "http://127.0.0.1:8765/urls?domain=example.com"` → newest-first exact stored strings, subdomains included, `notexample.com` / `example.com.evil.net` excluded; invalid and blank domains → **400** with descriptive detail.
+  - `ref --url-dump Example.COM` (isolated HOME + `REF_API_URL`) → exit 0, four pure URL lines on stdout, stderr empty, zero ANSI codes in stdout.
+  - No matches → exit 0, both streams empty; unreachable API (`:8799`) → exit 1 with friendly message only on stderr; malformed domain `com` → exit 1 before any HTTP call; missing `api_url` → exit 1 "requires api_url" on stderr, stdout empty.
+  - Read-only proof against the **real production archive** (`~/references/references.md`, sha256 recorded before/after): byte-identical after a real-HOME dump run; smoke-server archive sha `283835feee01a8fe30641afca9aecf7920c9c1a7ecc6b9cdaafd998a353e6f0b` unchanged across all requests.
+- Secret scan of diff + new files: no secret-like strings (only the pre-existing `spec_tokens` identifier matched the pattern).
+
+## Correction — hostname parsing for scheme-less stored URLs (commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`)
+
+**What was wrong.** `url_hostname()` decided whether a stored value had an authority by testing
+`'//' not in text` **anywhere** in the string, and otherwise synthesized a `//authority`. Two
+consequences: scheme-less URLs that contain `//` later — an empty path segment or another URL inside
+the query — produced no host at all and were silently missing from dumps; values shaped like email
+addresses resolved a host through the userinfo of the synthesized authority (`mailto:user@example.com`
+and bare `user@example.com` both matched `example.com`).
+
+| Stored value | Before | After (required) |
+|---|---|---|
+| `example.com/path?q=https://other.com` | no parsed host → not dumped | dumps under `example.com`; never under `other.com` |
+| `example.com/foo//bar` | no parsed host → not dumped | dumps under `example.com` |
+| `mailto:user@example.com` | matched `example.com` | no hostname, excluded |
+| `user@example.com` | matched `example.com` | no hostname, excluded |
+
+**Fix (only `src/ref_cli/domain_match.py`).** Hierarchy is now decided by a leading `scheme://` or a
+leading `//`; later `//` stays in the path/query. Opaque schemes (`about`, `blob`, `data`,
+`javascript`, `mailto`, `magnet`, `sms`, `tel`, `urn`) and colon-prefixed tokens that are neither
+slash-followed nor dotted hosts return no hostname; a scheme-less value whose authority contains `@`
+is an email address, not a URL. Preserved unchanged: HTTPS/HTTP matching, userinfo on real URLs,
+scheme-less authorities including host:port (`example.com:8443/path`, `//example.com/x`, `[::1]:8000/x`),
+trailing-dot/case normalization, label-anchored subdomains, exact stored URL output, and all existing
+`normalize_domain` / route 400 / CLI exit-code behavior. No CLI dispatch, API route, or archive code
+was touched.
+
+**Tests added (23 cases).** `tests/test_url_dump_matching.py` — the four required regressions, embedded-`//`
+host extraction, opaque-scheme/email rejection (`mailto:`, `MAILTO:`, `tel:`, `data:`, `urn:`, `magnet:`,
+`user@example.com/reset`), legitimate-authority preservation (userinfo URLs, scheme-less host:port with
+embedded slashes), and two archive-level `list_urls_by_domain` checks (exact newest-first dump; empty dump for a
+host that only appears inside another host's query). `tests/test_url_dump_api_cli.py` — one `GET /urls?domain=example.com`
+route case over an archive seeded with all four values.
+
+**Verification actually run.**
+
+- Focused: `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest tests/test_url_dump_matching.py tests/test_url_dump_api_cli.py -q` → **92 passed, 1 warning in 1.59s**.
+- Full repository gate (exact CI command): `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` → **542 passed, 1 warning in 13.36s** — same single pre-existing `StarletteDeprecationWarning`; nothing skipped or weakened.
+- Read-only live-server smoke (`/tmp/opencode/url-dump-smoke-fix`, uvicorn `--factory 'ref_api.app:create_app'` on 127.0.0.1:8765, isolated server HOME + freshly seeded archive; `run_checks.sh` → `checks.log`):
+  - `curl "…/urls?domain=example.com"` → `["https://docs.example.com/guide/a_b#c", "example.com/path?q=https://other.com", "sub.example.com/foo//bar?q=1#frag", "https://www.example.com/search?q=hello world&x=1#üñîçødé", "example.com/oldest?keep=1"]` — newest first, exact stored strings, embedded-`//` rows included, `mailto:`/email rows and both decoys excluded.
+  - `curl "…/urls?domain=sub.example.com"` → only the `sub.example.com/foo//bar?q=1#frag` row; `curl "…/urls?domain=other.com"` → `{"urls":[]}`.
+  - Invalid domain → **400** with the original detail text; blank domain → **400**.
+  - `ref --url-dump Example.COM` (isolated HOME + `REF_API_URL`) → exit 0, five pure URL lines on stdout, stderr 0 bytes, zero ANSI codes. No matches → exit 0 with both streams empty; unreachable API (`:8799`) → exit 1 with the message only on stderr; malformed domain `com` → exit 1 before any HTTP call; missing `api_url` → exit 1 "requires api_url" on stderr.
+  - Read-only proof: smoke archive sha256 `e63590674f03ac39fb41342cb3fccd260fcced949c35a583cefc604867e0fa86` unchanged across every request; real production `/home/draeician/references/references.md` sha256 `5c61ea978b58e390cd2f21f7f359f3b4973b21bf844ce7f59c3e45f2a74c7d35` identical before and after a real-HOME dump run. Server journal showed only `/health`, the `/urls` 200s, and the two expected 400s; no error or traceback lines.
+- Secret scan of the diff and changed files: only prose matches plus the synthetic fixtures `https://user:pw@example.com/inbox` and `http://admin:t3st@sub.example.com:8443/p?q=1`; no real secret value.
+
+**Limitations of this verification.** The smoke server ran with `REF_TRANSCRIPT_RECONCILE_ENABLED=false`
+so the periodic reconciler could not touch even the temp archive; `/urls` behavior does not depend on that
+setting. Only a locally started uvicorn (this task's own process, stopped with `SIGTERM`, port 8765 closed)
+served the dumps — no production service was contacted, restarted, or modified, and no real archive was written.
+A single-slash malformed value such as `https:/example.com` now yields no host instead of a garbage host; both are
+not dumped. Repo/CI has no lint or type gate configured (pytest only), so none was run.
+
+## Pull request and CI verification — PR #26 (2026-11-02)
+
+**Preconditions.** `git fetch origin --prune`; clean working tree; local HEAD = `origin/feat/url-dump-domain` =
+`50bfc2f7fa0baaba2221f9988ae5923c62192dbb` (0 ahead / 0 behind); merge-base with `origin/main` equals the main tip
+`5565ab59da3179841f8caddc0a54e30df5c1b8ce`, so no rebase and no force-push were needed.
+
+**Documentation-only correction first.** The task-record heading for the hostname fix used `[WIP]` despite being
+verified; it now reads `[REVIEW-REQUEST]`. Commit `50bfc2f7fa0baaba2221f9988ae5923c62192dbb` (`[docs] Mark the
+hostname-parsing correction review-ready`, 1 file, +1/−1), pushed normally. No implementation or test change.
+
+**PR opened.** `gh pr create --repo draeician/ref --base main --head feat/url-dump-domain --title "feat: Add read-only domain URL dump"` →
+**https://github.com/draeician/ref/pull/26**. After CI: state OPEN, base `main` @ `5565ab59`, head @ `50bfc2f7…`,
+`mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`, 11 files changed, +1139/−0, auto-merge not enabled, no review requests.
+
+**CI evidence.** Workflow `tests` (`.github/workflows/tests.yml`, the only workflow), run `41391655727`, event
+`pull_request`, head SHA `50bfc2f`:
+
+| Command | Result |
+|---|---|
+| `gh pr checks 26 --repo draeician/ref --watch --interval 15` | `pytest  pass  31s` |
+| `gh run view 41391655727 … --json name,headSha,event,status,conclusion` | workflow `tests`, event `pull_request`, headSha `50bfc2f`, status completed, **conclusion success** |
+| `gh api …/runs/41391655727/jobs` (steps) | job `pytest` 05:01:55Z → 05:02:26Z; every step `success` |
+| pytest step log | **`542 passed, 1 warning in 11.85s`** — same count as the local gate |
+| `gh pr view 26 --json statusCheckRollup` | one check `pytest`, `COMPLETED` / `SUCCESS` |
+
+**Re-verification after the documentation commits.** Both documentation-only pushes went normally (no force-push): the
+review-ready heading correction `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`, then the evidence commit
+`c88f90d11e4e7c74c4e7b7bf09d72988bdb889e9`. That push produced workflow run `41392192743` (`pull_request`, head
+`c88f90d`) → **success**; job `pytest` 05:07:41Z → 05:08:14Z, no failed steps, log line **`542 passed, 1 warning in
+12.63s`**; `gh pr checks 26 --watch` reported `pytest pass 33s`, and afterwards `mergeable=MERGEABLE` /
+`mergeStateStatus=CLEAN` at head `c88f90d…`. Local gate on the same tree: 542 passed, 1 warning.
+
+**CI limitations and blockers.** None block review, but recorded precisely: `main` has **no branch protection**
+(`…/branches/main/protection` → 404), so nothing is configured as a *required* check — "all required checks pass" here
+means the only CI GitHub reports for this PR (1 of 1) succeeded and merge state became `CLEAN`. Merge state read
+`UNSTABLE` while the run was queued. No legacy combined status exists (`commit.status` null). The Actions log carries an
+unrelated Node.js 20 deprecation warning for `actions/checkout@v4` / `setup-python@v5`. CI runs a single Python 3.12 job,
+matching the local verification interpreter; no lint or type gate is configured in this repository. Every push re-triggers
+that same workflow, so reviewers should confirm `gh pr checks 26 --repo draeician/ref` is green against the then-current
+head before merging (documentation-only commits after run `41391655727` advance the head again).
+
+**Not done (by instruction).** No merge, no deploy, no service restart, no branch cleanup, no auto-merge enablement;
+`README.md` and all feature code were left untouched by this documentation step.
+
+## Limits / known behavior (not claimed fixed)
+
+- Single-label/TLD-only dumps (`com`) rejected by design; IDNs must be passed as punycode (`xn--…`).
+- Newest-first is a stable sort on the stored timestamp string (ties keep archive order); duplicates preserved.
+- Like `--list`/`--status`, config bootstrap may create/merge `~/.config/ref/config.yaml`; read-only guarantee covers archives and server data only.
+- Fresh-HOME smoke runs initially hit the pre-existing interactive `YOUTUBE_API_KEY` prompt in `cli.py __main__` (unrelated to this feature); reruns set a dummy env key, mirroring production conditions where the key is configured.
+- Stored values that are email addresses or non-web URIs (`mailto:`, `tel:`, `data:`, `urn:`, `magnet:` …) are never dumped, and userinfo only counts on a value with its own hierarchical scheme (correction commit `3e947116`). Scheme-less host:port values still match.
+
+## Exactly one next step
+
+**Reviewer authorizes the merge of PR #26 (https://github.com/draeician/ref/pull/26, head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`, CI green); do not merge, deploy, restart services, or clean up the branch until that authorization is given.**

@@ -1507,6 +1507,7 @@ def parse_arguments() -> argparse.Namespace:
             Remote ref-api (optional):
               Set api_url in ~/.config/ref/config.yaml, or run on the archive host:
               ref --status                  Health-check configured ref-api (api_url)
+              ref --url-dump DOMAIN         Read-only URL dump for a domain + subdomains
               ref --install-server          User systemd service + config template
               ref --server-status           systemctl --user status ref-api
               ref --uninstall-server        Remove the systemd unit
@@ -1583,6 +1584,14 @@ def parse_arguments() -> argparse.Namespace:
         nargs="+",
         metavar="SPEC",
         help='List URLs: last N ("100") or duration ("1 hour", "5 min").',
+    )
+    parser.add_argument(
+        "--url-dump",
+        metavar="DOMAIN",
+        help=(
+            "Print stored URLs (one raw URL per stdout line) whose host is DOMAIN "
+            "or a subdomain of it, newest first. Read-only; requires api_url."
+        ),
     )
     parser.add_argument("--transcript", action="store_true", help="Update the transcript for an existing YouTube entry.")
     file_arg = parser.add_argument("--file", help="Read URLs from a file (one URL per line)")
@@ -3169,6 +3178,37 @@ def run_list(spec_tokens: List[str]) -> None:
     sys.exit(list_via_api(api_base, since=" ".join(spec_tokens)))
 
 
+def run_url_dump(domain: str) -> None:
+    """Dump domain-matching URLs from ref-api; read-only, exits the process.
+
+    Never touches local archives: no ``references.md`` is created, migrated, or
+    read on this machine. Errors (missing api_url, malformed domain, API/network
+    failure) are reported on stderr with a nonzero exit so stdout stays pure.
+    """
+    from ref_cli.domain_match import normalize_domain
+
+    try:
+        normalized = normalize_domain(domain)
+    except ValueError as exc:
+        print(error(str(exc)), file=sys.stderr)
+        sys.exit(1)
+
+    api_base = configured_api_base_url()
+    if not api_base:
+        print(
+            error(
+                "--url-dump requires api_url in ~/.config/ref/config.yaml "
+                "(or REF_API_URL)."
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from ref_cli.api_client import url_dump_via_api
+
+    sys.exit(url_dump_via_api(api_base, normalized))
+
+
 def run_search(search_term: str, field: str = "all") -> None:
     """Search locally or via ref-api; exits the process when using the API."""
     api_base = configured_api_base_url()
@@ -3282,6 +3322,11 @@ def main():
             from ref_cli.server_install import server_status
 
             sys.exit(server_status())
+
+        # Read-only URL dump: dispatched before any archive bootstrap or migration
+        # so it never creates, migrates, or writes a local references.md.
+        if getattr(args, "url_dump", None) is not None:
+            run_url_dump(args.url_dump)
 
         ensure_path_exists(UNIFIED)
         ensure_path_exists(TRANSCRIPT_PENDING_FILE)

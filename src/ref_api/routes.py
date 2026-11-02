@@ -58,6 +58,37 @@ def ingest_urls(
 
 
 @router.get(
+    "/urls",
+    response_model=ListResponse,
+    summary="Dump stored URLs for a domain",
+    description=(
+        "Return every URL whose parsed hostname is ``domain`` or a subdomain of "
+        "it (case-insensitive), newest first. Read-only: the archive is only "
+        "parsed, never written. Pass a bare domain such as ``example.com``, not a "
+        "URL; paths, query strings, and fragments are returned exactly as stored."
+    ),
+)
+def dump_urls_by_domain(
+    domain: str,
+    _auth: None = Depends(require_auth),
+) -> ListResponse:
+    value = (domain or "").strip()
+    if not value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Query parameter 'domain' must be non-empty",
+        )
+    try:
+        urls = service.list_urls_for_domain(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    return ListResponse(urls=urls)
+
+
+@router.get(
     "/search",
     response_model=SearchResponse,
     summary="Search references",
