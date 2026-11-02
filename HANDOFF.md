@@ -365,9 +365,12 @@ PR #22 is merged and deployed. The corrective implementation is active on `minio
 # HANDOFF — `ref --url-dump DOMAIN` read-only domain URL dump (feature)
 
 **Date:** 2026-11-02 (UTC)
-**Mode:** Implementation complete on branch `feat/url-dump-domain`, including the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`. **PR #26 opened against `main` (https://github.com/draeician/ref/pull/26) at head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`; the repository CI check passed.** Nothing merged, deployed, or cleaned up.
+**Mode:** **[DONE] — MERGED.** PR #26 was merged into `main` as merge commit `dd15d8ad444a91c2f5d81175bdf435c64395c6db` on
+2026-11-02T05:30:23Z from reviewed head `b4ad674af5e2f2bc45322067eb8c7a5b620d7633`; CI is green on the merge commit, and the
+local and remote feature branches were cleaned up. **Deployment was not authorized: nothing installed, upgraded, or restarted on
+`minion-26`.**
 **Repository:** https://github.com/draeician/ref
-**Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[REVIEW-REQUEST]`)
+**Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[DONE]`, merged)
 
 ## What was built
 
@@ -484,6 +487,51 @@ head before merging (documentation-only commits after run `41391655727` advance 
 **Not done (by instruction).** No merge, no deploy, no service restart, no branch cleanup, no auto-merge enablement;
 `README.md` and all feature code were left untouched by this documentation step.
 
+## Merge and branch cleanup — 2026-11-02 (authorized)
+
+Authorization: **merge + branch cleanup approved; deployment NOT authorized.** Repo guides read first: no root `AGENTS.md` or
+`project_spec.md`; the conventions live in `.codex/AGENTS.md` and `.codex/AGENTS_WORKFLOW.md`. This section supersedes the
+"PR open / awaiting merge authorization" state recorded above.
+
+**Preflight (before merging).**
+
+| Check | Command | Result |
+|---|---|---|
+| Refs refreshed + stale pruned, tree clean | `git fetch origin --prune`; `git status --short` | no new commits; empty output |
+| PR open, mergeable, head equals reviewed SHA | `gh pr view 26 … --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefOid,autoMergeRequest` | `OPEN`, not draft, `MERGEABLE`, `CLEAN`, head `b4ad674af5e2f2bc45322067eb8c7a5b620d7633`, base `main` @ `5565ab59…`, 8 commits, auto-merge null |
+| CI green on that exact head | `gh pr checks 26 --repo draeician/ref`; `gh api …/commits/b4ad674…/check-runs` | `pytest pass 41s` (run `41392600076`); check-run on `b4ad674`: completed / **success** |
+| No divergence or conflict risk | `git rev-list --left-right --count origin/feat/url-dump-domain...HEAD`; `git merge-base HEAD origin/main` | `0 0`; merge-base = main tip `5565ab59…` |
+| Local gate at reviewed head | `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` | **542 passed, 1 warning in 13.23s** |
+
+**Merge.** `gh pr merge 26 --repo draeician/ref --merge` → normal merge commit (no squash, no rebase, no force-push):
+**`dd15d8ad444a91c2f5d81175bdf435c64395c6db`**, `Merge pull request #26 from draeician/feat/url-dump-domain`, merged
+`2026-11-02T05:30:23Z` by `draeician`.
+
+**Verification after merge.**
+
+| Check | Command | Result |
+|---|---|---|
+| PR merged | `gh pr view 26 --json state,mergedAt,mergeCommit,mergedBy` | `MERGED`, `2026-11-02T05:30:23Z`, merge commit `dd15d8a…` |
+| History preserved (true merge) | `git rev-parse dd15d8a^1 dd15d8a^2` | parents `5565ab59…` + reviewed head `b4ad674…` |
+| Reviewed commits reachable from main | `git merge-base --is-ancestor <sha> origin/main` × 8 (`19100a6`, `baba588`, `4240f9b`, `3e947116…`, `58de2f7`, `50bfc2f7…`, `c88f90d1…`, `b4ad674a…`) | all reachable |
+| Merged tree == reviewed head | `git diff --stat b4ad674… origin/main` | empty |
+| CI green on main after merge | `gh run list --commit dd15d8a…`; jobs API; log grep | workflow `tests`, event **push**, **success**; job `pytest` 05:30:29Z → 05:31:05Z, no failed steps; **`542 passed, 1 warning in 12.89s`** |
+| Local gate on merged main | `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` | **542 passed, 1 warning in 13.61s** |
+
+**Cleanup.** `git checkout main`; `git merge --ff-only origin/main` (fast-forward only, `5565ab5..dd15d8a`);
+`git branch -d feat/url-dump-domain` → `Deleted branch feat/url-dump-domain (was b4ad674)`; the remote branch was already removed
+by GitHub at merge (`[deleted] … origin/feat/url-dump-domain`) and an explicit delete API call returned 404, confirming absence;
+`git fetch origin --prune`. Unrelated `origin/fix/youtube-auto-show-notes-api`, the single worktree, and all untracked files were
+left untouched. Final state: `HEAD` = `main` = `origin/main` = **`dd15d8ad444a91c2f5d81175bdf435c64395c6db`**, 0 ahead / 0 behind,
+clean tree.
+
+**Post-merge documentation path.** Direct commits to `main` are prohibited, so these records were committed on
+`docs/record-url-dump-merge-cleanup` (branched at merged main) and opened as a **documentation-only PR left open for review**; it is
+not merged without authorization. Documentation only — no code, tests, or archive data changed; gate unchanged at 542 passed.
+
+**Roll back.** `git revert -m 1 dd15d8ad444a91c2f5d81175bdf435c64395c6db` — no migration, schema, config, or archive-data change
+to unwind. Nothing was deployed to `minion-26`, so there is nothing to unwind in production.
+
 ## Limits / known behavior (not claimed fixed)
 
 - Single-label/TLD-only dumps (`com`) rejected by design; IDNs must be passed as punycode (`xn--…`).
@@ -494,4 +542,6 @@ head before merging (documentation-only commits after run `41391655727` advance 
 
 ## Exactly one next step
 
-**Reviewer authorizes the merge of PR #26 (https://github.com/draeician/ref/pull/26, head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`, CI green); do not merge, deploy, restart services, or clean up the branch until that authorization is given.**
+**Authorize the deployment decision only:** install the merged code (`main` @ `dd15d8ad444a91c2f5d81175bdf435c64395c6db`) on
+`minion-26`, restart `ref-api`, and smoke-test `ref --url-dump DOMAIN` against the live API. Deployment was **not** authorized in
+the merge/cleanup task; nothing has been installed, upgraded, or restarted, and do not do so until separately authorized.
