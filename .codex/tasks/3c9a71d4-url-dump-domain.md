@@ -1,7 +1,7 @@
 # [feat] `ref --url-dump DOMAIN` + `GET /urls?domain=` read-only domain URL dump
 
 - Task ID: 3c9a71d4
-- State: **[REVIEW-REQUEST]** IMPLEMENTED on branch `feat/url-dump-domain`, plus the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`; full repository gate and focused live-server integration checks passed; **awaiting review before any merge/deploy/cleanup**. No GitHub issue was pre-created for this feature (none exists in the repo tracker); no PR opened yet.
+- State: **[REVIEW-REQUEST]** IMPLEMENTED on branch `feat/url-dump-domain`, including the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`; full repository gate and focused live-server integration checks passed. **Pull request opened: https://github.com/draeician/ref/pull/26 (`feat/url-dump-domain` → `main`) at head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`; the repository CI check passed** (see "Pull request and CI evidence" below). **Awaiting merge authorization: nothing merged, deployed, or cleaned up.** No GitHub issue was pre-created for this feature (none exists in the repo tracker).
 - Repository: https://github.com/draeician/ref
 - Branch: `feat/url-dump-domain` (created from clean `main` = `origin/main` = `5565ab59da3179841f8caddc0a54e30df5c1b8ce`)
 - Task convention note: this repo uses `.codex/tasks/` with hash prefixes (no `wip/`→`review/` directories; those exist only in sibling repos' `.crules/tasks/`). This file is the single task record, marked ready-for-review.
@@ -89,6 +89,40 @@ Environment: CPython 3.12.15 venv at `/tmp/opencode/ref-url-dump-venv` (`uv venv
    - Run against the **real** production config (`~/references/references.md`, sha256 recorded before/after) → dump served from temp server, production archive byte-identical; smoke-server archive sha `283835fe…` unchanged across all requests (read-only proven at HTTP layer).
 5. `--help` smoke: flag and epilog line render correctly.
 
+## [REVIEW-REQUEST] Pull request and CI evidence (PR #26)
+
+**Preconditions verified before opening.** `git fetch origin --prune`; working tree clean; local HEAD =
+`origin/feat/url-dump-domain` = `50bfc2f7fa0baaba2221f9988ae5923c62192dbb` (0 ahead / 0 behind); merge-base with
+`origin/main` equals the current main tip `5565ab59da3179841f8caddc0a54e30df5c1b8ce`, so no rebase was needed and
+no force-push was used.
+
+**Documentation-only heading correction.** The task-record section for the hostname-parsing fix carried the `[WIP]`
+status signal although it is complete and verified; it now reads `[REVIEW-REQUEST]`. Commit `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`
+(`[docs] Mark the hostname-parsing correction review-ready`, 1 file, +1/−1), pushed normally to
+`feat/url-dump-domain`. No implementation, test, or evidence content changed.
+
+**Pull request.** `gh pr create --repo draeician/ref --base main --head feat/url-dump-domain --title "feat: Add read-only domain URL dump" --body-file …`
+→ **https://github.com/draeician/ref/pull/26**. Recorded state after CI finished: state OPEN, base `main` @
+`5565ab59`, head `feat/url-dump-domain` @ `50bfc2f7…`, `mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`,
+11 changed files, +1139/−0, auto-merge not enabled (`autoMergeRequest: null`), no review requests. Body follows the
+repo PR convention (linked task path, summary/rationale, test evidence and coverage notes, risks and rollback steps).
+
+**CI verification.** Workflow `tests` (`.github/workflows/tests.yml`, the only workflow in the repository), run id
+`41391655727`, event `pull_request`, head SHA `50bfc2f`:
+
+- `gh pr checks 26 --repo draeician/ref --watch --interval 15` → `pytest  pass  31s`.
+- Run/job conclusion: **success**; job `pytest` started `2026-11-02T05:01:55Z`, completed `2026-11-02T05:02:26Z`; every step success (Set up job, checkout@v4, setup-python@v5, install `".[api,test]"`, run pytest suite, posts).
+- CI log line from the pytest step: **`542 passed, 1 warning in 11.85s`** — identical to the local gate count recorded above.
+- `gh pr view 26 --json statusCheckRollup` → single check `pytest`, `status=COMPLETED`, `conclusion=SUCCESS`; run list for the head SHA shows exactly one workflow (`tests`) with conclusion success.
+
+**CI limitations / blockers (recorded honestly, none block review).**
+
+- `main` has **no branch protection configured** (`GET /repos/draeician/ref/branches/main/protection` → 404 "Branch not protected"), so no check is enforced as *required*; "all required checks pass" here means the only CI GitHub reports for this PR (1 of 1, `pytest`) succeeded and `mergeStateStatus=CLEAN`.
+- While the run was queued the merge state read `UNSTABLE`; it became `CLEAN` after the check completed. No legacy combined commit status exists (`commit.status` is null; checks-only).
+- The Actions log carries an unrelated runner warning that `actions/checkout@v4` and `actions/setup-python@v5` are forced onto Node.js 24 (Node 20 deprecation); it does not affect the test result.
+- CI installs Python 3.12 on ubuntu-latest, matching the local verification interpreter; no matrix beyond that single version is configured.
+- Every push to this branch re-triggers the same single `tests` workflow, so a later documentation-only commit advances the PR head again. Run `41391655727` above verified head `50bfc2f…`; reviewers should confirm `gh pr checks 26 --repo draeician/ref` is green against the then-current head before any merge.
+
 ## Known limits / risks (not claimed fixed)
 
 - Single-label/TLD-only dumps such as `com` are **rejected** by design (documented); IDNs must be supplied in punycode (`xn--…`).
@@ -102,4 +136,4 @@ Environment: CPython 3.12.15 venv at `/tmp/opencode/ref-url-dump-venv` (`uv venv
 
 ## Exactly one next step
 
-Reviewer: review branch `feat/url-dump-domain` commits. Do **not** merge, deploy, or clean up until separately authorized.
+Reviewer: review **PR #26** (https://github.com/draeician/ref/pull/26), head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`. Do **not** merge, deploy, or clean up until separately authorized.

@@ -365,7 +365,7 @@ PR #22 is merged and deployed. The corrective implementation is active on `minio
 # HANDOFF — `ref --url-dump DOMAIN` read-only domain URL dump (feature)
 
 **Date:** 2026-11-02 (UTC)
-**Mode:** Implementation complete on branch `feat/url-dump-domain`, plus the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`; ready for review. Nothing merged, deployed, or cleaned up.
+**Mode:** Implementation complete on branch `feat/url-dump-domain`, including the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`. **PR #26 opened against `main` (https://github.com/draeician/ref/pull/26) at head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`; the repository CI check passed.** Nothing merged, deployed, or cleaned up.
 **Repository:** https://github.com/draeician/ref
 **Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[REVIEW-REQUEST]`)
 
@@ -440,6 +440,43 @@ served the dumps — no production service was contacted, restarted, or modified
 A single-slash malformed value such as `https:/example.com` now yields no host instead of a garbage host; both are
 not dumped. Repo/CI has no lint or type gate configured (pytest only), so none was run.
 
+## Pull request and CI verification — PR #26 (2026-11-02)
+
+**Preconditions.** `git fetch origin --prune`; clean working tree; local HEAD = `origin/feat/url-dump-domain` =
+`50bfc2f7fa0baaba2221f9988ae5923c62192dbb` (0 ahead / 0 behind); merge-base with `origin/main` equals the main tip
+`5565ab59da3179841f8caddc0a54e30df5c1b8ce`, so no rebase and no force-push were needed.
+
+**Documentation-only correction first.** The task-record heading for the hostname fix used `[WIP]` despite being
+verified; it now reads `[REVIEW-REQUEST]`. Commit `50bfc2f7fa0baaba2221f9988ae5923c62192dbb` (`[docs] Mark the
+hostname-parsing correction review-ready`, 1 file, +1/−1), pushed normally. No implementation or test change.
+
+**PR opened.** `gh pr create --repo draeician/ref --base main --head feat/url-dump-domain --title "feat: Add read-only domain URL dump"` →
+**https://github.com/draeician/ref/pull/26**. After CI: state OPEN, base `main` @ `5565ab59`, head @ `50bfc2f7…`,
+`mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`, 11 files changed, +1139/−0, auto-merge not enabled, no review requests.
+
+**CI evidence.** Workflow `tests` (`.github/workflows/tests.yml`, the only workflow), run `41391655727`, event
+`pull_request`, head SHA `50bfc2f`:
+
+| Command | Result |
+|---|---|
+| `gh pr checks 26 --repo draeician/ref --watch --interval 15` | `pytest  pass  31s` |
+| `gh run view 41391655727 … --json name,headSha,event,status,conclusion` | workflow `tests`, event `pull_request`, headSha `50bfc2f`, status completed, **conclusion success** |
+| `gh api …/runs/41391655727/jobs` (steps) | job `pytest` 05:01:55Z → 05:02:26Z; every step `success` |
+| pytest step log | **`542 passed, 1 warning in 11.85s`** — same count as the local gate |
+| `gh pr view 26 --json statusCheckRollup` | one check `pytest`, `COMPLETED` / `SUCCESS` |
+
+**CI limitations and blockers.** None block review, but recorded precisely: `main` has **no branch protection**
+(`…/branches/main/protection` → 404), so nothing is configured as a *required* check — "all required checks pass" here
+means the only CI GitHub reports for this PR (1 of 1) succeeded and merge state became `CLEAN`. Merge state read
+`UNSTABLE` while the run was queued. No legacy combined status exists (`commit.status` null). The Actions log carries an
+unrelated Node.js 20 deprecation warning for `actions/checkout@v4` / `setup-python@v5`. CI runs a single Python 3.12 job,
+matching the local verification interpreter; no lint or type gate is configured in this repository. Every push re-triggers
+that same workflow, so reviewers should confirm `gh pr checks 26 --repo draeician/ref` is green against the then-current
+head before merging (documentation-only commits after run `41391655727` advance the head again).
+
+**Not done (by instruction).** No merge, no deploy, no service restart, no branch cleanup, no auto-merge enablement;
+`README.md` and all feature code were left untouched by this documentation step.
+
 ## Limits / known behavior (not claimed fixed)
 
 - Single-label/TLD-only dumps (`com`) rejected by design; IDNs must be passed as punycode (`xn--…`).
@@ -450,4 +487,4 @@ not dumped. Repo/CI has no lint or type gate configured (pytest only), so none w
 
 ## Exactly one next step
 
-**Reviewer reviews branch `feat/url-dump-domain` — the three feature commits plus correction `3e947116cf374dd9912856e2d29dc65bea24b2a3`; do not merge, deploy, or clean up until separately authorized.**
+**Reviewer authorizes the merge of PR #26 (https://github.com/draeician/ref/pull/26, head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`, CI green); do not merge, deploy, restart services, or clean up the branch until that authorization is given.**
