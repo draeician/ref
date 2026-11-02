@@ -1,9 +1,16 @@
 # [feat] `ref --url-dump DOMAIN` + `GET /urls?domain=` read-only domain URL dump
 
 - Task ID: 3c9a71d4
-- State: **[REVIEW-REQUEST]** IMPLEMENTED on branch `feat/url-dump-domain`, including the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`; full repository gate and focused live-server integration checks passed. **Pull request opened: https://github.com/draeician/ref/pull/26 (`feat/url-dump-domain` → `main`) at head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`; the repository CI check passed** (see "Pull request and CI evidence" below). **Awaiting merge authorization: nothing merged, deployed, or cleaned up.** No GitHub issue was pre-created for this feature (none exists in the repo tracker).
+- State: **[DONE]** MERGED. PR #26 (https://github.com/draeician/ref/pull/26) was merged into `main` as merge commit
+  `dd15d8ad444a91c2f5d81175bdf435c64395c6db` at `2026-11-02T05:30:23Z`; the reviewed head `b4ad674af5e2f2bc45322067eb8c7a5b620d7633`
+  and all eight feature/test/docs commits are reachable from `origin/main`, CI is green on that merge commit, and the local +
+  remote feature branches have been cleaned up (see "[DONE] Merge and branch cleanup" below). **Deployment was not authorized: no
+  package installed or upgraded and no service restarted on `minion-26`.** No GitHub issue was pre-created for this feature (none
+  exists in the repo tracker). Because direct commits to `main` are prohibited, these post-merge records arrive through a separate
+  documentation-only PR — see "Post-merge documentation record".
 - Repository: https://github.com/draeician/ref
-- Branch: `feat/url-dump-domain` (created from clean `main` = `origin/main` = `5565ab59da3179841f8caddc0a54e30df5c1b8ce`)
+- Branch: `feat/url-dump-domain` (created from clean `main` = `origin/main` = `5565ab59da3179841f8caddc0a54e30df5c1b8ce`; merged as
+  `dd15d8ad444a91c2f5d81175bdf435c64395c6db`, then deleted locally and on the remote — see "[DONE] Merge and branch cleanup")
 - Task convention note: this repo uses `.codex/tasks/` with hash prefixes (no `wip/`→`review/` directories; those exist only in sibling repos' `.crules/tasks/`). This file is the single task record, marked ready-for-review.
 
 ## [CLAIM] Deliverable
@@ -132,6 +139,66 @@ completed `mergeable=MERGEABLE` with `mergeStateStatus=CLEAN` at head `c88f90d�
 542 passed, 1 warning. A documentation-only push after this record will advance the head once more; confirm checks green
 at merge time as noted above.
 
+## [DONE] Merge and branch cleanup (2026-11-02, authorized)
+
+Authorization given: **merge + branch cleanup approved; deployment NOT authorized.** Nothing was installed, upgraded, or
+restarted on `minion-26`.
+
+**Preflight (all verified before merging).** No `AGENTS.md`/`project_spec.md` at the repository root; the repo guides are
+`.codex/AGENTS.md` and `.codex/AGENTS_WORKFLOW.md`, read first. Commands and results:
+
+| Check | Command | Result |
+|---|---|---|
+| Remote refs refreshed, stale pruned | `git fetch origin --prune` | no new commits on either ref |
+| Working tree clean | `git status --short` | empty |
+| PR open / mergeable / not draft | `gh pr view 26 … --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefOid,autoMergeRequest` | `state=OPEN`, `isDraft=false`, `mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`, head `b4ad674af5e2f2bc45322067eb8c7a5b620d7633` = reviewed SHA, base `main` @ `5565ab59…`, 8 commits, auto-merge null |
+| CI green on that exact head | `gh pr checks 26 --repo draeician/ref`; `gh api …/commits/b4ad674…/check-runs` | one check `pytest pass 41s` (run `41392600076`, job `125107046328`); check-run on head `b4ad674`: `status=completed`, `conclusion=success` |
+| No divergence / no conflicts | `git rev-list --left-right --count origin/feat/url-dump-domain...HEAD`; `git merge-base HEAD origin/main` | `0 0`; merge-base `5565ab59…` (main tip) — main had not moved |
+| Local gate at the reviewed head | `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` | **542 passed, 1 warning in 13.23s** |
+
+**Merge.** `gh pr merge 26 --repo draeician/ref --merge` → normal merge commit (no squash, no rebase, no force-push):
+**merge SHA `dd15d8ad444a91c2f5d81175bdf435c64395c6db`**, subject `Merge pull request #26 from draeician/feat/url-dump-domain`,
+committed by GitHub on behalf of `draeician`, merged at **`2026-11-02T05:30:23Z`**.
+
+**Merge verification.**
+
+| Check | Command | Result |
+|---|---|---|
+| PR state | `gh pr view 26 --json state,mergedAt,mergeCommit,mergedBy` | `state=MERGED`, mergedAt `2026-11-02T05:30:23Z`, mergeCommit `dd15d8a…`, mergedBy `draeician` |
+| Two-parent history preserved | `git cat-file -p dd15d8a…` / `git rev-parse dd15d8a^1 dd15d8a^2` | parents `5565ab59…` (previous main tip) and `b4ad674…` (reviewed head) — a real merge commit, not a squash |
+| Reviewed commits reachable from main | `git merge-base --is-ancestor <sha> origin/main` for all 8 (`19100a6`, `baba588`, `4240f9b`, `3e947116…`, `58de2f7`, `50bfc2f7…`, `c88f90d1…`, `b4ad674a…`) | all 8 **reachable** |
+| Merged tree equals reviewed head | `git diff --stat b4ad674… origin/main` | empty — main content is byte-identical to the reviewed head |
+| CI green on main after merge | `gh run list --commit dd15d8a…`; `gh api …/runs/41394410273/jobs`; log grep | workflow `tests`, event **`push`**, conclusion **success**; job `pytest` 05:30:29Z → 05:31:05Z, no failed steps; log line **`542 passed, 1 warning in 12.89s`** |
+| Local gate on merged main | `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` (on `main`) | **542 passed, 1 warning in 13.61s** |
+
+**Branch cleanup (only after the merge was verified).**
+
+- `git checkout main` then `git merge --ff-only origin/main` → fast-forward only (`5565ab5..dd15d8a`, no merge commit created locally).
+- Local feature branch removed with the safe delete: `git branch -d feat/url-dump-domain` → `Deleted branch feat/url-dump-domain (was b4ad674)` (succeeded because it is fully merged; `-D` was not needed or used).
+- Remote branch: GitHub deleted `origin/feat/url-dump-domain` automatically at merge (`git fetch origin --prune` reported `[deleted] (none) -> origin/feat/url-dump-domain`). An explicit `gh api -X DELETE repos/draeician/ref/branches/feat/url-dump-domain` returned **404 Not Found**, confirming it was already gone.
+- Stale remote refs pruned by `git fetch origin --prune`. Unrelated branch `origin/fix/youtube-auto-show-notes-api` left untouched; the only worktree (`/opt/md2/git/personal/ref`) and all untracked files were preserved (nothing deleted or cleaned).
+
+**Post-cleanup state.** `HEAD` = `main` = `origin/main` = **`dd15d8ad444a91c2f5d81175bdf435c64395c6db`**, 0 ahead / 0 behind;
+`git branch -avv` shows only local `main` plus the unrelated remote branch; `git status --short` empty.
+
+**Roll back (if ever needed).** Revert merge commit `dd15d8a…` (`git revert -m 1 dd15d8ad444a91c2f5d81175bdf435c64395c6db`) —
+no migration, schema, config, or archive-data change exists to unwind; `ref --url-dump` and `GET /urls` simply disappear and
+every other command/route is unaffected. No production action was taken, so nothing on `minion-26` needs unwinding.
+
+## Post-merge documentation record
+
+Direct commits to `main` are prohibited, so these post-merge records are delivered from branch
+`docs/record-url-dump-merge-cleanup` (branched at merged main `dd15d8a…`) through the **documentation-only PR
+https://github.com/draeician/ref/pull/27** (`[docs] Record url-dump merge and cleanup evidence`; base `main`, 2 files, +118/−6),
+which is left open for review and **not** merged without authorization. Documentation only: no code, tests, README, or archive data
+changed; the local gate re-run on this branch is unchanged (**542 passed, 1 warning in 13.02s**).
+
+CI for that documentation PR at head `772cd2305463b9f3c2c2c75505c5286dadb5c87e`: workflow `tests` run `41395113827` (event
+`pull_request`) → **conclusion success**, job `pytest` 05:37:33Z → 05:38:05Z, no failed steps, log line
+**`542 passed, 1 warning in 12.40s`**; `gh pr checks 27 --repo draeician/ref --watch` reported `pytest pass 32s`, and afterwards
+`mergeable=MERGEABLE` / `mergeStateStatus=CLEAN`. A follow-up documentation commit advances that head again, so confirm
+`gh pr checks 27 --repo draeician/ref` is green against the then-current head before merging it.
+
 ## Known limits / risks (not claimed fixed)
 
 - Single-label/TLD-only dumps such as `com` are **rejected** by design (documented); IDNs must be supplied in punycode (`xn--…`).
@@ -145,4 +212,8 @@ at merge time as noted above.
 
 ## Exactly one next step
 
-Reviewer: review **PR #26** (https://github.com/draeician/ref/pull/26), head `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`. Do **not** merge, deploy, or clean up until separately authorized.
+Reviewer: review **documentation PR #27** (https://github.com/draeician/ref/pull/27, head `772cd2305463b9f3c2c2c75505c5286dadb5c87e`,
+CI green) and authorize its merge — direct commits to `main` are prohibited, so this record can only land through that PR. The
+**deployment** decision (install the merged code on `minion-26`, restart `ref-api`, smoke-test `ref --url-dump DOMAIN`) is a separate
+authorization that was **not** granted in the merge/cleanup task; nothing has been installed, upgraded, or restarted, and do not do
+it until separately authorized.
