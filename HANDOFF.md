@@ -365,7 +365,7 @@ PR #22 is merged and deployed. The corrective implementation is active on `minio
 # HANDOFF — `ref --url-dump DOMAIN` read-only domain URL dump (feature)
 
 **Date:** 2026-11-02 (UTC)
-**Mode:** Implementation complete on branch `feat/url-dump-domain`, ready for review. Nothing merged, deployed, or cleaned up.
+**Mode:** Implementation complete on branch `feat/url-dump-domain`, plus the hostname-parsing correction commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`; ready for review. Nothing merged, deployed, or cleaned up.
 **Repository:** https://github.com/draeician/ref
 **Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[REVIEW-REQUEST]`)
 
@@ -388,13 +388,66 @@ PR #22 is merged and deployed. The corrective implementation is active on `minio
   - Read-only proof against the **real production archive** (`~/references/references.md`, sha256 recorded before/after): byte-identical after a real-HOME dump run; smoke-server archive sha `283835feee01a8fe30641afca9aecf7920c9c1a7ecc6b9cdaafd998a353e6f0b` unchanged across all requests.
 - Secret scan of diff + new files: no secret-like strings (only the pre-existing `spec_tokens` identifier matched the pattern).
 
+## Correction — hostname parsing for scheme-less stored URLs (commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`)
+
+**What was wrong.** `url_hostname()` decided whether a stored value had an authority by testing
+`'//' not in text` **anywhere** in the string, and otherwise synthesized a `//authority`. Two
+consequences: scheme-less URLs that contain `//` later — an empty path segment or another URL inside
+the query — produced no host at all and were silently missing from dumps; values shaped like email
+addresses resolved a host through the userinfo of the synthesized authority (`mailto:user@example.com`
+and bare `user@example.com` both matched `example.com`).
+
+| Stored value | Before | After (required) |
+|---|---|---|
+| `example.com/path?q=https://other.com` | no parsed host → not dumped | dumps under `example.com`; never under `other.com` |
+| `example.com/foo//bar` | no parsed host → not dumped | dumps under `example.com` |
+| `mailto:user@example.com` | matched `example.com` | no hostname, excluded |
+| `user@example.com` | matched `example.com` | no hostname, excluded |
+
+**Fix (only `src/ref_cli/domain_match.py`).** Hierarchy is now decided by a leading `scheme://` or a
+leading `//`; later `//` stays in the path/query. Opaque schemes (`about`, `blob`, `data`,
+`javascript`, `mailto`, `magnet`, `sms`, `tel`, `urn`) and colon-prefixed tokens that are neither
+slash-followed nor dotted hosts return no hostname; a scheme-less value whose authority contains `@`
+is an email address, not a URL. Preserved unchanged: HTTPS/HTTP matching, userinfo on real URLs,
+scheme-less authorities including host:port (`example.com:8443/path`, `//example.com/x`, `[::1]:8000/x`),
+trailing-dot/case normalization, label-anchored subdomains, exact stored URL output, and all existing
+`normalize_domain` / route 400 / CLI exit-code behavior. No CLI dispatch, API route, or archive code
+was touched.
+
+**Tests added (23 cases).** `tests/test_url_dump_matching.py` — the four required regressions, embedded-`//`
+host extraction, opaque-scheme/email rejection (`mailto:`, `MAILTO:`, `tel:`, `data:`, `urn:`, `magnet:`,
+`user@example.com/reset`), legitimate-authority preservation (userinfo URLs, scheme-less host:port with
+embedded slashes), and two archive-level `list_urls_by_domain` checks (exact newest-first dump; empty dump for a
+host that only appears inside another host's query). `tests/test_url_dump_api_cli.py` — one `GET /urls?domain=example.com`
+route case over an archive seeded with all four values.
+
+**Verification actually run.**
+
+- Focused: `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest tests/test_url_dump_matching.py tests/test_url_dump_api_cli.py -q` → **92 passed, 1 warning in 1.59s**.
+- Full repository gate (exact CI command): `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` → **542 passed, 1 warning in 13.36s** — same single pre-existing `StarletteDeprecationWarning`; nothing skipped or weakened.
+- Read-only live-server smoke (`/tmp/opencode/url-dump-smoke-fix`, uvicorn `--factory 'ref_api.app:create_app'` on 127.0.0.1:8765, isolated server HOME + freshly seeded archive; `run_checks.sh` → `checks.log`):
+  - `curl "…/urls?domain=example.com"` → `["https://docs.example.com/guide/a_b#c", "example.com/path?q=https://other.com", "sub.example.com/foo//bar?q=1#frag", "https://www.example.com/search?q=hello world&x=1#üñîçødé", "example.com/oldest?keep=1"]` — newest first, exact stored strings, embedded-`//` rows included, `mailto:`/email rows and both decoys excluded.
+  - `curl "…/urls?domain=sub.example.com"` → only the `sub.example.com/foo//bar?q=1#frag` row; `curl "…/urls?domain=other.com"` → `{"urls":[]}`.
+  - Invalid domain → **400** with the original detail text; blank domain → **400**.
+  - `ref --url-dump Example.COM` (isolated HOME + `REF_API_URL`) → exit 0, five pure URL lines on stdout, stderr 0 bytes, zero ANSI codes. No matches → exit 0 with both streams empty; unreachable API (`:8799`) → exit 1 with the message only on stderr; malformed domain `com` → exit 1 before any HTTP call; missing `api_url` → exit 1 "requires api_url" on stderr.
+  - Read-only proof: smoke archive sha256 `e63590674f03ac39fb41342cb3fccd260fcced949c35a583cefc604867e0fa86` unchanged across every request; real production `/home/draeician/references/references.md` sha256 `5c61ea978b58e390cd2f21f7f359f3b4973b21bf844ce7f59c3e45f2a74c7d35` identical before and after a real-HOME dump run. Server journal showed only `/health`, the `/urls` 200s, and the two expected 400s; no error or traceback lines.
+- Secret scan of the diff and changed files: only prose matches plus the synthetic fixtures `https://user:pw@example.com/inbox` and `http://admin:t3st@sub.example.com:8443/p?q=1`; no real secret value.
+
+**Limitations of this verification.** The smoke server ran with `REF_TRANSCRIPT_RECONCILE_ENABLED=false`
+so the periodic reconciler could not touch even the temp archive; `/urls` behavior does not depend on that
+setting. Only a locally started uvicorn (this task's own process, stopped with `SIGTERM`, port 8765 closed)
+served the dumps — no production service was contacted, restarted, or modified, and no real archive was written.
+A single-slash malformed value such as `https:/example.com` now yields no host instead of a garbage host; both are
+not dumped. Repo/CI has no lint or type gate configured (pytest only), so none was run.
+
 ## Limits / known behavior (not claimed fixed)
 
 - Single-label/TLD-only dumps (`com`) rejected by design; IDNs must be passed as punycode (`xn--…`).
 - Newest-first is a stable sort on the stored timestamp string (ties keep archive order); duplicates preserved.
 - Like `--list`/`--status`, config bootstrap may create/merge `~/.config/ref/config.yaml`; read-only guarantee covers archives and server data only.
 - Fresh-HOME smoke runs initially hit the pre-existing interactive `YOUTUBE_API_KEY` prompt in `cli.py __main__` (unrelated to this feature); reruns set a dummy env key, mirroring production conditions where the key is configured.
+- Stored values that are email addresses or non-web URIs (`mailto:`, `tel:`, `data:`, `urn:`, `magnet:` …) are never dumped, and userinfo only counts on a value with its own hierarchical scheme (correction commit `3e947116`). Scheme-less host:port values still match.
 
 ## Exactly one next step
 
-**Reviewer reviews branch `feat/url-dump-domain`; do not merge, deploy, or clean up until separately authorized.**
+**Reviewer reviews branch `feat/url-dump-domain` — the three feature commits plus correction `3e947116cf374dd9912856e2d29dc65bea24b2a3`; do not merge, deploy, or clean up until separately authorized.**
