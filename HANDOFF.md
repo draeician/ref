@@ -465,6 +465,13 @@ hostname-parsing correction review-ready`, 1 file, +1/−1), pushed normally. No
 | pytest step log | **`542 passed, 1 warning in 11.85s`** — same count as the local gate |
 | `gh pr view 26 --json statusCheckRollup` | one check `pytest`, `COMPLETED` / `SUCCESS` |
 
+**Re-verification after the documentation commits.** Both documentation-only pushes went normally (no force-push): the
+review-ready heading correction `50bfc2f7fa0baaba2221f9988ae5923c62192dbb`, then the evidence commit
+`c88f90d11e4e7c74c4e7b7bf09d72988bdb889e9`. That push produced workflow run `41392192743` (`pull_request`, head
+`c88f90d`) → **success**; job `pytest` 05:07:41Z → 05:08:14Z, no failed steps, log line **`542 passed, 1 warning in
+12.63s`**; `gh pr checks 26 --watch` reported `pytest pass 33s`, and afterwards `mergeable=MERGEABLE` /
+`mergeStateStatus=CLEAN` at head `c88f90d…`. Local gate on the same tree: 542 passed, 1 warning.
+
 **CI limitations and blockers.** None block review, but recorded precisely: `main` has **no branch protection**
 (`…/branches/main/protection` → 404), so nothing is configured as a *required* check — "all required checks pass" here
 means the only CI GitHub reports for this PR (1 of 1) succeeded and merge state became `CLEAN`. Merge state read

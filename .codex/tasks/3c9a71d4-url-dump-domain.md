@@ -123,6 +123,15 @@ repo PR convention (linked task path, summary/rationale, test evidence and cover
 - CI installs Python 3.12 on ubuntu-latest, matching the local verification interpreter; no matrix beyond that single version is configured.
 - Every push to this branch re-triggers the same single `tests` workflow, so a later documentation-only commit advances the PR head again. Run `41391655727` above verified head `50bfc2f…`; reviewers should confirm `gh pr checks 26 --repo draeician/ref` is green against the then-current head before any merge.
 
+**Re-verification after the documentation commits.** The review-ready heading correction (`50bfc2f…`) and this evidence
+commit (`c88f90d11e4e7c74c4e7b7bf09d72988bdb889e9`, `[docs] Record PR #26 and CI verification evidence`, 2 files, +75/−4)
+were each pushed normally to `feat/url-dump-domain` (no force-push). The push of `c88f90d…` produced workflow run
+`41392192743` (event `pull_request`, head `c88f90d`) → **conclusion success**, job `pytest` 05:07:41Z → 05:08:14Z, no failed
+steps, log line **`542 passed, 1 warning in 12.63s`**; `gh pr checks 26 --watch` reported `pytest pass 33s`, and after it
+completed `mergeable=MERGEABLE` with `mergeStateStatus=CLEAN` at head `c88f90d…`. Local gate re-run on the same tree:
+542 passed, 1 warning. A documentation-only push after this record will advance the head once more; confirm checks green
+at merge time as noted above.
+
 ## Known limits / risks (not claimed fixed)
 
 - Single-label/TLD-only dumps such as `com` are **rejected** by design (documented); IDNs must be supplied in punycode (`xn--…`).
