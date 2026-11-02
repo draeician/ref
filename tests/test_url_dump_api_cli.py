@@ -133,6 +133,29 @@ def test_get_urls_missing_archive_returns_empty(
     assert response.json() == {"urls": []}
 
 
+def test_get_urls_matches_scheme_less_urls_with_embedded_slashes(
+    client: TestClient, tmp_path, monkeypatch
+) -> None:
+    """Stored scheme-less URLs with embedded ``//`` match by host; emails do not."""
+    archive = tmp_path / "references.md"
+    lines = [
+        "# ref-references version=2",
+        _row(_ts(4), "example.com/path?q=https://other.com"),
+        _row(_ts(3), "example.com/foo//bar"),
+        _row(_ts(2), "mailto:user@example.com"),
+        _row(_ts(1), "user@example.com"),
+    ]
+    archive.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "UNIFIED", str(archive))
+
+    response = client.get("/urls", params={"domain": "example.com"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "urls": ["example.com/path?q=https://other.com", "example.com/foo//bar"]
+    }
+
+
 def test_post_urls_and_get_list_behavior_unchanged(client: TestClient) -> None:
     """The new GET /urls route must not shadow POST /urls or GET /list."""
     with patch(

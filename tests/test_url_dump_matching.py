@@ -121,6 +121,79 @@ def test_subdomain_match_is_label_anchored() -> None:
 
 
 # ---------------------------------------------------------------------------
+# regression: embedded "//" and non-web URIs (scheme-less stored values)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("url", "expected_host"),
+    [
+        # A scheme in a query must not swallow the authority.
+        ("example.com/path?q=https://other.com", "example.com"),
+        # Empty path segments are part of the path, not an authority marker.
+        ("example.com/foo//bar", "example.com"),
+        ("sub.example.com/foo//bar?q=1#https://cdn.example.net/x", "sub.example.com"),
+        # Scheme-relative values keep their own authority.
+        ("//example.com/x?u=https://cdn.example.net/y", "example.com"),
+    ],
+)
+def test_url_hostname_ignores_embedded_double_slashes(url: str, expected_host: str) -> None:
+    assert url_hostname(url) == expected_host
+
+
+@pytest.mark.parametrize(
+    ("url", "domain", "expected"),
+    [
+        ("example.com/path?q=https://other.com", "example.com", True),
+        ("example.com/foo//bar", "example.com", True),
+        ("mailto:user@example.com", "example.com", False),
+        ("user@example.com", "example.com", False),
+    ],
+)
+def test_hostname_matches_embedded_slashes_and_non_web_uris(
+    url: str, domain: str, expected: bool
+) -> None:
+    assert hostname_matches(url, domain) is expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "mailto:someone@sub.example.com",
+        "user@example.com/reset",
+        "MAILTO:Someone@Example.COM",
+        "tel:+15551234567",
+        'data:text/html,<a href="http://example.com">',
+        "urn:example.com:x",
+        "magnet:?xt=urn:btih:0123abcd",
+    ],
+)
+def test_hostname_matches_rejects_nonhierarchical_uris(url: str) -> None:
+    assert hostname_matches(url, "example.com") is False
+
+
+def test_hostname_matches_ignores_a_query_embedded_foreign_host() -> None:
+    # The stored value belongs to example.com; the URL inside its query does not.
+    url = "example.com/path?q=https://other.com"
+    assert hostname_matches(url, "example.com") is True
+    assert hostname_matches(url, "other.com") is False
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_host"),
+    [
+        # Credentials are honoured when the value carries its own hierarchical scheme.
+        ("https://user:pw@example.com/inbox", "example.com"),
+        ("http://admin:t3st@sub.example.com:8443/p?q=1", "sub.example.com"),
+        # Scheme-less host:port is still a legitimate stored authority.
+        ("example.com:8443/path", "example.com"),
+        ("example.com:8443/foo//bar?q=a//b", "example.com"),
+    ],
+)
+def test_url_hostname_still_parses_legitimate_authorities(url: str, expected_host: str) -> None:
+    assert url_hostname(url) == expected_host
+
+
+# ---------------------------------------------------------------------------
 # list_urls_by_domain (server-side listing helper)
 # ---------------------------------------------------------------------------
 
@@ -213,3 +286,34 @@ def test_list_urls_by_domain_is_read_only(refs_file: Path, tmp_path: Path) -> No
 
     assert hashlib.sha256(refs_file.read_bytes()).hexdigest() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == files_before
+
+
+@pytest.fixture
+def scheme_less_refs_file(tmp_path: Path) -> Path:
+    """Archive of scheme-less stored values, including embedded ``//`` and emails."""
+    path = tmp_path / "references.md"
+    lines = [
+        "# ref-references version=2",
+        _row(datetime_ts(4), "example.com/path?q=https://other.com"),
+        _row(datetime_ts(3), "example.com/foo//bar"),
+        _row(datetime_ts(2), "mailto:user@example.com"),
+        _row(datetime_ts(1), "user@example.com"),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_list_urls_by_domain_matches_scheme_less_embedded_slashes(
+    scheme_less_refs_file: Path,
+) -> None:
+    urls = list_urls_by_domain(domain="example.com", file_path=str(scheme_less_refs_file))
+
+    # Both stored values match by authority and are returned exactly as stored;
+    # the mailto:/email rows are not web URLs and stay out of the dump.
+    assert urls == ["example.com/path?q=https://other.com", "example.com/foo//bar"]
+
+
+def test_list_urls_by_domain_does_not_dump_a_query_embedded_host(
+    scheme_less_refs_file: Path,
+) -> None:
+    assert list_urls_by_domain(domain="other.com", file_path=str(scheme_less_refs_file)) == []
