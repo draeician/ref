@@ -749,6 +749,16 @@ def list_archive(
     )
 
 
+def list_urls_for_domain(domain: str) -> List[str]:
+    """URLs on the server archive whose host is ``domain`` or a subdomain.
+
+    Read-only listing (newest first). Raises ``ValueError`` for an invalid domain.
+    """
+    from ref_api.listing import list_urls_by_domain
+
+    return list_urls_by_domain(domain=domain, file_path=ref_cli.UNIFIED)
+
+
 def create_references_backup(*, compress: bool = True) -> str:
     """Create a timestamped backup of references.md on the server."""
     from ref_cli.backup_util import backup_file

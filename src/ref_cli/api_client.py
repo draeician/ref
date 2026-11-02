@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -405,6 +406,39 @@ def list_via_api(
         print(error(str(exc)))
         return 1
     for entry_url in urls:
+        print(entry_url)
+    return 0
+
+
+def urls_for_domain(
+    base_url: str,
+    domain: str,
+    *,
+    timeout: float = DEFAULT_SEARCH_TIMEOUT,
+) -> List[str]:
+    """GET /urls?domain=DOMAIN and return the matching URLs in server order."""
+    data = _request_json(
+        "GET",
+        base_url,
+        "/urls",
+        timeout=timeout,
+        params={"domain": domain},
+    )
+    urls = data.get("urls", [])
+    return [str(u) for u in urls]
+
+
+def url_dump_via_api(base_url: str, domain: str) -> int:
+    """Dump matching URLs one per stdout line; report failures on stderr.
+
+    Read-only (GET). Exit 0 with empty stdout when nothing matches.
+    """
+    try:
+        matched = urls_for_domain(base_url, domain)
+    except ApiError as exc:
+        print(error(str(exc)), file=sys.stderr)
+        return 1
+    for entry_url in matched:
         print(entry_url)
     return 0
 
