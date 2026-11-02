@@ -365,12 +365,13 @@ PR #22 is merged and deployed. The corrective implementation is active on `minio
 # HANDOFF — `ref --url-dump DOMAIN` read-only domain URL dump (feature)
 
 **Date:** 2026-11-02 (UTC)
-**Mode:** **[DONE] — MERGED.** PR #26 was merged into `main` as merge commit `dd15d8ad444a91c2f5d81175bdf435c64395c6db` on
+**Mode:** **[DONE] — MERGED and DEPLOYED.** PR #26 was merged into `main` as merge commit `dd15d8ad444a91c2f5d81175bdf435c64395c6db` on
 2026-11-02T05:30:23Z from reviewed head `b4ad674af5e2f2bc45322067eb8c7a5b620d7633`; CI is green on the merge commit, and the
-local and remote feature branches were cleaned up. **Deployment was not authorized: nothing installed, upgraded, or restarted on
-`minion-26`.**
+local and remote feature branches were cleaned up. Deployment was then authorized and completed: `minion-26` now runs
+`ref-cli 1.6.12b1.dev129+g80c6e3791` in **both** production environments (pipx CLI venv and dedicated `ref-api` service venv), with
+all eleven acceptance checks passing on live production data — see "Production deployment" below.
 **Repository:** https://github.com/draeician/ref
-**Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[DONE]`, merged)
+**Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[DONE]`, merged **and deployed**)
 
 ## What was built
 
@@ -527,14 +528,43 @@ clean tree.
 
 **Post-merge documentation path.** Direct commits to `main` are prohibited, so these records were committed on
 `docs/record-url-dump-merge-cleanup` (branched at merged main) and opened as **documentation-only PR
-https://github.com/draeician/ref/pull/27** (`[docs] Record url-dump merge and cleanup evidence`, base `main`, 2 files, +118/−6), left
-open for review and not merged without authorization. Documentation only — no code, tests, README, or archive data changed; gate
-unchanged at 542 passed (local: 13.02s). CI on that PR head `772cd23…`: run `41395113827` (`pull_request`) success, job `pytest`
-05:37:33Z → 05:38:05Z, log line **`542 passed, 1 warning in 12.40s`**, `gh pr checks 27 --watch` → `pytest pass 32s`, then
-`MERGEABLE` / `CLEAN`.
+https://github.com/draeician/ref/pull/27** (`[docs] Record url-dump merge and cleanup evidence`, base `main`, 2 files, +133/−6),
+which was authorized and **merged as `80c6e379106a73c047cd517e56207bc62d558d7f` at `2026-11-02T05:53:37Z`** (normal merge commit,
+parents `dd15d8a…` + head `5b23a05…`; post-merge CI push run `41396641392` success). That merge is the approved source of the
+deployment below. Documentation only — no code, tests, README, or archive data changed; gate unchanged at 542 passed. Final-head CI
+on PR #27 (`5b23a05…`): run `41395309762` success, log line **`542 passed, 1 warning in 12.95s`**.
 
-**Roll back.** `git revert -m 1 dd15d8ad444a91c2f5d81175bdf435c64395c6db` — no migration, schema, config, or archive-data change
-to unwind. Nothing was deployed to `minion-26`, so there is nothing to unwind in production.
+**Roll back.** Code-level: `git revert -m 1 dd15d8ad444a91c2f5d81175bdf435c64395c6db` — no migration, schema, config, or
+archive-data change to unwind. Production-level (after the deployment below): reinstall the preserved `dev117` wheel per
+`ROLLBACK.md` in `/home/draeician/.local/share/ref-services/deploy-backups/20261102T1416Z-pr26-url-dump/`; never overwrite newer
+reference data.
+
+## Production deployment — minion-26 (authorized, 2026-11-02)
+
+Approved source: `main @ 80c6e379106a73c047cd517e56207bc62d558d7f` (PR #27 merge; CI push run `41396641392` success). Full evidence
+tables are in the task file section "[DONE] Production deployment on minion-26"; summary:
+
+- **Actual environments discovered:** the systemd user unit runs `/home/draeician/.local/share/ref-services/ref-api/bin/ref-api`
+  (dedicated venv, Python 3.13.17) — **not** the pipx env; and `~/.local/bin/ref` symlinks to that service-venv binary. Service env
+  was at `dev117+g5565ab59d`; the pipx venv (Python 3.14.4) had already been upgraded out-of-band at 13:56Z to content verified
+  byte-identical to the approved source (full RECORD-vs-git comparison, 35/35 modules), with no logged provenance — reinstalled from
+  this deploy's audited wheel regardless.
+- **Backup:** `deploy-backups/20261102T1416Z-pr26-url-dump/` — unit/config copies (0600), full service-env freeze, previous wheel
+  copy (`dev117`, sha256 `d80ee856…`), archive/backlog/queue/health/journal snapshots, and `ROLLBACK.md`. Archive hashes are
+  baselines only: the API reconciler legitimately rewrites `references.md` every ~307 s with its own `.bak-<UTC>.gz`; rollback never
+  overwrites newer reference data.
+- **Install:** wheel built from a checkout at exactly `80c6e37…` (`uv build --wheel`) → `ref_cli-1.6.12b1.dev129+g80c6e3791-py3-none-any.whl`,
+  sha256 `03ee26870ab8c88de129c01d020d6380ebc3bf682778f9c9d8685f462f0fd7da`; installed with `--no-deps` into both envs (approved
+  source has zero dependency changes); all 47 non-`ref-cli` deps identical before/after; unit/env/queue config untouched.
+- **Restart:** issued `14:20:04Z`, ~4 s after a reconciler cycle completed and while the notes worker was idle; clean uvicorn
+  shutdown/startup, new PID 3521265, NRestarts 0, reconciler resumed with first post-restart cycle `updated=0 errors=0`. Only
+  `ref-api.service` was restarted.
+- **Acceptance (all pass):** CLI + service env report `dev129+g80c6e3791`; `/health` and `ref --status` confirm it live;
+  `GET /urls?domain=reddit.com` → 200 with 3,738 URLs **order-identical** to `ref --url-dump reddit.com` stdout (one raw URL per
+  line); apex query `youtube.com` includes `www.`/`music.` subdomains while exact-host queries stay scoped; no-match domain → empty
+  stdout exit 0; dead API URL via `REF_API_URL` override → stderr + exit 1 with production config untouched; malformed single-label
+  domain rejected. Archive mtime predates the restart command, post-restart reconciler cycles changed nothing (`updated=0`), pending
+  backlog sha and queue listing unchanged — all smoke traffic was read-only GETs.
 
 ## Limits / known behavior (not claimed fixed)
 
@@ -546,8 +576,7 @@ to unwind. Nothing was deployed to `minion-26`, so there is nothing to unwind in
 
 ## Exactly one next step
 
-**Reviewer reviews and authorizes merging documentation PR #27 (https://github.com/draeician/ref/pull/27, head
-`772cd2305463b9f3c2c2c75505c5286dadb5c87e`, CI green)** — direct commits to `main` are prohibited, so this record can only land
-through that PR. The **deployment** decision (install the merged code on `minion-26`, restart `ref-api`, smoke-test
-`ref --url-dump DOMAIN`) is a separate authorization that was not granted; nothing has been installed, upgraded, or restarted, and it
-must not be done until separately authorized.
+**Reviewer independently verifies the production deployment on `minion-26` (spot-check `ref --version`, `/health`, and a read-only
+`ref --url-dump DOMAIN`) and authorizes merging the documentation PR opened from branch `docs/record-url-dump-deploy`** — direct
+commits to `main` are prohibited, so this deployment record can only land through that PR. No further production action is pending;
+any subsequent change (including rollback per `ROLLBACK.md` in the deploy backup directory) requires separate authorization.
