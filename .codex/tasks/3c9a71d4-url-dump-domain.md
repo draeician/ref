@@ -25,7 +25,7 @@ Read-only dump of every stored URL whose **parsed hostname** equals a domain or 
 
 Matching is label-anchored on the parsed hostname (never substring): `example.com`, `www.example.com`, `docs.example.com` match; `notexample.com`, `example.co`, `example.com.evil.net` do not. URL strings are returned exactly as stored (paths, query strings with spaces/unicode, fragments intact). Duplicates preserved. No new dependencies; no unrelated refactors; existing `POST /urls`, `GET /list`, `/search` semantics untouched.
 
-## [WIP] Correction — `url_hostname()` authority parsing (commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`)
+## [REVIEW-REQUEST] Correction — `url_hostname()` authority parsing (commit `3e947116cf374dd9912856e2d29dc65bea24b2a3`)
 
 **Defect found while continuing ownership of this branch.** The first implementation decided
 authority parsing with `if '//' not in text`, i.e. anywhere in the stored value, and fell back to
