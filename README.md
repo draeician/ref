@@ -87,9 +87,14 @@ curl -sS -X POST http://127.0.0.1:8000/urls \
 curl -sS -X POST http://127.0.0.1:8000/urls \
   -H 'Content-Type: application/json' \
   -d '{"urls":["https://one.example/","https://two.example/"],"force":false}'
+
+# Read-only URL dump: every stored URL on a domain (and its subdomains), newest first
+curl -sS "http://127.0.0.1:8000/urls?domain=example.com"
 ```
 
 Response shape: `{"results":[{"input":"…","url":"…","status":"added|exists|skipped|error","message":"…","output":"…"}]}`.
+
+`GET /urls?domain=DOMAIN` is read-only (the archive is only parsed, never written). Matching uses the parsed hostname case-insensitively — `example.com`, `www.example.com`, and `docs.example.com` match; `notexample.com` or `example.com.evil.net` do not. URLs come back exactly as stored (paths, query strings, fragments intact), newest first. Pass a bare domain, not a URL: blank or malformed values return `400`.
 
 ### Using `ref` as an API client
 
@@ -108,6 +113,7 @@ When `api_url` is set:
 - `ref --file urls.txt` POSTs each URL to `/urls` (file is read/written locally; archive updates happen on the server)
 - `ref --transcript <url>` calls `POST /transcript` on the server
 - `ref --status` GETs `/health` and reports connectivity (exit 1 if unreachable)
+- `ref --url-dump DOMAIN` calls `GET /urls?domain=DOMAIN` and prints one raw URL per stdout line (newest first). Read-only: no local archive is created, migrated, or read. Requires `api_url`; matches the domain and its subdomains on the parsed hostname; exit 0 with empty output when nothing matches, exit 1 with the problem on stderr otherwise
 
 Other commands (`--integrity`, etc.) still run locally on the machine where you invoke `ref`.
 
@@ -349,6 +355,7 @@ ref-advisors --file ./references.md --format csv -o advisors.csv
 - `ref --search <term>` - Search across all fields
 - `ref --transcript <url>` - Update transcript for a YouTube video
 - `ref --backup` - Gzip backup of `references.md` (default); `ref --backup --nocompress` for a plain copy
+- `ref --url-dump DOMAIN` - Print stored URLs whose host is `DOMAIN` or a subdomain of it, one raw URL per stdout line, newest first. Read-only; requires `api_url` (calls `GET /urls?domain=…`). No matches: exit 0 with empty output. Malformed domain or API failure: message on stderr, exit 1
 - `ref-fix-x-titles` / `ref-fix-reddit-titles` - Repair stored X or Reddit titles in `references.md` (see above)
 - `ref-advisors` - Rank trusted YouTube channels, X handles, and web/blog authors from `references.md`
 - `ref-enrich` - YouTube meta cards + `@meta` categories (migrate backups gzip by default; `--nocompress` for plain)

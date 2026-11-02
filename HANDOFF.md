@@ -359,3 +359,42 @@ The deployment was explicitly authorized. One manual smoke capture was submitted
 ## Code change status
 
 PR #22 is merged and deployed. The corrective implementation is active on `minion-26`: configurable `remote_first`/`local_only` mode, explicit durable queue submission, safe pending fallback, tests, and docs. The enhanced `get_transcript.py` packaging defect remains out of scope. The `references.md` parser observation remains non-causal and out of scope.
+
+---
+
+# HANDOFF — `ref --url-dump DOMAIN` read-only domain URL dump (feature)
+
+**Date:** 2026-11-02 (UTC)
+**Mode:** Implementation complete on branch `feat/url-dump-domain`, ready for review. Nothing merged, deployed, or cleaned up.
+**Repository:** https://github.com/draeician/ref
+**Task file:** `.codex/tasks/3c9a71d4-url-dump-domain.md` (status `[REVIEW-REQUEST]`)
+
+## What was built
+
+`ref --url-dump DOMAIN` prints every stored URL whose parsed hostname is `DOMAIN` or a subdomain of it, one raw URL per stdout line, newest first. It is a thin client over `GET /urls?domain=DOMAIN` on the configured ref-api (`api_url` / `REF_API_URL`). Matching is label-anchored on the parsed hostname (case-insensitive), never substring; stored URL strings are returned exactly as-is (paths, queries with spaces/unicode, fragments). No matches → exit 0 with empty stdout. Missing config, malformed domain, API error, or network failure → message on **stderr** only and exit 1. Strictly read-only: the CLI dispatch runs before any archive bootstrap/migration, and the server route only parses `references.md`.
+
+## Exact commands and results (all actually run)
+
+- Baseline gate on unmodified `main` (`5565ab59da3179841f8caddc0a54e30df5c1b8ce`):
+  `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` → **450 passed, 1 warning in 18.36s**.
+- Test env: `uv venv /tmp/opencode/ref-url-dump-venv --python 3.12` (CPython 3.12.15) + `VIRTUAL_ENV=/tmp/opencode/ref-url-dump-venv uv pip install -e ".[api,test]"`.
+- Focused feature tests: `pytest tests/test_url_dump_matching.py tests/test_url_dump_api_cli.py -q` → **69 passed**.
+- Full gate after changes (same command as CI): `/tmp/opencode/ref-url-dump-venv/bin/python -m pytest -q` → **519 passed, 1 warning in 13.52s** (the one pre-existing StarletteDeprecationWarning).
+- `--help` smoke: `--url-dump DOMAIN` renders in usage, options, and epilog.
+- Live-server integration (`/tmp/opencode/url-dump-smoke`, uvicorn `--factory 'ref_api.app:create_app'` on 127.0.0.1:8765 with isolated server HOME + seeded temp archive; scripts `run_checks.sh`, `run_checks2.sh`):
+  - `curl "http://127.0.0.1:8765/urls?domain=example.com"` → newest-first exact stored strings, subdomains included, `notexample.com` / `example.com.evil.net` excluded; invalid and blank domains → **400** with descriptive detail.
+  - `ref --url-dump Example.COM` (isolated HOME + `REF_API_URL`) → exit 0, four pure URL lines on stdout, stderr empty, zero ANSI codes in stdout.
+  - No matches → exit 0, both streams empty; unreachable API (`:8799`) → exit 1 with friendly message only on stderr; malformed domain `com` → exit 1 before any HTTP call; missing `api_url` → exit 1 "requires api_url" on stderr, stdout empty.
+  - Read-only proof against the **real production archive** (`~/references/references.md`, sha256 recorded before/after): byte-identical after a real-HOME dump run; smoke-server archive sha `283835feee01a8fe30641afca9aecf7920c9c1a7ecc6b9cdaafd998a353e6f0b` unchanged across all requests.
+- Secret scan of diff + new files: no secret-like strings (only the pre-existing `spec_tokens` identifier matched the pattern).
+
+## Limits / known behavior (not claimed fixed)
+
+- Single-label/TLD-only dumps (`com`) rejected by design; IDNs must be passed as punycode (`xn--…`).
+- Newest-first is a stable sort on the stored timestamp string (ties keep archive order); duplicates preserved.
+- Like `--list`/`--status`, config bootstrap may create/merge `~/.config/ref/config.yaml`; read-only guarantee covers archives and server data only.
+- Fresh-HOME smoke runs initially hit the pre-existing interactive `YOUTUBE_API_KEY` prompt in `cli.py __main__` (unrelated to this feature); reruns set a dummy env key, mirroring production conditions where the key is configured.
+
+## Exactly one next step
+
+**Reviewer reviews branch `feat/url-dump-domain`; do not merge, deploy, or clean up until separately authorized.**
