@@ -2,8 +2,8 @@
 
 - **Task ID:** f7774dc0
 - **Owner:** OpenCode
-- **State:** WIP
-- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/wip/`.
+- **State:** REVIEW
+- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/review/`.
 - **Branch:** `fix/remote-api-queue-producer`
 - **Base:** `origin/main` = `377dc34160a78d7e8c601dbad3bdeb7a92f2f7a8`
 - **Repositories:** `draeician/ref` (implementation); `draeician/local_transcribe` (read-only unless a verified producer defect requires a linked change).

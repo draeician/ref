@@ -3,9 +3,10 @@
 **Date:** 2026-11-09 (UTC)
 **Task ID:** `f7774dc0`
 **Owner:** OpenCode
-**State:** WIP (implementation in progress)
+**State:** REVIEW
 **Branch:** `fix/remote-api-queue-producer`
 **Base:** `origin/main` = `377dc34160a78d7e8c601dbad3bdeb7a92f2f7a8`
+**PR:** draft #33 — https://github.com/draeician/ref/pull/33
 **Authorization:** Implement, test, document, push, and open a draft PR. No
 deployment, live config change, queue mutation, service restart, or merge.
 
@@ -16,15 +17,147 @@ raised `DefaultCredentialsError`) and Incident B (transcription producer
 reporting after archive capture succeeded: Deno warning, queue UUID mismatch,
 and ambiguous pending-file fallback).
 
-## Status
+## Root causes
 
-Implementation is in progress. This section will be replaced with the final
-root causes, decisions, file list, read-only production findings, exact test
-evidence, risks, commit SHA, PR link, outstanding deployment steps, and exactly
-one next action before the task moves to `review/`.
+### Incident A — wrong execution path on a remote client
 
-See `.codex/tasks/wip/f7774dc0-remote-api-queue-producer.md` for the complete
-plan and claim.
+`main()` bootstrapped `~/references`, migrated `references.md`, and enabled file
+logging before any routing decision. `run_ingest`, `run_file_ingest`,
+`run_search`, `run_transcript`, and interactive mode each fell back to local
+processing when `api_url` was unset. The local YouTube path called
+`googleapiclient.discovery.build(..., developerKey=None)`, and `__main__`
+prompted for `YOUTUBE_API_KEY`. A remote client therefore attempted to become
+the archive writer and raised `DefaultCredentialsError`.
+
+### Incident B — stale producer configuration, not a ref code defect
+
+On `minion-26`, archive capture and enrichment succeeded, but the ref-api queue
+producer invokes the installed `lt` 0.7.0 with an explicit `--queue-dir`.
+`local_transcribe.resolve_queue_dir()` still applies
+`queue.expected_uuid` from `~/.config/local-transcribe/config.yaml` even when a
+path is supplied. That config is a stale smoke-test pin
+(`/tmp/lt-smoke-queue-59553`, `6a058908-116f-41c9-987f-d5f4ef38667e`), while the
+real queue identity is `8c6fc098-8cbe-41ae-9689-dd759797a582`. The Deno warning
+is a separate stale-version effect: 0.7.0's root Typer callback probes Deno for
+every subcommand.
+
+## Decisions and rejected approaches
+
+- All normal CLI ingest/search/list/url-dump/transcript operations require
+  `ref-api`; there is **no** local fallback, even on the archive host. Explicit
+  `--backup`/`--integrity` remain local server operations.
+- Routing uses a non-mutating config read and runs before archive bootstrap,
+  migration, file logging, metadata, Google, queue, or enrichment work.
+- Removed the startup `YOUTUBE_API_KEY` prompt. Server-side metadata raises a
+  controlled `YouTubeCredentialsError`.
+- Pending-file fallback is labelled **not queued**; multiline `lt` stderr is
+  collapsed to a bounded one-line reference value and kept in full in logs.
+- **Rejected:** overwriting `queue.id`, disabling identity validation,
+  initializing a replacement queue, deleting jobs, forcing a producer onto
+  another queue, or editing live config.
+- **Rejected:** changing `local_transcribe.resolve_queue_dir()` so `--queue-dir`
+  bypasses `expected_uuid`. Task 043 documents that fail-closed pinning as
+  intentional; the defect is the stale live config.
+- **Rejected:** installing Deno on a non-worker or prompting for credentials on
+  a remote client.
+
+## Files changed
+
+- `src/ref_cli/cli.py` — lazy file logging, non-mutating routing read, exact
+  missing-API guidance, pre-bootstrap remote dispatch, `run_interactive`,
+  controlled credential error, queue-failure sanitization.
+- `src/ref_cli/api_client.py` — file-ingest skip patterns use the non-mutating
+  routing config.
+- `src/ref_cli/config/config.yaml.template`,
+  `src/ref_cli/config/default_config.yaml` — document required API routing.
+- `tests/test_remote_client_routing.py` — new routing/credential/server tests.
+- `tests/test_cli_api_routing.py`, `tests/test_url_dump_api_cli.py`,
+  `tests/test_transcript_block.py`, `tests/test_transcript_blocking.py`,
+  `tests/test_transcript_queue_modes.py`,
+  `tests/test_transcript_reconcile.py`, `tests/test_server_install.py` — updated
+  and new regressions.
+- `.codex/AGENTS.md` — durable `wip/ → review/ → done/` lifecycle rule.
+- `.codex/tasks/review/f7774dc0-remote-api-queue-producer.md` — task record.
+- `HANDOFF.md` — this section.
+
+## Read-only production findings (minion-26, 2026-11-09)
+
+- Queue `/opt/md2/music/youtube/transcripts/transcription-queue`; `queue.id`
+  UUID `8c6fc098-8cbe-41ae-9689-dd759797a582` (created by `nomnom`).
+- `~/.config/ref/ref-api.env` correctly pins that UUID/path and
+  `REF_YOUTUBE_TRANSCRIPT_MODE=local_only`.
+- `~/.config/local-transcribe/config.yaml` is stale:
+  `queue.path: /tmp/lt-smoke-queue-59553`,
+  `expected_uuid: 6a058908-116f-41c9-987f-d5f4ef38667e`.
+- Installed `lt`: `local-transcribe 0.7.0`, VCS
+  `25b89f1326751a3b0781051331822c50ffde3b19`, pipx venv
+  `/home/draeician/.local/share/pipx/venvs/local-transcribe`.
+- `local_transcribe/main`: `0.8.1` at
+  `b3cf22ee5da337fab9dcd37fb97506f5beab012b`; Deno fix commits `0e83077`,
+  `8423007`, `6a2078d`; focused suite includes
+  `tests/test_deno_startup_warnings.py`.
+- ref-api service unit has `EnvironmentFile=-/home/draeician/.config/ref/ref-api.env`,
+  no drop-ins; `ExecStart=/home/draeician/.local/share/ref-services/ref-api/bin/ref-api --host 0.0.0.0 --port 8000`.
+- Read-only `ref --status` on the host: `Mode: remote`,
+  `api_url: http://127.0.0.1:8000`, `Status: ok`.
+- Pending-file finding: `transcript_reconcile` only matches durable placeholders
+  (`queued for local-transcribe worker`, `already in transcription queue`).
+  `transcript-pending.md` entries are **not** automatically recovered/retried;
+  restore the queue/config and run `ref --transcript` explicitly.
+
+## Exact verification evidence
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite | `python -m pytest -q` | **594 passed, 1 warning** (13.90s) |
+| Focused routing/queue/reconcile | `pytest -q tests/test_remote_client_routing.py tests/test_cli_api_routing.py tests/test_url_dump_api_cli.py tests/test_transcript_queue_modes.py tests/test_transcript_reconcile.py tests/test_server_install.py` | **109 passed** |
+| LT focused | `TERM=dumb NO_COLOR=1 python -m pytest -q tests/test_queue_paths.py tests/test_cli_queue.py tests/test_deno_startup_warnings.py` | **60 passed** |
+| Syntax/command gate | `uvx ruff check --target-version py312 --select E9,F63,F7,F82 <changed files>` | **All checks passed** |
+| Bytecode | `python -m compileall -q src/ref_cli src/ref_api tests/test_remote_client_routing.py` | exit 0 |
+| Build | `uv build` | wheel + sdist built |
+| Wheel smoke | clean venv + `pip install dist/ref_cli-*.whl` | `ref <url>` exits 1 with guidance, creates no dirs |
+| Missing API CLI | temp HOME + `python -m ref_cli.cli https://example.com/a` | exit 1, exact guidance, no dirs created |
+| Unreachable API | `REF_API_URL=http://127.0.0.1:9` | exit 1, connection error, no dirs, no local fallback |
+| HTTP-only smoke | local HTTP server + CLI | POST `/urls` body kept original URL; no local dirs |
+| Server host status | `python -m ref_cli.cli --status` | `Mode: remote`, `Status: ok` |
+| LT simulation | temp queue + stale config | stale `expected_uuid` → exit 1 mismatch; corrected config → `lt queue add` enqueued; no Deno warning with Deno absent from PATH |
+| Whitespace | `git diff --check` | clean |
+| Secret scan | regex over `git diff` | 0 credential-shaped matches |
+
+## Risks and limitations
+
+- Installed `lt` 0.7.0 still prints the Deno warning until a separately
+  authorized upgrade to `local_transcribe/main` (0.8.1+).
+- The stale `local-transcribe` config still fails identity validation until a
+  separately authorized config correction. ref now reports that once, concisely.
+- The project's `requires-python` metadata still says `>=3.7`, while existing
+  code and tests use newer syntax; the CI target is Python 3.12.
+- No production deployment, config edit, queue mutation, service restart, or
+  merge was performed.
+
+## Commits and PR
+
+- Implementation: `2ccde1d60f27224ade641fdd77de4590634c1e80`
+- Tests: `4e86bd5d1206b84513b783db2c0d3bf9c155dc08`
+- Task/handoff/agent docs: `ed60037ba294db7617e6e32e846bc39f7af273c3`
+- Draft PR #33: https://github.com/draeician/ref/pull/33
+- Final review-state docs commit: pushed to the same branch after the task move.
+
+## Outstanding deployment steps (separately authorized, do not run here)
+
+1. Back up and correct the live `~/.config/local-transcribe/config.yaml`
+   `queue.path` and `expected_uuid` to the production queue identity.
+2. Upgrade the installed `lt` on `minion-26` from 0.7.0 to `local_transcribe/main`
+   (0.8.1+) so the Deno probe is download-path only.
+3. Restart `ref-api.service` and verify a controlled enqueue against the real
+   queue.
+4. Recover any `transcript-pending.md` entries with `ref --transcript` after the
+   queue is healthy.
+
+## Next action
+
+ChatGPT review of draft PR #33; do not merge, deploy, restart, or modify live
+queue/config until Drae approves.
 
 Reference: `docs/plans/unified-ref-consolidation.md` on
 `docs/unified-ref-consolidation-plan` (PR #29) motivates the single authoritative
