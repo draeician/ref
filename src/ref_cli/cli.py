@@ -361,30 +361,46 @@ def get_default_config():
             'skip_patterns': []
         }
 
-# Define the directory where you want the logs to be stored
-log_directory = os.path.expanduser("~/references/logs")
-os.makedirs(log_directory, exist_ok=True)
+# Define the directory where you want the logs to be stored.
+# ``ref --upgrade`` is strictly read-only: importing the CLI must not create
+# ~/references/logs in that mode, so file logging is skipped for it.
+def _is_read_only_invocation(argv: Optional[List[str]] = None) -> bool:
+    args = sys.argv[1:] if argv is None else argv
+    return any(
+        arg == "--upgrade" or arg.startswith("--upgrade=")
+        for arg in args
+    )
 
-# Define the log file paths
+
+_READ_ONLY_INVOCATION = _is_read_only_invocation()
+log_directory = os.path.expanduser("~/references/logs")
 log_file_path = os.path.join(log_directory, "ref.log")
 error_log_file_path = os.path.join(log_directory, "ref_errors.log")
 
-# Logging configuration
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s:%(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path),
-        logging.StreamHandler()
-    ]
-)
+if _READ_ONLY_INVOCATION:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s %(levelname)s:%(message)s',
+        handlers=[logging.StreamHandler()],
+    )
+else:
+    os.makedirs(log_directory, exist_ok=True)
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s %(levelname)s:%(message)s',
+        handlers=[
+            logging.FileHandler(log_file_path),
+            logging.StreamHandler()
+        ]
+    )
 
 # Create a separate logger for errors
 error_logger = logging.getLogger('error_logger')
 error_logger.setLevel(logging.ERROR)
-error_file_handler = logging.FileHandler(error_log_file_path)
-error_file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s:%(message)s'))
-error_logger.addHandler(error_file_handler)
+if not _READ_ONLY_INVOCATION:
+    error_file_handler = logging.FileHandler(error_log_file_path)
+    error_file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s:%(message)s'))
+    error_logger.addHandler(error_file_handler)
 
 # Filter out warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="urllib3")
@@ -1529,7 +1545,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--upgrade",
         action="store_true",
-        help="Upgrade this ref-cli install and restart the ref-api service.",
+        help="Inspect installs and print read-only upgrade instructions (never upgrades).",
     )
     parser.add_argument(
         "--install-server",
@@ -3307,9 +3323,9 @@ def main():
 
             sys.exit(report_api_status(load_config()))
         if args.upgrade:
-            from ref_cli.upgrade import perform_upgrade
+            from ref_cli.upgrade import report_upgrade_instructions
 
-            sys.exit(perform_upgrade())
+            sys.exit(report_upgrade_instructions())
         if args.install_server:
             from ref_cli.server_install import install_server
 

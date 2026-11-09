@@ -76,6 +76,29 @@ ref-api --host 127.0.0.1 --port 8080
 # or: REF_API_HOST / REF_API_PORT
 ```
 
+### Checking installations and upgrade instructions
+
+`ref --upgrade` is **read-only**. It inspects the running CLI environment,
+separate pipx metadata, and the `ref-api.service` `ExecStart`, checks GitHub
+for the default branch's latest commit, and prints host-specific instructions.
+It never installs, upgrades, restarts a service, edits configuration, or changes
+the archive.
+
+```bash
+ref --upgrade
+```
+
+The output separates each detected installation, for example a pipx-managed
+`ref-cli` and a dedicated `ref-api` virtualenv. A service restart is only
+recommended when the environment used by `ref-api.service` changes; upgrading
+an unrelated pipx environment does not require one. If both environments are
+already at the latest GitHub revision, the command says so and recommends no
+work. If provenance cannot be established (missing or corrupt pipx metadata,
+no PEP 610 `direct_url.json`, or an unreadable service unit), the output names
+the missing information instead of inventing a command. Archive snapshots are
+not part of routine package rollback; do not restore an older `references.md`
+over newer data unless corruption is confirmed.
+
 ```bash
 curl -sS http://127.0.0.1:8000/health
 
@@ -448,7 +471,10 @@ other's rows. Slow network/provider work runs outside that lock. The lock is
 command writing directly to the same archive in a *separate OS process* is not
 coordinated by it (the single-writer-on-the-API-host model).
 
-After upgrading the pipx-installed `ref-cli`, restart the user service:
+After upgrading the environment used by `ref-api.service`, restart the user
+service. Use `ref --upgrade` to see which environment that is; upgrading a
+separate pipx `ref-cli` installation that the service does not use does not
+require a restart:
 
 ```bash
 systemctl --user restart ref-api.service
