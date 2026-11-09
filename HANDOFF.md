@@ -1,3 +1,72 @@
+# HANDOFF — 7d2c9e41 production deployment (ref + queue producer)
+
+**Date:** 2026-11-09/10 (UTC)
+**Task ID:** `7d2c9e41`
+**Owner:** OpenCode
+**State:** REVIEW (deployment performed; canary and nomnom blocked)
+**Branch:** `ops/deploy-remote-api-queue-fix`
+**Authorized ref:** `ce73299760787abfd4e69b29c51c450cae0ab9d0`
+**Authorized local_transcribe:** `b3cf22ee5da337fab9dcd37fb97506f5beab012b`
+**Task record:** `.codex/tasks/review/7d2c9e41-deploy-remote-api-queue-fix.md`
+
+## Deployed state (minion-26)
+
+- `ref-api.service` runs from the dedicated venv
+  `/home/draeician/.local/share/ref-services/ref-api` (Python 3.13.17), now
+  installed as `ref-cli 1.6.12b1.dev157+gce7329976` from the authorized
+  `ce73299` wheel. `/health` returns that version; `NRestarts=0`, reconciler
+  started, no error/traceback lines.
+- `ref --status` on minion-26: `Mode: remote`, `Status: ok`, exit 0.
+- `lt` is now `local-transcribe 0.8.1` from `b3cf22e`, same Python 3.14.4,
+  pipx spec pinned to the commit. No Deno warning.
+- Producer config corrected: `queue.path` and `queue.expected_uuid`
+  (`8c6fc098-8cbe-41ae-9689-dd759797a582`); `expected_nfs_version: 3`
+  preserved.
+- Queue integrity: counts unchanged (completed 5607, failed 204, cancelled 670,
+  pending 0, retry 0, keys 8290) and `queue.id` hash unchanged. Archive hash
+  unchanged (`b3fc9be9…`).
+- Worker `aether`: service active, NFSv3, `rpc.statd` running, NLM lock held;
+  `lt queue doctor` all-ok.
+
+## Blockers / not performed
+
+1. **Canary not submitted.** minion-26 mounts `/opt/md2` as NFSv4.2 while the
+   preserved producer guard is `expected_nfs_version: 3`, so `lt queue
+   path`/`doctor` report an NFS-version mismatch. The producer enqueue path does
+   not use mount validation/NLM and the worker host is correctly NFSv3, but the
+   task's explicit STOP rule ("do not force an enqueue" on a mount problem) was
+   honored. No queue job, archive row, or pending file was written. A decision is
+   required: accept the producer-only guard artifact and authorize the canary, or
+   authorize a host-appropriate guard/remount change.
+2. **nomnom not updated.** SSH from minion-26 and aether returns
+   `Permission denied (publickey,password)`; no usable key and Tailscale SSH is
+   not enabled. The pipx ref-cli upgrade and routing/status smoke there remain
+   outstanding.
+3. **Pending backlog not replayed.** Live `transcript-pending.md` is absent.
+   The archive has 8,811 historical pending-file rows, 20 failed-execution
+   placeholders (reconciler correctly skips them), and 37 `|None` rows. Only
+   `|None` rows are selectable by `update_transcript()`; isolated fixture
+   confirmed. Safe recovery needs a follow-up coding task; no archive rewrite or
+   bulk replay was done.
+
+## Backups / rollback
+
+Backup dir:
+`/home/draeician/.local/share/ref-services/deploy-backups/20261109T234313Z-deploy-remote-api-queue-fix`
+(config, service unit, pipx metadata, archive copy with matching sha256,
+`queue.id` copy, package inventories, deployed wheel, dev129 rollback wheel).
+Exact restore commands are recorded in the task file.
+
+## Remaining production actions (separately authorized)
+
+1. Resolve the NFS-version guard mismatch and authorize/run the bounded canary.
+2. Gain nomnom access and deploy the pipx ref-cli; verify `--version`,
+   `--status`, and HTTP routing.
+3. Approve a follow-up recovery task for the pending backlog; do not bulk replay.
+4. Verify worker processing and terminal transcript results from the canary.
+
+---
+
 # HANDOFF — f7774dc0 remote-client routing and queue producer
 
 **Date:** 2026-11-09 (UTC)
