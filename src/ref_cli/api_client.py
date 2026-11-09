@@ -575,7 +575,8 @@ def ingest_file_via_api(
 
     from ref_cli import cli as ref_cli
 
-    user_config = ref_cli.load_config()
+    # Routing/skip patterns must not create or rewrite client config.
+    user_config = ref_cli.read_config_for_routing()
 
     try:
         with open(file_path, "r", encoding="utf-8") as handle:
