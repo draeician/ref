@@ -169,11 +169,24 @@ def _args(**overrides):
     return type("Args", (), values)()
 
 
+def _behind(installed: str, github: upgrade.GitHubState) -> upgrade.RevisionRelationship:
+    if upgrade.compare_revisions(installed, github.latest_sha) == "exact":
+        return upgrade.RevisionRelationship("exact", "test exact")
+    return upgrade.RevisionRelationship("behind", "test revision is behind GitHub")
+
+
+def _health_ok(url: str, timeout: float) -> dict:
+    return {"status": "ok", "version": INSTALLED_VERSION}
+
+
 def _report(tmp_path: Path, **kwargs) -> None:
     kwargs.setdefault("github_state", upgrade.GitHubState(
         default_branch="main", latest_sha=LATEST_SHA
     ))
     kwargs.setdefault("pipx_home", tmp_path / "no-pipx")
+    kwargs.setdefault("revision_resolver", _behind)
+    kwargs.setdefault("health_url", "http://127.0.0.1:8000/health")
+    kwargs.setdefault("health_fetcher", _health_ok)
     upgrade.report_upgrade_instructions(**kwargs)
 
 
@@ -544,9 +557,9 @@ def test_github_network_timeout_is_translated(monkeypatch) -> None:
 @pytest.mark.parametrize(
     "installed,latest,expected",
     [
-        ("80c6e3791", LATEST_SHA, "current"),
-        ("80c6e379106a73c047cd517e56207bc62d558d7f", LATEST_SHA, "current"),
-        (OLD_SHA[:9], LATEST_SHA, "outdated"),
+        ("80c6e3791", LATEST_SHA, "exact"),
+        ("80c6e379106a73c047cd517e56207bc62d558d7f", LATEST_SHA, "exact"),
+        (OLD_SHA[:9], LATEST_SHA, "different"),
         ("80c6", LATEST_SHA, "unknown"),
         (None, LATEST_SHA, "unknown"),
         ("not-a-sha", LATEST_SHA, "unknown"),
@@ -556,6 +569,225 @@ def test_revision_comparison_handles_abbreviations(
     installed, latest, expected
 ) -> None:
     assert upgrade.compare_revisions(installed, latest) == expected
+
+
+def test_revision_relationship_behind_ahead_and_divergent() -> None:
+    github = upgrade.GitHubState(default_branch="main", latest_sha=LATEST_SHA)
+
+    def fetcher(status):
+        calls = []
+
+        def fetch(url, timeout):
+            calls.append(url)
+            return {
+                "status": status,
+                "ahead_by": 2 if status in ("ahead", "diverged") else 0,
+                "behind_by": 3 if status in ("behind", "diverged") else 0,
+            }
+
+        return fetch, calls
+
+    behind_fetch, behind_calls = fetcher("behind")
+    result = upgrade.resolve_revision_relationship(
+        OLD_SHA, github, fetcher=behind_fetch
+    )
+    assert result.kind == "behind"
+    assert "behind GitHub by 3" in result.detail
+    assert len(behind_calls) == 1
+
+    ahead_fetch, _ = fetcher("ahead")
+    result = upgrade.resolve_revision_relationship(
+        OLD_SHA, github, fetcher=ahead_fetch
+    )
+    assert result.kind == "ahead"
+    assert "do not downgrade" in result.detail
+
+    divergent_fetch, _ = fetcher("diverged")
+    result = upgrade.resolve_revision_relationship(
+        OLD_SHA, github, fetcher=divergent_fetch
+    )
+    assert result.kind == "divergent"
+    assert "do not downgrade" in result.detail
+
+
+def test_revision_relationship_unavailable_github_is_unknown() -> None:
+    github = upgrade.GitHubState(
+        default_branch="main", latest_sha=LATEST_SHA, error="GitHub unavailable"
+    )
+    calls = []
+
+    result = upgrade.resolve_revision_relationship(
+        OLD_SHA, github, fetcher=lambda url, timeout: calls.append(url)
+    )
+
+    assert result.kind == "unknown"
+    assert calls == []
+
+
+def test_unresolved_abbreviated_relationship_never_becomes_outdated() -> None:
+    github = upgrade.GitHubState(default_branch="main", latest_sha=LATEST_SHA)
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append(url)
+        raise upgrade.GitHubError("GitHub resource not found (HTTP 404)")
+
+    result = upgrade.resolve_revision_relationship(
+        "5565ab5", github, fetcher=fetch
+    )
+
+    assert result.kind == "unknown"
+    assert all("/compare/" not in url for url in calls)
+
+
+def test_abbreviated_relationship_resolves_to_full_sha() -> None:
+    github = upgrade.GitHubState(default_branch="main", latest_sha=LATEST_SHA)
+    calls = []
+
+    def fetch(url, timeout):
+        calls.append(url)
+        if "/commits/" in url:
+            return {"sha": OLD_SHA}
+        return {"status": "behind", "behind_by": 1, "ahead_by": 0}
+
+    result = upgrade.resolve_revision_relationship(
+        "5565ab5", github, fetcher=fetch
+    )
+
+    assert result.kind == "behind"
+    assert any("/commits/5565ab5" in url for url in calls)
+    assert any("/compare/" in url and OLD_SHA in url for url in calls)
+
+
+def test_ahead_revision_does_not_recommend_downgrade(tmp_path: Path, capsys) -> None:
+    env = _make_venv(tmp_path / "env", version=OLD_VERSION, sha=OLD_SHA)
+    _report(
+        tmp_path,
+        cli_environment=env,
+        cli_executable=env / "bin" / "ref",
+        systemd_unit=tmp_path / "missing.service",
+        revision_resolver=lambda installed, github: upgrade.RevisionRelationship(
+            "ahead", "installed revision is ahead of GitHub; do not downgrade"
+        ),
+    )
+
+    out = _clean(capsys.readouterr().out)
+    assert "Status: ahead" in out
+    assert "do not downgrade" in out
+    assert "pip install --upgrade" not in out
+    assert "pipx install --force" not in out
+    assert "Nothing to do" not in out
+
+
+def test_divergent_revision_does_not_recommend_downgrade(
+    tmp_path: Path, capsys
+) -> None:
+    env = _make_venv(tmp_path / "env", version=OLD_VERSION, sha=OLD_SHA)
+    _report(
+        tmp_path,
+        cli_environment=env,
+        cli_executable=env / "bin" / "ref",
+        systemd_unit=tmp_path / "missing.service",
+        revision_resolver=lambda installed, github: upgrade.RevisionRelationship(
+            "divergent", "installed revision has diverged; do not downgrade"
+        ),
+    )
+
+    out = _clean(capsys.readouterr().out)
+    assert "Status: divergent" in out
+    assert "pip install --upgrade" not in out
+    assert "pipx install --force" not in out
+
+
+def test_running_api_stale_triggers_restart_only(tmp_path: Path, capsys) -> None:
+    service = _make_venv(tmp_path / "service", api=True)
+    unit = _unit(tmp_path / "ref-api.service", service / "bin" / "ref-api")
+
+    def stale_health(url: str, timeout: float) -> dict:
+        return {"status": "ok", "version": OLD_VERSION}
+
+    _report(
+        tmp_path,
+        cli_environment=service,
+        cli_executable=service / "bin" / "ref",
+        systemd_unit=unit,
+        health_fetcher=stale_health,
+    )
+
+    out = _clean(capsys.readouterr().out)
+    assert "Status: current" in out
+    assert "Runtime status: stale" in out
+    assert "running process is stale" in out
+    assert "systemctl --user restart ref-api.service" in out
+    assert "pip install --upgrade" not in out
+    assert "pipx install --force" not in out
+    assert "Nothing to do" not in out
+
+
+def test_running_api_current_does_not_trigger_restart(tmp_path: Path, capsys) -> None:
+    service = _make_venv(tmp_path / "service", api=True)
+    unit = _unit(tmp_path / "ref-api.service", service / "bin" / "ref-api")
+    _report(
+        tmp_path,
+        cli_environment=service,
+        cli_executable=service / "bin" / "ref",
+        systemd_unit=unit,
+    )
+
+    out = _clean(capsys.readouterr().out)
+    assert "Runtime status: current" in out
+    assert "Nothing to do: all detected installations are current." in out
+    assert "systemctl --user restart" not in out
+
+
+def test_running_api_unreachable_is_unknown_not_current(
+    tmp_path: Path, capsys
+) -> None:
+    service = _make_venv(tmp_path / "service", api=True)
+    unit = _unit(tmp_path / "ref-api.service", service / "bin" / "ref-api")
+
+    def unreachable(url: str, timeout: float) -> dict:
+        raise upgrade.EndpointError("connection refused")
+
+    _report(
+        tmp_path,
+        cli_environment=service,
+        cli_executable=service / "bin" / "ref",
+        systemd_unit=unit,
+        health_fetcher=unreachable,
+    )
+
+    out = _clean(capsys.readouterr().out)
+    assert "Running API revision: unknown" in out
+    assert "Runtime status: unknown" in out
+    assert "endpoint unreachable" in out
+    assert "Nothing to do: all detected installations are current." not in out
+    assert "systemctl --user restart" not in out
+
+
+def test_api_outdated_and_running_stale_recommends_upgrade_and_restart(
+    tmp_path: Path, capsys
+) -> None:
+    cli_env = _make_venv(tmp_path / "cli-env", version=INSTALLED_VERSION, sha=LATEST_SHA)
+    api_env = _make_venv(tmp_path / "api-env", version=OLD_VERSION, sha=OLD_SHA)
+    unit = _unit(tmp_path / "ref-api.service", api_env / "bin" / "ref-api")
+
+    def even_older_health(url: str, timeout: float) -> dict:
+        return {"status": "ok", "version": "1.6.12b1.dev100+g111111111"}
+
+    _report(
+        tmp_path,
+        cli_environment=cli_env,
+        cli_executable=cli_env / "bin" / "ref",
+        systemd_unit=unit,
+        health_fetcher=even_older_health,
+    )
+
+    out = _clean(capsys.readouterr().out)
+    assert "Status: outdated" in out
+    assert "Runtime status: stale" in out
+    assert "ref-cli[api] @ git+" in out
+    assert "systemctl --user restart ref-api.service" in out
 
 
 def test_both_installations_current(tmp_path: Path, capsys) -> None:
@@ -627,6 +859,8 @@ def test_upgrade_command_performs_no_mutations(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     cli_env = _make_venv(tmp_path / "cli-env", version=OLD_VERSION, sha=OLD_SHA)
+    service_env = _make_venv(tmp_path / "service-env", api=True)
+    unit = _unit(tmp_path / "ref-api.service", service_env / "bin" / "ref-api")
     pipx_home = tmp_path / "pipx"
     _make_pipx_install(pipx_home)
 
@@ -638,17 +872,22 @@ def test_upgrade_command_performs_no_mutations(
     monkeypatch.setattr(os, "system", forbidden)
     monkeypatch.setattr(os, "popen", forbidden)
 
+    def stale_health(url: str, timeout: float) -> dict:
+        return {"status": "ok", "version": OLD_VERSION}
+
     _report(
         tmp_path,
         cli_environment=cli_env,
         cli_executable=cli_env / "bin" / "ref",
-        systemd_unit=tmp_path / "missing.service",
+        systemd_unit=unit,
         pipx_home=pipx_home,
+        health_fetcher=stale_health,
     )
 
     out = _clean(capsys.readouterr().out)
     assert "pip install --upgrade" in out
     assert "pipx install --force" in out
+    assert "systemctl --user restart ref-api.service" in out
 
 
 def test_automatic_upgrade_path_is_removed() -> None:
@@ -732,6 +971,16 @@ def test_main_upgrade_runs_full_report_without_subprocess(
         upgrade,
         "discover_pipx_installations",
         lambda pipx_home=None: [],
+    )
+    monkeypatch.setattr(
+        upgrade,
+        "check_running_api",
+        lambda service, **kwargs: upgrade.RunningApi(
+            url="http://127.0.0.1:8000/health",
+            reachable=True,
+            version=INSTALLED_VERSION,
+            revision=LATEST_SHA[:9],
+        ),
     )
     monkeypatch.setattr(
         server_install, "SYSTEMD_UNIT", tmp_path / "missing.service"

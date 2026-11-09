@@ -90,6 +90,25 @@ class ServiceInfo:
 
 
 @dataclass
+class RevisionRelationship:
+    kind: str = "unknown"
+    detail: str = ""
+    compared_revision: Optional[str] = None
+
+
+@dataclass
+class RunningApi:
+    url: Optional[str] = None
+    reachable: bool = False
+    http_status: Optional[str] = None
+    version: Optional[str] = None
+    revision: Optional[str] = None
+    error: Optional[str] = None
+    relationship: str = "unknown"
+    detail: str = ""
+
+
+@dataclass
 class UpgradeAction:
     title: str
     install: Installation
@@ -841,12 +860,192 @@ def check_github(
 
 
 # ---------------------------------------------------------------------------
+# Running API endpoint
+# ---------------------------------------------------------------------------
+
+
+class EndpointError(RuntimeError):
+    """A user-facing local endpoint lookup failure."""
+
+
+def _http_get_json(
+    url: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    *,
+    accept: str = "application/json",
+) -> Any:
+    request = urlrequest.Request(
+        url,
+        headers={"Accept": accept, "User-Agent": "ref-cli-upgrade-check"},
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=timeout) as response:
+            payload = response.read().decode("utf-8")
+    except urlerror.HTTPError as exc:
+        raise EndpointError(f"HTTP {exc.code} from {url}") from exc
+    except urlerror.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            raise EndpointError(f"request to {url} timed out") from exc
+        raise EndpointError(f"{url} is unreachable: {reason}") from exc
+    except (TimeoutError, OSError) as exc:
+        if "timed out" in str(exc).lower():
+            raise EndpointError(f"request to {url} timed out") from exc
+        raise EndpointError(f"{url} is unreachable: {exc}") from exc
+    except (UnicodeError, ValueError) as exc:
+        raise EndpointError(f"invalid response from {url}: {exc}") from exc
+    try:
+        return json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise EndpointError(f"invalid JSON from {url}: {exc}") from exc
+
+
+def _is_loopback_host(host: Optional[str]) -> bool:
+    return (host or "").lower() in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+        "0.0.0.0",
+        "::",
+    }
+
+
+def _configured_local_api_url() -> Optional[str]:
+    """Read api_url only if it points at a local endpoint; never bootstrap config."""
+    path = Path.home() / ".config" / "ref" / "config.yaml"
+    text = _read_text(path)
+    if not text:
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(text) or {}
+    except Exception:  # noqa: BLE001 - config is optional read-only input
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("api_url")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlparse.urlparse(value.strip())
+    if parsed.scheme not in ("http", "https") or not _is_loopback_host(
+        parsed.hostname
+    ):
+        return None
+    return value.strip().rstrip("/")
+
+
+def _health_url(service: ServiceInfo, health_url: Optional[str]) -> Optional[str]:
+    if health_url:
+        return health_url.rstrip("/")
+    configured = _configured_local_api_url()
+    if configured:
+        return f"{configured}/health"
+    if service.health_url:
+        return service.health_url
+    return None
+
+
+def check_running_api(
+    service: ServiceInfo,
+    *,
+    health_url: Optional[str] = None,
+    timeout: float = 2.0,
+    fetcher: Optional[Callable[[str, float], Any]] = None,
+) -> RunningApi:
+    """Read the bounded local ``GET /health`` response without changing anything."""
+    url = _health_url(service, health_url)
+    if not url:
+        return RunningApi(
+            error="No local ref-api /health endpoint could be determined."
+        )
+    fetch = fetcher or _http_get_json
+    try:
+        data = fetch(url, timeout)
+    except EndpointError as exc:
+        return RunningApi(url=url, error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        return RunningApi(url=url, error=f"health check failed: {exc}")
+    if not isinstance(data, dict):
+        return RunningApi(url=url, error="health response was not a JSON object")
+    version = str(data.get("version") or "").strip() or None
+    return RunningApi(
+        url=url,
+        reachable=True,
+        http_status=str(data.get("status") or "").strip() or None,
+        version=version,
+        revision=_revision_from_version(version),
+    )
+
+
+def _same_revision(left: Optional[str], right: Optional[str]) -> bool:
+    if not left or not right:
+        return False
+    a = str(left).strip().lower().lstrip("g")
+    b = str(right).strip().lower().lstrip("g")
+    if len(a) < MIN_ABBREVIATED_SHA or len(b) < MIN_ABBREVIATED_SHA:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+def evaluate_running_api(
+    running: RunningApi, install: Optional[Installation]
+) -> RunningApi:
+    """Compare the running /health version with the installed API package."""
+    if not running.reachable:
+        running.relationship = "unknown"
+        running.detail = (
+            f"endpoint unreachable or unreadable: {running.error}"
+            if running.error
+            else "endpoint unreachable or unreadable"
+        )
+        return running
+    if not running.version:
+        running.relationship = "unknown"
+        running.detail = "health response did not include a version"
+        return running
+    if install is None:
+        running.relationship = "unknown"
+        running.detail = "no installed ref-api package could be inspected"
+        return running
+    if install.revision and running.revision:
+        if _same_revision(install.revision, running.revision):
+            running.relationship = "current"
+            running.detail = "running revision matches the installed package"
+        else:
+            running.relationship = "stale"
+            running.detail = (
+                f"running {_short_sha(running.revision)} differs from installed "
+                f"{_short_sha(install.revision)}"
+            )
+        return running
+    if install.version and running.version:
+        if install.version == running.version:
+            running.relationship = "current"
+            running.detail = "running version matches the installed package"
+        else:
+            running.relationship = "stale"
+            running.detail = (
+                f"running version {running.version} differs from installed "
+                f"{install.version}"
+            )
+        return running
+    running.relationship = "unknown"
+    running.detail = "installed or running version is unavailable"
+    return running
+
+
+# ---------------------------------------------------------------------------
 # Comparison and status
 # ---------------------------------------------------------------------------
 
 
 def compare_revisions(installed: Optional[str], latest: Optional[str]) -> str:
-    """Return ``current``/``outdated``/``unknown`` using prefix matching."""
+    """Local-only comparison: ``exact``, ``different``, or ``unknown``.
+
+    Ancestry requires GitHub evidence and is resolved separately so a differing
+    SHA is never treated as a downgrade candidate by itself.
+    """
     if not installed or not latest:
         return "unknown"
     left = str(installed).strip().lower().lstrip("g")
@@ -858,8 +1057,8 @@ def compare_revisions(installed: Optional[str], latest: Optional[str]) -> str:
     ):
         return "unknown"
     if left.startswith(right) or right.startswith(left):
-        return "current"
-    return "outdated"
+        return "exact"
+    return "different"
 
 
 def _short_sha(value: Optional[str], length: int = 12) -> str:
@@ -868,7 +1067,135 @@ def _short_sha(value: Optional[str], length: int = 12) -> str:
     return value[:length]
 
 
-def evaluate_status(install: Optional[Installation], github: GitHubState) -> None:
+def _resolve_github_sha(
+    revision: str,
+    fetch: Callable[[str, float], Any],
+    repository: str,
+    timeout: float,
+) -> str:
+    cleaned = revision.strip().lower().lstrip("g")
+    if len(cleaned) >= 40:
+        return cleaned[:40]
+    url = (
+        f"{GITHUB_API}/repos/{repository}/commits/"
+        f"{urlparse.quote(cleaned, safe='')}"
+    )
+    data = fetch(url, timeout)
+    if not isinstance(data, dict):
+        raise GitHubError("GitHub commit response was not an object")
+    sha = str(data.get("sha") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise GitHubError(
+            f"Abbreviated revision {revision!r} could not be resolved to a full SHA"
+        )
+    return sha
+
+
+def resolve_revision_relationship(
+    installed: Optional[str],
+    github: GitHubState,
+    *,
+    fetcher: Optional[Callable[[str, float], Any]] = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    repository: Optional[str] = None,
+    cache: Optional[Dict[Tuple[str, str], RevisionRelationship]] = None,
+) -> RevisionRelationship:
+    """Use GitHub evidence to classify the installed revision relative to main."""
+    if not installed or not github.latest_sha:
+        return RevisionRelationship(
+            "unknown", "installed or latest revision is unavailable"
+        )
+    if github.error:
+        return RevisionRelationship(
+            "unknown", f"GitHub relationship lookup unavailable: {github.error}"
+        )
+    key = (str(installed).lower(), str(github.latest_sha).lower())
+    if cache is not None and key in cache:
+        return cache[key]
+
+    local = compare_revisions(installed, github.latest_sha)
+    if local == "exact":
+        result = RevisionRelationship(
+            "exact", "installed revision matches the GitHub revision"
+        )
+    elif local == "unknown":
+        result = RevisionRelationship(
+            "unknown", "the installed or GitHub revision is too short or malformed"
+        )
+    else:
+        fetch = fetcher or _github_get_json
+        repo = repository or github.repository
+        try:
+            installed_sha = _resolve_github_sha(
+                str(installed), fetch, repo, timeout
+            )
+            latest_sha = _resolve_github_sha(
+                str(github.latest_sha), fetch, repo, timeout
+            )
+            url = (
+                f"{GITHUB_API}/repos/{repo}/compare/"
+                f"{latest_sha}...{installed_sha}"
+            )
+            data = fetch(url, timeout)
+            if not isinstance(data, dict):
+                raise GitHubError("GitHub compare response was not an object")
+            status = str(data.get("status") or "").strip().lower()
+            ahead_by = data.get("ahead_by")
+            behind_by = data.get("behind_by")
+            if status == "identical":
+                result = RevisionRelationship(
+                    "exact",
+                    "installed revision matches the GitHub revision",
+                    installed_sha,
+                )
+            elif status == "ahead":
+                result = RevisionRelationship(
+                    "ahead",
+                    (
+                        f"installed revision is ahead of GitHub by {ahead_by} "
+                        "commit(s); do not downgrade"
+                    ),
+                    installed_sha,
+                )
+            elif status == "behind":
+                result = RevisionRelationship(
+                    "behind",
+                    (
+                        f"installed revision is behind GitHub by {behind_by} "
+                        "commit(s)"
+                    ),
+                    installed_sha,
+                )
+            elif status == "diverged":
+                result = RevisionRelationship(
+                    "divergent",
+                    "installed revision has diverged from GitHub; do not downgrade",
+                    installed_sha,
+                )
+            else:
+                result = RevisionRelationship(
+                    "unknown",
+                    f"GitHub reported an unrecognized compare status: {status or 'none'}",
+                    installed_sha,
+                )
+        except GitHubError as exc:
+            result = RevisionRelationship(
+                "unknown", f"GitHub relationship lookup failed: {exc}"
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            result = RevisionRelationship(
+                "unknown", f"GitHub relationship lookup failed: {exc}"
+            )
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def evaluate_status(
+    install: Optional[Installation],
+    github: GitHubState,
+    relationship: Optional[RevisionRelationship] = None,
+) -> None:
     if install is None:
         install_status = ("not-detected", "not installed")
     elif github.error:
@@ -886,27 +1213,34 @@ def evaluate_status(install: Optional[Installation], github: GitHubState) -> Non
             ),
         )
     else:
-        comparison = compare_revisions(install.revision, github.latest_sha)
+        if relationship is None:
+            local = compare_revisions(install.revision, github.latest_sha)
+            if local == "exact":
+                relationship = RevisionRelationship(
+                    "exact", "installed revision matches the GitHub revision"
+                )
+            else:
+                relationship = RevisionRelationship(
+                    "unknown", "revision relationship was not checked"
+                )
         branch = github.default_branch or "the default branch"
-        if comparison == "current":
+        if relationship.kind == "exact":
             detail = (
                 f"matches GitHub {branch} ({_short_sha(github.latest_sha)})"
             )
             if install.editable:
                 detail += "; editable source, uncommitted changes not compared"
             install_status = ("current", detail)
-        elif comparison == "outdated":
-            install_status = (
-                "outdated",
-                (
-                    f"installed {_short_sha(install.revision)} does not match "
-                    f"GitHub {branch} ({_short_sha(github.latest_sha)})"
-                ),
-            )
+        elif relationship.kind == "behind":
+            install_status = ("outdated", relationship.detail)
+        elif relationship.kind == "ahead":
+            install_status = ("ahead", relationship.detail)
+        elif relationship.kind == "divergent":
+            install_status = ("divergent", relationship.detail)
         else:
             install_status = (
                 "unknown",
-                "the installed or GitHub revision is too short or malformed",
+                relationship.detail or "revision relationship is unknown",
             )
     if install is not None:
         install.status, install.status_detail = install_status
@@ -1148,6 +1482,7 @@ def _print_installation(
     *,
     service: Optional[ServiceInfo] = None,
     same_as_cli: Optional[bool] = None,
+    runtime: Optional[RunningApi] = None,
 ) -> None:
     print(title(heading))
     if install.executable is not None:
@@ -1187,9 +1522,28 @@ def _print_installation(
             print(f"  Service: not installed ({service.path} missing)")
     if same_as_cli is not None:
         print(f"  Same environment as ref-cli: {'yes' if same_as_cli else 'no'}")
+    if runtime is not None:
+        if runtime.url:
+            print(f"  Running API endpoint: {runtime.url}")
+        if runtime.reachable:
+            print(f"  Running API version: {runtime.version or 'unknown'}")
+            print(f"  Running API revision: {runtime.revision or 'unknown'}")
+        else:
+            print("  Running API revision: unknown")
+        runtime_colour = {
+            "current": success,
+            "stale": warning,
+            "unknown": info,
+        }.get(runtime.relationship, info)
+        print(
+            f"  Runtime status: {runtime_colour(runtime.relationship)} - "
+            f"{runtime.detail or 'unknown'}"
+        )
     status_colour = {
         "current": success,
         "outdated": warning,
+        "ahead": warning,
+        "divergent": warning,
         "not-detected": warning,
     }.get(install.status, info)
     print(f"  Status: {status_colour(install.status)} - {install.status_detail}")
@@ -1197,7 +1551,7 @@ def _print_installation(
         print(dim(f"  Note: {note}"))
 
 
-def _print_no_service(service: ServiceInfo) -> None:
+def _print_no_service(service: ServiceInfo, runtime: RunningApi) -> None:
     print(title("ref-api"))
     if service.exists:
         print(f"  Service: {service.path}")
@@ -1219,6 +1573,14 @@ def _print_no_service(service: ServiceInfo) -> None:
         )
     print("  Installation: not detected")
     print("  Status: not installed")
+    if runtime.url:
+        print(f"  Running API endpoint: {runtime.url}")
+        if runtime.reachable:
+            print(f"  Running API version: {runtime.version or 'unknown'}")
+            print(f"  Running API revision: {runtime.revision or 'unknown'}")
+        else:
+            print("  Running API revision: unknown")
+        print(f"  Runtime status: {runtime.relationship} - {runtime.detail}")
 
 
 def _unique_installations(
@@ -1241,6 +1603,7 @@ def _build_actions(
     pipx_installs: List[Installation],
     github: GitHubState,
     service: ServiceInfo,
+    runtime: RunningApi,
 ) -> Tuple[List[UpgradeAction], List[str]]:
     actions: List[UpgradeAction] = []
     unresolved: List[str] = []
@@ -1270,7 +1633,7 @@ def _build_actions(
                 )
             )
         handled_environments.append(cli.environment)
-    elif cli.status == "unknown":
+    elif cli.status in ("unknown", "ahead", "divergent"):
         unresolved.append(f"{cli.role}: {cli.status_detail}")
     handled_environments.append(cli.environment)
 
@@ -1301,7 +1664,7 @@ def _build_actions(
                     )
                 )
             handled_environments.append(api.environment)
-    elif api is not None and api.status == "unknown":
+    elif api is not None and api.status in ("unknown", "ahead", "divergent"):
         unresolved.append(f"ref-api: {api.status_detail}")
 
     for install in pipx_installs:
@@ -1337,8 +1700,50 @@ def _build_actions(
                         ),
                     )
                 )
-        elif install.status == "unknown":
+        elif install.status in ("unknown", "ahead", "divergent"):
             unresolved.append(f"{install.role}: {install.status_detail}")
+
+    api_action = next(
+        (action for action in actions if api is not None and action.install is api),
+        None,
+    )
+    if service_exists:
+        if runtime.relationship == "stale" and api is None:
+            unresolved.append(
+                f"ref-api runtime: {runtime.detail}; the installed ref-api "
+                "package could not be inspected, so no restart command is "
+                "recommended until that is resolved"
+            )
+        elif runtime.relationship == "stale":
+            if api_action is not None:
+                api_action.restart_service = True
+            elif api.status == "current":
+                actions.append(
+                    UpgradeAction(
+                        title="ref-api.service (running process is stale)",
+                        install=api,
+                        commands=[],
+                        notes=[
+                            (
+                                "The installed package matches GitHub, but "
+                                f"{runtime.detail}."
+                            ),
+                            (
+                                "Restart the service to load the installed code; "
+                                "no package upgrade is needed."
+                            ),
+                        ],
+                        restart_service=True,
+                    )
+                )
+            else:
+                unresolved.append(
+                    "ref-api runtime: "
+                    f"{runtime.detail}; installed package status is {api.status}, "
+                    "so no restart command is recommended until that is resolved"
+                )
+        elif runtime.relationship == "unknown":
+            unresolved.append(f"ref-api runtime: {runtime.detail}")
     return actions, unresolved
 
 
@@ -1353,6 +1758,12 @@ def report_upgrade_instructions(
     github_fetcher: Optional[Callable[[str, float], Any]] = None,
     repository: str = DEFAULT_REPOSITORY,
     timeout: float = DEFAULT_TIMEOUT,
+    health_url: Optional[str] = None,
+    health_timeout: float = 2.0,
+    health_fetcher: Optional[Callable[[str, float], Any]] = None,
+    revision_resolver: Optional[
+        Callable[[str, GitHubState], RevisionRelationship]
+    ] = None,
 ) -> int:
     """Inspect installations and print read-only upgrade instructions."""
     if cli_environment is None and prefix is not None:
@@ -1361,6 +1772,26 @@ def report_upgrade_instructions(
     github = github_state or check_github(
         repository=repository, timeout=timeout, fetcher=github_fetcher
     )
+    relationship_cache: Dict[Tuple[str, str], RevisionRelationship] = {}
+
+    def _relationship(revision: str, state: GitHubState) -> RevisionRelationship:
+        if revision_resolver is not None:
+            return revision_resolver(revision, state)
+        return resolve_revision_relationship(
+            revision,
+            state,
+            fetcher=github_fetcher,
+            timeout=timeout,
+            repository=state.repository,
+            cache=relationship_cache,
+        )
+
+    def _evaluate(install: Installation) -> None:
+        relationship = None
+        if install.revision and github.latest_sha and not github.error:
+            relationship = _relationship(install.revision, github)
+        evaluate_status(install, github, relationship)
+
     cli = detect_cli_installation(
         cli_environment=cli_environment,
         cli_executable=cli_executable,
@@ -1369,9 +1800,9 @@ def report_upgrade_instructions(
     api, service = detect_api_installation(service=service)
     all_pipx = discover_pipx_installations(pipx_home=pipx_home)
 
-    evaluate_status(cli, github)
+    _evaluate(cli)
     if api is not None:
-        evaluate_status(api, github)
+        _evaluate(api)
 
     separate_pipx: List[Installation] = []
     for install in _unique_installations(all_pipx):
@@ -1379,8 +1810,16 @@ def report_upgrade_instructions(
             continue
         if api is not None and _same_path(install.environment, api.environment):
             continue
-        evaluate_status(install, github)
+        _evaluate(install)
         separate_pipx.append(install)
+
+    runtime = check_running_api(
+        service,
+        health_url=health_url,
+        timeout=health_timeout,
+        fetcher=health_fetcher,
+    )
+    runtime = evaluate_running_api(runtime, api)
 
     _print_installation("ref-cli", cli, github)
     for install in separate_pipx:
@@ -1391,7 +1830,7 @@ def report_upgrade_instructions(
         )
 
     if api is None:
-        _print_no_service(service)
+        _print_no_service(service, runtime)
     else:
         _print_installation(
             "ref-api",
@@ -1399,12 +1838,13 @@ def report_upgrade_instructions(
             github,
             service=service,
             same_as_cli=_same_path(api.environment, cli.environment),
+            runtime=runtime,
         )
         if service.error:
             print(dim(f"  Note: {service.error}"))
 
     actions, unresolved = _build_actions(
-        cli, api, separate_pipx, github, service
+        cli, api, separate_pipx, github, service, runtime
     )
 
     print(title("Upgrade instructions"))
@@ -1421,8 +1861,8 @@ def report_upgrade_instructions(
                 print("   systemctl --user restart ref-api.service")
                 print(
                     dim(
-                        "   Note: restart ref-api.service after the environment used "
-                        "by its ExecStart changes."
+                        "   Note: restart ref-api.service after its environment or "
+                        "installed code changes."
                     )
                 )
     else:
@@ -1458,7 +1898,9 @@ def report_upgrade_instructions(
             )
         if service.exists:
             print("  systemctl --user status ref-api.service")
-            if service.health_url:
+            if runtime.url:
+                print(f"  curl -fsS {runtime.url}")
+            elif service.health_url:
                 print(f"  curl -fsS {service.health_url}")
 
     if actions:
