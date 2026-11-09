@@ -835,3 +835,28 @@ def test_settings_defaults_and_invalid_values(monkeypatch, caplog):
 
     monkeypatch.setenv(tr.ENV_INTERVAL_SECONDS, "42.5")
     assert tr.resolve_interval_seconds({}) == 42.5
+
+
+def test_pending_file_fallback_is_not_a_reconcile_candidate(tmp_path):
+    """Pending-file recovery is manual; reconciliation only matches queue placeholders."""
+    pending_extra = (
+        "Transcript unavailable (lt queue add exited 1: Queue UUID mismatch; "
+        "recorded in transcript-pending.md; not queued)"
+    )
+    assert tr._is_placeholder_text(pending_extra) is False
+
+    archive = _write_archive(
+        tmp_path / "references.md",
+        [_row("jNQXAC9IVRw", "ignored", extra=pending_extra)],
+    )
+
+    assert tr._scan_candidates(str(archive)) == []
+
+    result = tr.reconcile_transcripts(
+        archive_path=str(archive),
+        transcripts_dir=str(tmp_path / "transcripts"),
+        queue_dir=str(tmp_path / "queue"),
+        config={},
+    )
+    assert result.candidates == 0
+    assert result.updated == 0

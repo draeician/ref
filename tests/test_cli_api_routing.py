@@ -56,21 +56,33 @@ def test_run_list_requires_api_url(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.run_list(["2"])
     assert exc.value.code == 1
-    assert "requires api_url" in capsys.readouterr().out
+    assert "ref: No API server configured." in capsys.readouterr().out
 
 
-def test_run_ingest_local_when_api_not_configured(monkeypatch):
+def test_run_ingest_without_api_prints_guidance_and_never_processes_local(
+    monkeypatch, capsys
+):
     monkeypatch.setattr(cli, "configured_api_base_url", lambda: None)
     with patch("ref_cli.cli.process_url") as mock_process:
-        cli.run_ingest("https://example.com", force=False)
-    mock_process.assert_called_once_with("https://example.com", False)
+        with pytest.raises(SystemExit) as exc:
+            cli.run_ingest("https://example.com", force=False)
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "ref: No API server configured." in output
+    assert "ref --install-server" in output
+    assert "api_url: http://SERVER_LAN_IP:8000" in output
+    assert "export REF_API_URL=http://SERVER_LAN_IP:8000" in output
+    assert "ref --status" in output
+    assert "No URL processed." in output
+    assert "trusted network" in output
+    mock_process.assert_not_called()
 
 
 def test_run_backup_uses_api_when_remote(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "configured_api_base_url", lambda: "http://archive.example:8000")
     monkeypatch.setattr(
         cli,
-        "load_config",
+        "read_config_for_routing",
         lambda: {"paths": {"references": str(tmp_path)}},
     )
     with patch("ref_cli.api_client.backup_via_api", return_value=0) as mock_backup:
@@ -130,7 +142,9 @@ def test_status_flag_exits_via_report(monkeypatch):
         },
     )()
     monkeypatch.setattr(cli, "parse_arguments", lambda: args)
-    monkeypatch.setattr(cli, "load_config", lambda: {"api_url": "http://minion:8000"})
+    monkeypatch.setattr(
+        cli, "read_config_for_routing", lambda: {"api_url": "http://minion:8000"}
+    )
     with patch("ref_cli.api_client.report_api_status", return_value=0) as mock_status:
         with pytest.raises(SystemExit) as exc:
             cli.main()

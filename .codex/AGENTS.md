@@ -134,6 +134,30 @@ A task is done only if:
 
 ---
 
+## 6.1) Durable implementation lifecycle
+
+An implementation is **not DONE** merely because code was committed, pushed, or
+a pull request was opened. Use this lifecycle for every implementation task:
+
+```
+.codex/tasks/wip/  →  .codex/tasks/review/  →  .codex/tasks/done/
+```
+
+1. Move the task to `wip/` and post `[CLAIM]` before editing.
+2. Move it to `review/` with State `REVIEW` and open a draft PR only after the
+   verification gate passes. Review-blocked work stays in `review/` with its PR
+   open; never mark it done.
+3. After ChatGPT review, Drae's merge approval, and the actual merge:
+   - verify post-merge CI on `main`;
+   - move the task to `done/` and set State `DONE`;
+   - record final evidence in root `HANDOFF.md`;
+   - commit/push closure records through a PR when branch protection requires it;
+   - delete the merged local and remote feature branches;
+   - verify cleanup (branch gone, task directory matches State, worktree clean).
+
+Never delete unmerged work or bypass branch protection. Keep the task status and
+its directory consistent at all times. Preserve unrelated branches and worktrees.
+
 ## 7) Commit and PR conventions
 
 Follow the repo guide:

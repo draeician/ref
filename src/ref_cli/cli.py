@@ -361,46 +361,46 @@ def get_default_config():
             'skip_patterns': []
         }
 
-# Define the directory where you want the logs to be stored.
-# ``ref --upgrade`` is strictly read-only: importing the CLI must not create
-# ~/references/logs in that mode, so file logging is skipped for it.
-def _is_read_only_invocation(argv: Optional[List[str]] = None) -> bool:
-    args = sys.argv[1:] if argv is None else argv
-    return any(
-        arg == "--upgrade" or arg.startswith("--upgrade=")
-        for arg in args
-    )
-
-
-_READ_ONLY_INVOCATION = _is_read_only_invocation()
+# Logging is stream-only at import time. Remote clients must not create
+# ``~/references/logs`` merely by running ``ref <url>``, so file logging is
+# enabled lazily (``enable_file_logging``) only for local archive operations.
 log_directory = os.path.expanduser("~/references/logs")
 log_file_path = os.path.join(log_directory, "ref.log")
 error_log_file_path = os.path.join(log_directory, "ref_errors.log")
+_file_logging_enabled = False
 
-if _READ_ONLY_INVOCATION:
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s %(levelname)s:%(message)s',
-        handlers=[logging.StreamHandler()],
-    )
-else:
-    os.makedirs(log_directory, exist_ok=True)
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s %(levelname)s:%(message)s',
-        handlers=[
-            logging.FileHandler(log_file_path),
-            logging.StreamHandler()
-        ]
-    )
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s:%(message)s',
+    handlers=[logging.StreamHandler()],
+)
 
 # Create a separate logger for errors
 error_logger = logging.getLogger('error_logger')
 error_logger.setLevel(logging.ERROR)
-if not _READ_ONLY_INVOCATION:
-    error_file_handler = logging.FileHandler(error_log_file_path)
-    error_file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s:%(message)s'))
-    error_logger.addHandler(error_file_handler)
+
+
+def enable_file_logging() -> None:
+    """Create and attach file handlers for local archive operations.
+
+    Idempotent. Remote-only commands never call this, so they do not create
+    ``~/references/logs``. Failure to create the directory is non-fatal.
+    """
+    global _file_logging_enabled
+    if _file_logging_enabled:
+        return
+    try:
+        os.makedirs(log_directory, exist_ok=True)
+        formatter = logging.Formatter('%(asctime)s %(levelname)s:%(message)s')
+        file_handler = logging.FileHandler(log_file_path)
+        file_handler.setFormatter(formatter)
+        logging.getLogger().addHandler(file_handler)
+        error_file_handler = logging.FileHandler(error_log_file_path)
+        error_file_handler.setFormatter(formatter)
+        error_logger.addHandler(error_file_handler)
+    except OSError as exc:
+        logging.warning("Could not enable file logging in %s: %s", log_directory, exc)
+    _file_logging_enabled = True
 
 # Filter out warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="urllib3")
@@ -445,6 +445,58 @@ def load_config() -> dict:
     with open(CONFIG_FILE, 'r') as file:
         config = yaml.safe_load(file)
     return config
+
+
+def read_config_for_routing() -> dict:
+    """Read config for client routing without creating or rewriting anything.
+
+    Remote clients must be able to run with only ``REF_API_URL`` (or an
+    existing config file) and must not create ``~/.config/ref/config.yaml`` as
+    a side effect of an HTTP request. Missing or malformed config yields an
+    empty mapping so routing simply reports the missing API.
+    """
+    try:
+        with open(CONFIG_FILE, 'r') as file:
+            data = yaml.safe_load(file)
+    except FileNotFoundError:
+        return {}
+    except (OSError, yaml.YAMLError) as exc:
+        logging.warning("Could not read %s for routing: %s", CONFIG_FILE, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+MISSING_API_GUIDANCE = """ref: No API server configured.
+
+On the server:
+  ref --install-server
+
+On this client:
+  Edit ~/.config/ref/config.yaml
+  Set api_url: http://SERVER_LAN_IP:8000
+
+Or:
+  export REF_API_URL=http://SERVER_LAN_IP:8000
+
+Verify:
+  ref --status
+
+No URL processed.
+
+Use an endpoint on a trusted network; do not expose the unauthenticated ref-api publicly."""
+
+
+def require_api_base_url(*, stream=None) -> str:
+    """Return the configured ref-api URL or print guidance and exit nonzero.
+
+    The normal CLI is a client of ``ref-api``. It never silently falls back to
+    local archive processing when no endpoint is configured.
+    """
+    api_base = configured_api_base_url()
+    if api_base:
+        return api_base
+    print(MISSING_API_GUIDANCE, file=stream if stream is not None else sys.stdout)
+    sys.exit(1)
 
 # Copy all the remaining functions from the original file here
 def is_youtube_video_id(text: str) -> bool:
@@ -1192,6 +1244,28 @@ def _extract_youtube_video_urls_from_community_post(url: str) -> List[str]:
     return [convert_video_id_to_url(video_id) for video_id in unique]
 
 
+class YouTubeCredentialsError(ValueError):
+    """YouTube metadata was requested without a configured Data API key."""
+
+
+def _youtube_developer_key() -> str:
+    """Return the YouTube Data API key or raise a controlled error.
+
+    The CLI client never needs this key; it is only used by server-side
+    processing and explicit maintenance commands. Raising a normal exception
+    keeps the caller's per-URL error handling in control instead of surfacing
+    ``google.auth.exceptions.DefaultCredentialsError``.
+    """
+    key = (os.getenv('YOUTUBE_API_KEY') or DEVELOPER_KEY or '').strip()
+    if not key:
+        raise YouTubeCredentialsError(
+            "YouTube API credentials are not configured; set YOUTUBE_API_KEY "
+            "on the ref-api server (for example in ~/.config/ref/ref-api.env) "
+            "and restart ref-api."
+        )
+    return key
+
+
 def get_youtube_data(url: str) -> tuple:
     """
     Fetches YouTube video or playlist data using the YouTube Data API.
@@ -1207,7 +1281,11 @@ def get_youtube_data(url: str) -> tuple:
         ValueError: If the YouTube URL is invalid.
     """
     verbose_logger.log(f"Fetching YouTube data for URL: {url}")
-    youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=DEVELOPER_KEY)
+    youtube = build(
+        YOUTUBE_API_SERVICE_NAME,
+        YOUTUBE_API_VERSION,
+        developerKey=_youtube_developer_key(),
+    )
     parsed_url = urlparse(url)
     query_params = parse_qs(parsed_url.query)
     
@@ -1315,7 +1393,11 @@ def record_youtube_playlist_link(url: str, force: bool) -> None:
         process_url(url, force)
         return
 
-    youtube = build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=DEVELOPER_KEY)
+    youtube = build(
+        YOUTUBE_API_SERVICE_NAME,
+        YOUTUBE_API_VERSION,
+        developerKey=_youtube_developer_key(),
+    )
     playlist_title, playlist_uploader = _youtube_playlist_metadata(list_ids[0], youtube)
     current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
     if not url_exists_in_file(simplified_url, UNIFIED) or force:
@@ -1701,6 +1783,77 @@ def transcript_exists_on_disk(video_id: str) -> bool:
     return existing_transcript_path(video_id) is not None
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _one_line_detail(text: object, limit: int = 200) -> str:
+    """Collapse subprocess/provider output into one bounded reference-safe line.
+
+    Multiline ``lt queue add`` stderr (Deno warnings, identity errors) must never
+    be embedded in ``references.md``. Full detail stays in the server log.
+    """
+    cleaned = _ANSI_ESCAPE_RE.sub("", str(text or ""))
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1].rstrip() + "…"
+    return cleaned
+
+
+_DENO_LINE_RE = re.compile(r"\bdeno\b", re.IGNORECASE)
+_STRONG_QUEUE_ERROR_RE = re.compile(
+    r"queue|uuid|mismatch|identity", re.IGNORECASE
+)
+_QUEUE_ERROR_HINT_RE = re.compile(
+    r"queue|uuid|mismatch|identity|expected|found|exited|failed|failure|"
+    r"traceback|permission denied|no such file|not found|✗|✖|error:",
+    re.IGNORECASE,
+)
+
+
+def _summarize_queue_cli_stderr(text: object, limit: int = 260) -> str:
+    """Extract the actionable queue failure from ``lt queue add`` stderr.
+
+    Stale ``lt`` versions print a multi-line Deno installation guide before the
+    real queue error. Full stderr is logged by the caller; the saved reference
+    receives only the queue-relevant, single-line summary. Deno guidance lines
+    are dropped only when a stronger queue line exists, so unrelated errors are
+    not hidden by a broad filter.
+    """
+    cleaned = _ANSI_ESCAPE_RE.sub("", str(text or ""))
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return "(no output)"
+
+    strong_start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if not _DENO_LINE_RE.search(line)
+            and _STRONG_QUEUE_ERROR_RE.search(line)
+        ),
+        None,
+    )
+    if strong_start is not None:
+        selected = [
+            line
+            for line in lines[strong_start:]
+            if not _DENO_LINE_RE.search(line)
+        ]
+    else:
+        selected = [
+            line
+            for line in lines
+            if not _DENO_LINE_RE.search(line)
+            and _QUEUE_ERROR_HINT_RE.search(line)
+        ]
+        if not selected:
+            selected = [line for line in lines if not _DENO_LINE_RE.search(line)]
+    if not selected:
+        selected = lines
+
+    return _one_line_detail(" ".join(selected), limit=limit)
+
+
 def _message_with_failure_reason(
     message: str,
     failure_reason: Optional[str],
@@ -1720,10 +1873,10 @@ def format_queue_enqueue_message(
 ) -> str:
     """Build a user-facing transcript placeholder from a SafeEnqueueOutcome."""
     if outcome.fell_back_to_pending:
-        err = outcome.error or "queue unavailable"
+        err = _one_line_detail(outcome.error or "queue unavailable")
         message = (
             f"Transcript unavailable (queue offline: {err}; "
-            f"recorded in transcript-pending.md)"
+            f"recorded in transcript-pending.md; not queued)"
         )
         return _message_with_failure_reason(message, failure_reason)
     result = outcome.result
@@ -1901,14 +2054,26 @@ def _enqueue_via_lt_cli(
 
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
+        # Keep full subprocess detail in the server log; the saved reference
+        # only receives a concise, single-line summary.
+        logging.warning(
+            "lt queue add failed for %s (exit %s): %s", url, proc.returncode, err
+        )
+        # Prefer the actionable queue failure over unrelated Deno startup
+        # guidance; the full stderr above stays in the server log.
+        summary = _summarize_queue_cli_stderr(err)
         raise _QueueCliFailure(
-            f"lt queue add exited {proc.returncode}: {err or '(no output)'}"
+            f"lt queue add exited {proc.returncode}: {summary}"
         )
 
     parsed = _parse_lt_queue_add_output(proc.stdout or "", failure_reason)
     if parsed is None:
+        stdout = _one_line_detail(proc.stdout) or "(no output)"
+        logging.warning(
+            "Could not parse lt queue add output for %s: %r", url, proc.stdout
+        )
         raise _QueueCliFailure(
-            f"could not parse lt queue add output: {(proc.stdout or '').strip()!r}"
+            f"could not parse lt queue add output: {stdout!r}"
         )
     return parsed
 
@@ -1937,11 +2102,27 @@ def _pending_file_fallback_result(
         )
 
     if reason:
-        message = f"Transcript unavailable ({reason})"
+        # Keep both the queue failure and any found/expected UUID detail while
+        # still bounding the saved reference field.
+        detail = _one_line_detail(reason, limit=320)
+        detail = re.sub(
+            r";?\s*recorded in transcript-pending\.md\b\.?",
+            "",
+            detail,
+            flags=re.IGNORECASE,
+        )
+        detail = re.sub(r";?\s*not queued\b\.?", "", detail, flags=re.IGNORECASE)
+        detail = detail.strip(" ;")
+        message = (
+            f"Transcript unavailable ({detail}; "
+            "recorded in transcript-pending.md; not queued)"
+        )
     else:
-        message = "Transcript unavailable (queued in transcript-pending.md)"
+        message = (
+            "Transcript unavailable; recorded in transcript-pending.md; not queued"
+        )
     logging.warning(
-        "Transcript recorded in transcript-pending.md: %s (%s)",
+        "Transcript recorded in transcript-pending.md (not queued): %s (%s)",
         url,
         reason or "queue unavailable",
     )
@@ -2184,8 +2365,11 @@ def format_transcript_failure(
             return queue_message
         reason = _transcript_failure_reason(failure_info)
         if reason:
-            return f"Transcript unavailable ({reason}; queued for local-transcribe)"
-        return "Transcript unavailable (queued for local-transcribe)"
+            return (
+                f"Transcript unavailable ({reason}; transcription pending; "
+                "not queued)"
+            )
+        return "Transcript unavailable (transcription pending; not queued)"
 
     # For Rumble 403/unavailable, store a short placeholder so the reference file stays clean
     if method.startswith("rumble") and _is_rumble_transcript_unavailable_error(message):
@@ -2787,6 +2971,10 @@ def process_url(url: str, force: bool) -> None:
                     print(f"URL {video_url} already recorded.")
                     print(f"Title: {title}")
                     logging.info(f"Duplicate URL: {video_url}")
+        except YouTubeCredentialsError as e:
+            error_message = str(e)
+            log_error("YouTube Processing", simplified_url, error_message)
+            print(f"Error: {error_message}")
         except ValueError as e:
             error_message = f"Invalid YouTube URL: {e}"
             log_error("YouTube Processing", simplified_url, error_message)
@@ -3161,10 +3349,14 @@ def create_backup(file_path: str, *, compress: bool = True) -> Optional[str]:
         return None
 
 def configured_api_base_url() -> Optional[str]:
-    """Return ref-api base URL from config/env, or None for local mode."""
+    """Return ref-api base URL from config/env, or None when unconfigured.
+
+    Uses a non-mutating config read so a remote-only client never creates
+    ``~/.config/ref/config.yaml`` just to route a request.
+    """
     from ref_cli.api_client import get_api_base_url
 
-    return get_api_base_url(load_config())
+    return get_api_base_url(read_config_for_routing())
 
 
 def _print_search_results(results: dict) -> None:
@@ -3177,15 +3369,7 @@ def _print_search_results(results: dict) -> None:
 
 def run_list(spec_tokens: List[str]) -> None:
     """List URLs via ref-api (required); exits the process."""
-    api_base = configured_api_base_url()
-    if not api_base:
-        print(
-            error(
-                "--list requires api_url in ~/.config/ref/config.yaml "
-                "(or REF_API_URL)."
-            )
-        )
-        sys.exit(1)
+    api_base = require_api_base_url()
 
     from ref_cli.api_client import list_via_api
 
@@ -3209,16 +3393,7 @@ def run_url_dump(domain: str) -> None:
         print(error(str(exc)), file=sys.stderr)
         sys.exit(1)
 
-    api_base = configured_api_base_url()
-    if not api_base:
-        print(
-            error(
-                "--url-dump requires api_url in ~/.config/ref/config.yaml "
-                "(or REF_API_URL)."
-            ),
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    api_base = require_api_base_url(stream=sys.stderr)
 
     from ref_cli.api_client import url_dump_via_api
 
@@ -3226,28 +3401,12 @@ def run_url_dump(domain: str) -> None:
 
 
 def run_search(search_term: str, field: str = "all") -> None:
-    """Search locally or via ref-api; exits the process when using the API."""
-    api_base = configured_api_base_url()
-    if api_base:
-        from ref_cli.api_client import search_via_api
+    """Search the authoritative archive via ref-api; exits the process."""
+    api_base = require_api_base_url()
 
-        sys.exit(search_via_api(api_base, search_term, field=field))
+    from ref_cli.api_client import search_via_api
 
-    if field == "all":
-        all_fields = ["url", "title", "date", "source", "uploader"]
-        results = {}
-        for search_field in all_fields:
-            field_results = search_entries(search_term, search_field, UNIFIED)
-            for line, hit_types in field_results.items():
-                if line not in results:
-                    results[line] = hit_types
-                else:
-                    results[line].extend(hit_types)
-        _print_search_results(results)
-        return
-
-    results = search_entries(search_term, field, UNIFIED)
-    _print_search_results(results)
+    sys.exit(search_via_api(api_base, search_term, field=field))
 
 
 def run_backup(*, compress: bool = True) -> None:
@@ -3262,55 +3421,100 @@ def run_backup(*, compress: bool = True) -> None:
         from ref_cli.api_client import api_base_is_local, backup_via_api
 
         if not api_base_is_local(api_base):
-            config = load_config()
-            dest = os.path.expanduser(config["paths"]["references"])
+            routing = read_config_for_routing()
+            paths = routing.get("paths") if isinstance(routing.get("paths"), dict) else {}
+            dest = os.path.expanduser(
+                str((paths or {}).get("references") or config["paths"]["references"])
+            )
             sys.exit(backup_via_api(api_base, dest, compress=compress))
 
     create_backup(UNIFIED, compress=compress)
 
 
 def run_file_ingest(file_path: str, force: bool = False) -> None:
-    """Process URLs from a file locally or via ref-api (one POST per URL)."""
-    api_base = configured_api_base_url()
-    if api_base:
-        from ref_cli.api_client import ingest_file_via_api
+    """Process URLs from a file through ref-api (one POST per URL)."""
+    api_base = require_api_base_url()
 
-        ingest_file_via_api(api_base, file_path, force=force)
-        return
+    from ref_cli.api_client import ingest_file_via_api
 
-    read_urls_from_file(file_path, force)
+    ingest_file_via_api(api_base, file_path, force=force)
 
 
 def run_transcript(video_url: str) -> None:
-    """Update a YouTube transcript locally or on ref-api; exits when using the API."""
-    api_base = configured_api_base_url()
-    if api_base:
-        from ref_cli.api_client import update_transcript_via_api
+    """Update a YouTube transcript through ref-api; exits the process."""
+    api_base = require_api_base_url()
 
-        sys.exit(update_transcript_via_api(api_base, video_url))
+    from ref_cli.api_client import update_transcript_via_api
 
-    update_transcript(video_url)
+    sys.exit(update_transcript_via_api(api_base, video_url))
 
 
 def run_ingest(raw_input: str, force: bool = False) -> None:
-    """Record a URL locally or via ref-api; exits the process when using the API."""
-    api_base = configured_api_base_url()
-    if api_base:
-        from ref_cli.api_client import ingest_via_api
+    """Record a URL through ref-api; exits the process.
 
-        if is_youtube_video_id(raw_input):
-            print(info(f"Detected YouTube video ID: {highlight(raw_input)}"))
-            youtube_url = convert_video_id_to_url(raw_input)
-            print(info(f"Converting to URL: {url(youtube_url)}"))
-        sys.exit(ingest_via_api(api_base, raw_input, force=force))
+    The normal CLI never writes the local archive. If no API is configured the
+    caller receives actionable guidance instead of a local/credential fallback.
+    """
+    api_base = require_api_base_url()
+
+    from ref_cli.api_client import ingest_via_api
 
     if is_youtube_video_id(raw_input):
         print(info(f"Detected YouTube video ID: {highlight(raw_input)}"))
         youtube_url = convert_video_id_to_url(raw_input)
         print(info(f"Converting to URL: {url(youtube_url)}"))
-        process_url(youtube_url, force)
-    else:
-        process_url(raw_input, force)
+    sys.exit(ingest_via_api(api_base, raw_input, force=force))
+
+
+def run_interactive() -> None:
+    """Prompt for URLs and send each one to ref-api; exits the process."""
+    api_base = require_api_base_url()
+
+    from ref_cli.api_client import ingest_via_api
+
+    while True:
+        try:
+            print(highlight("Enter a URL or YouTube video ID to record (or paste multiple URLs, one per line). Press Ctrl+C to quit: "))
+            urls_to_process = []
+            first_line = sys.stdin.readline()
+            if not first_line:
+                print(info("\nNo input received. Exiting..."))
+                return
+
+            first_line = first_line.strip()
+            if first_line:
+                urls_to_process.append(first_line)
+
+            # Read any additional pasted lines without blocking.
+            while True:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if not ready:
+                    break
+                line = sys.stdin.readline()
+                if not line or not line.strip():
+                    break
+                urls_to_process.append(line.strip())
+
+            if not urls_to_process:
+                print(warning("Empty input. Please enter a valid URL or YouTube video ID."))
+                continue
+
+            for user_input in urls_to_process:
+                if not user_input:
+                    continue
+                if is_youtube_video_id(user_input):
+                    print(info(f"Detected YouTube video ID: {highlight(user_input)}"))
+                    youtube_url = convert_video_id_to_url(user_input)
+                    print(info(f"Converting to URL: {url(youtube_url)}"))
+                exit_code = ingest_via_api(api_base, user_input, force=False)
+                if exit_code != 0:
+                    logging.error(
+                        "API ingest failed for %s (exit %s)", user_input, exit_code
+                    )
+                time.sleep(1)
+        except Exception as e:
+            print(error(f"An error occurred: {e}"))
+            logging.error(f"An error occurred: {e}")
 
 
 def main():
@@ -3321,7 +3525,7 @@ def main():
         if args.status:
             from ref_cli.api_client import report_api_status
 
-            sys.exit(report_api_status(load_config()))
+            sys.exit(report_api_status(read_config_for_routing()))
         if args.upgrade:
             from ref_cli.upgrade import report_upgrade_instructions
 
@@ -3344,22 +3548,9 @@ def main():
         if getattr(args, "url_dump", None) is not None:
             run_url_dump(args.url_dump)
 
-        ensure_path_exists(UNIFIED)
-        ensure_path_exists(TRANSCRIPT_PENDING_FILE)
-        # Version header + schema upgrade when references.md is behind.
-        try:
-            from ref_cli.references_format import ensure_references_migrated
-            migrate_msg = ensure_references_migrated(UNIFIED, backup=True, compress=True)
-            if migrate_msg:
-                print(info(migrate_msg))
-        except Exception as migrate_exc:  # noqa: BLE001 - never block capture
-            logging.warning("references.md migrate skipped: %s", migrate_exc)
-
-        # Enable verbose logging if flag is set
+        # Verbosity/log levels do not touch the filesystem.
         verbose_logger.enabled = args.verbose
         verbose_logger.log("Verbose logging enabled")
-
-        # Set logging level based on the debug argument
         if args.debug == 1:
             logging.getLogger().setLevel(logging.INFO)
             verbose_logger.log("Setting logging level to INFO")
@@ -3373,19 +3564,38 @@ def main():
             logging.getLogger().setLevel(logging.ERROR)
             verbose_logger.log("Setting logging level to ERROR")
 
-        if args.integrity:
-            integrity_errors = check_integrity()
-            if integrity_errors:
-                print(error("Integrity check failed:"))
-                for err in integrity_errors:
-                    file_name, line_number, line_contents, expected_line = err
-                    print(warning(f"{file_name} line {line_number}: {line_contents}"))
-                    print(info(f"Expected: {expected_line}"))
+        # Explicit local archive inspection/backup are the only remaining
+        # operations that bootstrap, migrate, or write the local archive.
+        if args.integrity or args.backup:
+            enable_file_logging()
+            ensure_path_exists(UNIFIED)
+            ensure_path_exists(TRANSCRIPT_PENDING_FILE)
+            try:
+                from ref_cli.references_format import ensure_references_migrated
+                migrate_msg = ensure_references_migrated(UNIFIED, backup=True, compress=True)
+                if migrate_msg:
+                    print(info(migrate_msg))
+            except Exception as migrate_exc:  # noqa: BLE001 - never block capture
+                logging.warning("references.md migrate skipped: %s", migrate_exc)
+
+            if args.integrity:
+                integrity_errors = check_integrity()
+                if integrity_errors:
+                    print(error("Integrity check failed:"))
+                    for err in integrity_errors:
+                        file_name, line_number, line_contents, expected_line = err
+                        print(warning(f"{file_name} line {line_number}: {line_contents}"))
+                        print(info(f"Expected: {expected_line}"))
+                else:
+                    print(success("Integrity check passed. Log files are formatted correctly."))
             else:
-                print(success("Integrity check passed. Log files are formatted correctly."))
-        elif args.backup:
-            run_backup(compress=not args.nocompress)
-        elif args.list:
+                run_backup(compress=not args.nocompress)
+            return
+
+        # Every other normal CLI operation is a ref-api client. Dispatch before
+        # archive bootstrap/migration, local file logging, YouTube metadata,
+        # Google calls, queue access, or enrichment writes.
+        if args.list:
             run_list(args.list)
         elif args.search:
             run_search(args.search, field="all")
@@ -3406,88 +3616,15 @@ def main():
         elif args.url:
             run_ingest(args.url, force=args.force)
         else:
-            # Load config for skip patterns
-            user_config = load_config()
-            while True:
-                try:
-                    print(highlight("Enter a URL or YouTube video ID to record (or paste multiple URLs, one per line). Press Ctrl+C to quit: "))
-                    # Read all available input (handles multi-line paste)
-                    urls_to_process = []
-                    # Read first line (blocking)
-                    first_line = sys.stdin.readline()
-                    if not first_line:
-                        print(info("\nNo input received. Exiting..."))
-                        break
-                    
-                    first_line = first_line.strip()
-                    if first_line:
-                        urls_to_process.append(first_line)
-                    
-                    # Check if there's more input available (non-blocking)
-                    # This handles the case where multiple lines were pasted
-                    while True:
-                        ready, _, _ = select.select([sys.stdin], [], [], 0.1)
-                        if not ready:
-                            break
-                        line = sys.stdin.readline()
-                        if not line or not line.strip():
-                            break
-                        urls_to_process.append(line.strip())
-                    
-                    if not urls_to_process:
-                        print(warning("Empty input. Please enter a valid URL or YouTube video ID."))
-                        continue
-                    
-                    force = False
-                    api_base = configured_api_base_url()
-                    # Process each URL
-                    for user_input in urls_to_process:
-                        if not user_input:
-                            continue
-
-                        if api_base:
-                            from ref_cli.api_client import ingest_via_api
-
-                            if is_youtube_video_id(user_input):
-                                print(info(f"Detected YouTube video ID: {highlight(user_input)}"))
-                                youtube_url = convert_video_id_to_url(user_input)
-                                print(info(f"Converting to URL: {url(youtube_url)}"))
-                            exit_code = ingest_via_api(api_base, user_input, force=force)
-                            if exit_code != 0:
-                                logging.error("API ingest failed for %s (exit %s)", user_input, exit_code)
-                            time.sleep(1)
-                            continue
-
-                        # Check if URL should be skipped
-                        if should_skip_url(user_input, user_config):
-                            print(warning(f"Skipping URL (matches skip pattern): {url(user_input)}"))
-                            logging.info(f"Skipped URL due to skip pattern: {user_input}")
-                            continue
-                        
-                        # Check if the input is a YouTube video ID
-                        if is_youtube_video_id(user_input):
-                            print(info(f"Detected YouTube video ID: {highlight(user_input)}"))
-                            youtube_url = convert_video_id_to_url(user_input)
-                            print(info(f"Converting to URL: {url(youtube_url)}"))
-                            process_url(youtube_url, force)
-                        else:
-                            process_url(user_input, force)
-                        
-                        time.sleep(1)  # Add a delay between processing each URL
-                except Exception as e:
-                    print(error(f"An error occurred: {e}"))
-                    logging.error(f"An error occurred: {e}")
+            run_interactive()
     except KeyboardInterrupt:
         print(warning("\nExiting..."))
         sys.exit(0)
 
 if __name__ == "__main__":
-    if DEVELOPER_KEY is None:
-        print(error('Error: YOUTUBE_API_KEY is not set in .env file or shell environment.'))
-        choice = input(info('Would you like to set it now? (yes/no): '))
-        if choice.lower() == 'yes':
-            set_developer_key()
-    else:
-        if os.getenv('DEBUG') == 'True':
-            print(success('YOUTUBE_API_KEY is set.'))
+    # A remote client never needs YOUTUBE_API_KEY; never prompt for credentials
+    # at startup. Server-side metadata calls raise YouTubeCredentialsError when
+    # the key is genuinely missing.
+    if os.getenv('DEBUG') == 'True' and DEVELOPER_KEY is not None:
+        print(success('YOUTUBE_API_KEY is set.'))
     main()
