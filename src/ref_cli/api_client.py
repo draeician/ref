@@ -231,20 +231,39 @@ def report_api_status(config: Optional[dict] = None) -> int:
     """
     Print client mode and ref-api connectivity.
 
-    Exit 0 when healthy (or local-only with no api_url).
-    Exit 1 when api_url is set but the health check fails.
+    Missing ``api_url`` is an unconfigured error (exit 1), not a supported
+    local-ingestion mode. A configured healthy API exits 0; a configured but
+    unreachable API exits 1.
     """
     cfg = config if config is not None else {}
     base_url = get_api_base_url(cfg)
     if not base_url:
-        print(info("Mode: local (api_url not set)"))
+        print(info("Mode: unconfigured (api_url is not set)"))
+        print(error("Status: error (no ref-api endpoint configured)"))
+        print()
         print(
-            info(
-                "ref uses local files only. Set api_url in ~/.config/ref/config.yaml "
-                "(or REF_API_URL) to use a remote ref-api."
-            )
+            "ref ingestion, search, listing, url-dump, and transcript updates "
+            "require ref-api."
         )
-        return 0
+        print()
+        print("On the server:")
+        print("  ref --install-server")
+        print()
+        print("On this client:")
+        print("  Edit ~/.config/ref/config.yaml")
+        print("  Set api_url: http://SERVER_LAN_IP:8000")
+        print()
+        print("Or:")
+        print("  export REF_API_URL=http://SERVER_LAN_IP:8000")
+        print()
+        print("After configuring, verify:")
+        print("  ref --status")
+        print()
+        print(
+            "Use an endpoint on a trusted network; do not expose the "
+            "unauthenticated ref-api publicly."
+        )
+        return 1
 
     label = _endpoint_label(base_url)
     print(info(f"Mode: remote"))

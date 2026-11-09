@@ -87,6 +87,68 @@ def isolated_remote_home(tmp_path, monkeypatch):
     return home
 
 
+def test_status_missing_api_exits_nonzero_without_creating_files(
+    isolated_remote_home, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "parse_arguments", lambda: _args(status=True))
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "unconfigured" in output.lower()
+    assert "ref --install-server" in output
+    assert "api_url: http://SERVER_LAN_IP:8000" in output
+    assert not (isolated_remote_home / ".config").exists()
+    assert not (isolated_remote_home / "references").exists()
+
+
+def test_status_healthy_api_exits_zero_without_creating_files(
+    isolated_remote_home, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "parse_arguments", lambda: _args(status=True))
+    monkeypatch.setattr(
+        cli,
+        "read_config_for_routing",
+        lambda: {"api_url": "http://minion:8000"},
+    )
+    with patch(
+        "ref_cli.api_client.check_health",
+        return_value={"status": "ok", "version": "1.6.12"},
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "Mode: remote" in output
+    assert "Status: ok" in output
+    assert not (isolated_remote_home / ".config").exists()
+    assert not (isolated_remote_home / "references").exists()
+
+
+def test_status_unreachable_api_exits_nonzero_without_creating_files(
+    isolated_remote_home, monkeypatch, capsys
+):
+    from ref_cli.api_client import ApiError
+
+    monkeypatch.setattr(cli, "parse_arguments", lambda: _args(status=True))
+    monkeypatch.setattr(
+        cli,
+        "read_config_for_routing",
+        lambda: {"api_url": "http://minion:8000"},
+    )
+    with patch(
+        "ref_cli.api_client.check_health",
+        side_effect=ApiError("Connection refused"),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "Status: unreachable" in output
+    assert not (isolated_remote_home / ".config").exists()
+    assert not (isolated_remote_home / "references").exists()
+
+
 def test_remote_ingest_creates_no_archive_config_logs_or_queue(
     isolated_remote_home, monkeypatch
 ):

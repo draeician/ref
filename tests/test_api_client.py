@@ -146,12 +146,20 @@ def test_request_json_uses_friendly_http_error():
     assert "<html>" not in str(excinfo.value)
 
 
-def test_report_api_status_local_mode(capsys):
+def test_report_api_status_unconfigured(capsys):
     code = api_client.report_api_status({})
     out = capsys.readouterr().out
-    assert code == 0
-    assert "local" in out.lower()
-    assert "api_url not set" in out
+    assert code == 1
+    assert "unconfigured" in out.lower()
+    assert "api_url is not set" in out
+    assert "ref --install-server" in out
+    assert "api_url: http://SERVER_LAN_IP:8000" in out
+    assert "export REF_API_URL=http://SERVER_LAN_IP:8000" in out
+    assert "ref --status" in out
+    assert "trusted network" in out
+    # Missing API is not a supported local-ingestion mode.
+    assert "uses local files only" not in out.lower()
+    assert "mode: local" not in out.lower()
 
 
 def test_report_api_status_healthy(capsys):
