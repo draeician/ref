@@ -821,3 +821,74 @@ Real read-only checks (no mutation, no restart):
 Task `b1255911` is `REVIEW` in `.codex/tasks/review/`. The next action is reviewer
 inspection of the draft PR, exact-head CI, diff, and this handoff. Do not merge or
 deploy until that review is complete.
+
+## 13. Merge, task closure, and branch cleanup — PR #30 (2026-11-09)
+
+**Authorization:** Drae explicitly authorized merging PR #30, completing the task
+lifecycle, updating HANDOFF.md, and cleaning up the feature branch. Production
+deployment, package upgrades, virtualenv changes, service restarts, and
+local-transcribe configuration changes were **not** authorized and did not occur.
+
+**Merge record**
+
+- Reviewed PR: #30 — https://github.com/draeician/ref/pull/30
+- Base: `main`
+- Approved feature SHA: `a91cf697d83a1a4a9dfe79edef34598cccc4dd55`
+- Merge strategy: normal merge commit (no squash, rebase, or force-push)
+- Actual merge commit: `22255c4e6d5ae37f3ce41eafa7f8dfc7ff33f887`
+- Merge timestamp: `2026-11-09T18:53:27Z`
+- Pre-merge CI on approved SHA: workflow `tests`, event `pull_request`, run
+  `42661037854`, conclusion **success**
+- Post-merge CI on exact main merge commit: workflow `tests`, event `push`, run
+  `42678087181`, head `22255c4e6d5ae37f3ce41eafa7f8dfc7ff33f887`, conclusion
+  **success**
+
+All reviewed commits are reachable from `main`: `39d7b35` (implementation),
+`e5155ac` (first evidence), `5e6367a` and `234b674` (prior head records),
+`63395ce` (review corrections), `903e89b` (review-correction lifecycle record),
+and `a91cf69` (draft PR/CI record). The merged `main` tree contains
+`check_running_api` and `resolve_revision_relationship` in
+`src/ref_cli/upgrade.py`, the 47-test upgrade suite, and the reviewed task record.
+
+**Task status and location**
+
+- Task `b1255911`: **DONE**
+- Location: `.codex/tasks/done/b1255911-upgrade-instructions-detection.md`
+- Lifecycle: `wip/` (active) → `review/` (review) → `done/` (accepted, merged)
+
+**Branch cleanup results**
+
+- Remote feature branch `fix/upgrade-instructions-detection`: deleted by GitHub on
+  merge (observed as `[deleted] ... -> origin/fix/upgrade-instructions-detection`
+  during fetch), confirmed absent by `git ls-remote --heads origin`.
+- Local feature branch: deleted safely after verifying it was an ancestor of
+  `main` (`git branch -d`, was `a91cf69`).
+- Local `main`: fast-forwarded `80c6e379` → `22255c4e`; now matches
+  `origin/main`.
+- Stale remote-tracking refs pruned (`git fetch --prune`, `git remote prune origin`).
+- Unrelated branches preserved: `docs/record-url-dump-deploy`,
+  `docs/unified-ref-consolidation-plan`, `fix/youtube-auto-show-notes-api`.
+- PR #28 and PR #29 remain open and untouched.
+- Working tree clean.
+
+**Remaining limitations (unchanged by merge)**
+
+- Running-state classification needs a `/health` version containing `+g<sha>` or a
+  matching package version; otherwise it stays `unknown`.
+- Relationship classification needs resolvable GitHub evidence; PyPI-only
+  installs, unresolvable abbreviations, and GitHub outages stay `unknown`.
+- Local wheel artifacts cannot reveal their upstream repository; only a
+  conditional SHA-pinned Git reinstall is offered.
+- Editable installs compare the recorded commit, not uncommitted changes.
+
+**Production confirmation**
+
+No deployment, pipx upgrade, ref-api virtualenv modification, `ref-api.service`
+restart, or local-transcribe configuration change was performed. The merge only
+updated the GitHub repository and local Git metadata.
+
+**Exactly one next action**
+
+A separately authorized production deployment may update the CLI/ref-api
+installation to merged `main` and, if needed, restart `ref-api.service` under user
+control. Do not deploy under this task.
