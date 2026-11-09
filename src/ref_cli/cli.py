@@ -1799,6 +1799,61 @@ def _one_line_detail(text: object, limit: int = 200) -> str:
     return cleaned
 
 
+_DENO_LINE_RE = re.compile(r"\bdeno\b", re.IGNORECASE)
+_STRONG_QUEUE_ERROR_RE = re.compile(
+    r"queue|uuid|mismatch|identity", re.IGNORECASE
+)
+_QUEUE_ERROR_HINT_RE = re.compile(
+    r"queue|uuid|mismatch|identity|expected|found|exited|failed|failure|"
+    r"traceback|permission denied|no such file|not found|✗|✖|error:",
+    re.IGNORECASE,
+)
+
+
+def _summarize_queue_cli_stderr(text: object, limit: int = 260) -> str:
+    """Extract the actionable queue failure from ``lt queue add`` stderr.
+
+    Stale ``lt`` versions print a multi-line Deno installation guide before the
+    real queue error. Full stderr is logged by the caller; the saved reference
+    receives only the queue-relevant, single-line summary. Deno guidance lines
+    are dropped only when a stronger queue line exists, so unrelated errors are
+    not hidden by a broad filter.
+    """
+    cleaned = _ANSI_ESCAPE_RE.sub("", str(text or ""))
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return "(no output)"
+
+    strong_start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if not _DENO_LINE_RE.search(line)
+            and _STRONG_QUEUE_ERROR_RE.search(line)
+        ),
+        None,
+    )
+    if strong_start is not None:
+        selected = [
+            line
+            for line in lines[strong_start:]
+            if not _DENO_LINE_RE.search(line)
+        ]
+    else:
+        selected = [
+            line
+            for line in lines
+            if not _DENO_LINE_RE.search(line)
+            and _QUEUE_ERROR_HINT_RE.search(line)
+        ]
+        if not selected:
+            selected = [line for line in lines if not _DENO_LINE_RE.search(line)]
+    if not selected:
+        selected = lines
+
+    return _one_line_detail(" ".join(selected), limit=limit)
+
+
 def _message_with_failure_reason(
     message: str,
     failure_reason: Optional[str],
@@ -2004,14 +2059,9 @@ def _enqueue_via_lt_cli(
         logging.warning(
             "lt queue add failed for %s (exit %s): %s", url, proc.returncode, err
         )
-        # Deno is a worker prerequisite; it is not relevant to a failed
-        # producer enqueue and must not leak into the archive row.
-        relevant = "\n".join(
-            line
-            for line in err.splitlines()
-            if "Deno runtime not detected" not in line
-        )
-        summary = _one_line_detail(relevant) or "(no output)"
+        # Prefer the actionable queue failure over unrelated Deno startup
+        # guidance; the full stderr above stays in the server log.
+        summary = _summarize_queue_cli_stderr(err)
         raise _QueueCliFailure(
             f"lt queue add exited {proc.returncode}: {summary}"
         )
@@ -2052,7 +2102,9 @@ def _pending_file_fallback_result(
         )
 
     if reason:
-        detail = _one_line_detail(reason)
+        # Keep both the queue failure and any found/expected UUID detail while
+        # still bounding the saved reference field.
+        detail = _one_line_detail(reason, limit=320)
         detail = re.sub(
             r";?\s*recorded in transcript-pending\.md\b\.?",
             "",

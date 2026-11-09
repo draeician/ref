@@ -444,8 +444,8 @@ def test_pending_fallback_write_failure_is_not_reported_as_recorded(
     assert "local-only mode" in outcome.message
 
 
-def test_lt_failure_saved_reference_is_one_line_and_not_claimed_queued(
-    monkeypatch, tmp_path
+def test_lt_failure_saved_reference_prefers_queue_error_over_deno_guidance(
+    monkeypatch, tmp_path, caplog
 ):
     queue_dir = _make_queue(tmp_path)
     lt_path = _make_lt(tmp_path)
@@ -456,35 +456,67 @@ def test_lt_failure_saved_reference_is_one_line_and_not_claimed_queued(
     monkeypatch.setenv(transcript_queue.ENV_QUEUE_DIR, str(queue_dir))
     _block_python_queue_api(monkeypatch)
 
+    full_stderr = (
+        "\x1b[33mWarning: Deno runtime not detected\x1b[0m\n"
+        "Deno is required for YouTube 2026 SABR support\n"
+        "Install with:\n"
+        "  curl -fsSL https://deno.land/install.sh | sh\n"
+        "  export DENO_INSTALL=\"$HOME/.deno\"\n"
+        "  export PATH=\"$DENO_INSTALL/bin:$PATH\"\n"
+        "  sudo ln -sf \"$DENO_INSTALL/bin/deno\" /usr/local/bin/deno\n"
+        "For more information, visit: https://deno.com/\n"
+        "\n"
+        "Queue UUID mismatch for\n"
+        "/opt/md2/music/youtube/transcripts/transcription-queue\n"
+        "found 8c6fc098-8cbe-41ae-9689-dd759797a582\n"
+        "expected 6a058908-116f-41c9-987f-d5f4ef38667e\n"
+    )
+
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(
             cmd,
             1,
             stdout="",
-            stderr=(
-                "\x1b[33mWarning: Deno runtime not detected\x1b[0m\n"
-                "✗ Queue UUID mismatch for /queue:\n"
-                "  found 'aaa', expected 'bbb'\n"
-            ),
+            stderr=full_stderr,
         )
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
 
-    outcome = cli.add_url_to_pending_file(
-        VIDEO_URL, VIDEO_ID, failure_reason="local-only mode"
-    )
+    with caplog.at_level(logging.WARNING, logger="root"):
+        outcome = cli.add_url_to_pending_file(
+            VIDEO_URL, VIDEO_ID, failure_reason="local-only mode"
+        )
 
     assert outcome.action == "pending_file"
     text = pending.read_text(encoding="utf-8")
     assert VIDEO_URL in text
-    assert "\n" not in outcome.message
-    assert "not queued" in outcome.message
-    assert "recorded in transcript-pending.md" in outcome.message
-    assert "lt queue add exited 1" in outcome.message
-    assert "Queue UUID mismatch" in outcome.message
-    assert "Deno runtime" not in outcome.message
+
+    message = outcome.message
+    assert "\n" not in message
+    assert "Queue UUID mismatch" in message
+    assert "8c6fc098-8cbe-41ae-9689-dd759797a582" in message
+    assert "6a058908-116f-41c9-987f-d5f4ef38667e" in message
+    assert "not queued" in message
+    assert "recorded in transcript-pending.md" in message
+    assert "lt queue add exited 1" in message
+    for noise in (
+        "Deno",
+        "Install with",
+        "curl -fsSL",
+        "DENO_INSTALL",
+        "export PATH",
+        "sudo ln",
+        "deno.com",
+    ):
+        assert noise not in message
     # Bounded for the saved reference row.
-    assert len(outcome.message) <= 320
+    assert len(message) <= 400
+
+    # The complete original stderr is retained in the server-side log.
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Install with:" in logged
+    assert "Deno runtime not detected" in logged
+    assert "Queue UUID mismatch" in logged
 
 
 def test_lt_cli_parser_ignores_warning_lines(monkeypatch, tmp_path):
