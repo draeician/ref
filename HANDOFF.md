@@ -3,12 +3,15 @@
 **Date:** 2026-11-09 (UTC)
 **Task ID:** `f7774dc0`
 **Owner:** OpenCode
-**State:** REVIEW
-**Branch:** `fix/remote-api-queue-producer`
+**State:** DONE (code merge phase) — production deployment **not** authorized
+**Branch:** `fix/remote-api-queue-producer` (merged and deleted)
 **Base:** `origin/main` = `377dc34160a78d7e8c601dbad3bdeb7a92f2f7a8`
-**PR:** draft #33 — https://github.com/draeician/ref/pull/33
-**Authorization:** Implement, test, document, push, and open a draft PR. No
-deployment, live config change, queue mutation, service restart, or merge.
+**Approved head:** `0ec4d5847b1494e9ef347d4a821a89fd0604e6b5`
+**PR:** #33 — https://github.com/draeician/ref/pull/33
+**Merge commit:** `f939efe4ac4e574a8e4f1b5991c85bd96822e4d6`
+**Final main:** `f939efe4ac4e574a8e4f1b5991c85bd96822e4d6`
+**Authorization:** Merged after independent review approval. No production
+deployment, host upgrade, live config change, queue mutation, or service restart.
 
 ## Scope
 
@@ -202,6 +205,24 @@ corrected here without changing the documented read-only production findings.
 - This HANDOFF update is a docs-only follow-up commit; PR #33 checks the final
   head after it is pushed.
 
+### Merge closure (2026-11-09)
+
+- Approved head: `0ec4d5847b1494e9ef347d4a821a89fd0604e6b5`.
+- Pre-merge exact-head CI: workflow `tests`, run `42692542822`, **success**.
+- PR #33 marked ready, merged with a **normal merge commit** (no squash, rebase,
+  or force-push).
+- Merge SHA: `f939efe4ac4e574a8e4f1b5991c85bd96822e4d6`; parents
+  `377dc341…` (main) and `0ec4d584…` (approved head).
+- Final `main` SHA: `f939efe4ac4e574a8e4f1b5991c85bd96822e4d6`.
+- Post-merge `main` CI: workflow `tests`, run `42694120987`, head
+  `f939efe4…`, **success**.
+- Task moved to `.codex/tasks/done/f7774dc0-remote-api-queue-producer.md` with
+  State **DONE** for the code/merge phase. Closure records land through a
+  dedicated documentation branch/PR; nothing is committed directly to `main`.
+- Local and remote `fix/remote-api-queue-producer` branches deleted after merge;
+  tracking refs pruned. Unrelated branches `docs/unified-ref-consolidation-plan`
+  and `fix/youtube-auto-show-notes-api` were preserved.
+
 ## Outstanding deployment steps (separately authorized, do not run here)
 
 1. Back up and correct the live `~/.config/local-transcribe/config.yaml`:
@@ -225,8 +246,23 @@ corrected here without changing the documented read-only production findings.
 
 ## Next action
 
-ChatGPT review of draft PR #33; do not merge, deploy, restart, or modify live
-queue/config until Drae approves.
+Code merge is complete. The following remain **outstanding** and require separate
+production authorization; production remediation is **not** complete:
+
+1. Deploy the merged `ref` (main
+   `f939efe4ac4e574a8e4f1b5991c85bd96822e4d6`) to approved hosts.
+2. Correct the stale `~/.config/local-transcribe/config.yaml` on `minion-26`
+   after re-validating the authoritative queue UUID
+   (`8c6fc098-8cbe-41ae-9689-dd759797a582`).
+3. Upgrade installed `lt` 0.7.0 (`25b89f1`) to a verified 0.8.1
+   (`b3cf22e` or newer).
+4. Verify a successful enqueue without the Deno warning.
+5. Recover pending transcript URLs safely.
+6. Verify actual worker processing and completion.
+
+Do not upgrade ref/`lt`, change queue config or `queue.id`, restart services,
+modify transcription jobs, replay pending URLs, or modify production archives
+without separate authorization.
 
 Reference: `docs/plans/unified-ref-consolidation.md` on
 `docs/unified-ref-consolidation-plan` (PR #29) motivates the single authoritative
