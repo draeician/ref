@@ -2,15 +2,19 @@
 
 - **Task ID:** b1255911
 - **Owner:** OpenCode
-- **State:** REVIEW
-- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/review/`.
-- **Branch:** `fix/upgrade-instructions-detection`
+- **State:** DONE
+- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/done/`.
+- **Branch:** `fix/upgrade-instructions-detection` (merged and deleted)
 - **Baseline:** `origin/main` = `80c6e379106a73c047cd517e56207bc62d558d7f`
 - **Implementation commit:** `39d7b3510d6d5da63d31b37fa424ce52d294995f`
 - **Review-correction commit:** `63395ce84c00a2684e8532b2e227e9c0f05d2d80`
 - **Evidence commit:** `e5155acc6194bfb2e7090dd51a088f2676b03240`
 - **Verified remote head before review corrections:** `234b6747fc4686a9515410beef25fb643cde9d9b`
-- **Authorization:** implementation, tests, commit, push, draft PR. **No merge, deployment, production package change, or service restart.**
+- **Reviewed/approved PR:** #30 — https://github.com/draeician/ref/pull/30
+- **Approved feature SHA:** `a91cf697d83a1a4a9dfe79edef34598cccc4dd55`
+- **Merge commit:** `22255c4e6d5ae37f3ce41eafa7f8dfc7ff33f887` (2026-11-09T18:53:27Z)
+- **Post-merge CI:** workflow `tests`, event `push`, run `42678087181`, conclusion **success**
+- **Authorization:** Drae authorized merging PR #30, completing the task lifecycle, updating HANDOFF.md, and cleaning up the feature branch. **Production deployment/restart was not authorized and did not occur.**
 
 ## Original problem and root cause
 
@@ -84,8 +88,11 @@ exist; this record was moved with `git mv` (history preserved) to
 Draft PR https://github.com/draeician/ref/pull/30 (base `main`) triggers the
 existing `pull_request` workflow. Exact-head CI for
 `903e89b8a88fc1142cbedbbc2f9638888fb8e5e7`: workflow `tests`, run `42660825495`,
-conclusion **success** (pytest job 35s). The PR remains draft/open and is not
-merged; CI protections are not changed.
+conclusion **success** (pytest job 35s). Final feature head
+`a91cf697d83a1a4a9dfe79edef34598cccc4dd55` also passed (run `42661037854`).
+PR #30 was marked ready, merged with merge commit
+`22255c4e6d5ae37f3ce41eafa7f8dfc7ff33f887`, and the merge commit passed main CI
+(run `42678087181`). CI protections were not changed.
 
 ## Implementation summary
 
@@ -167,7 +174,16 @@ merged; CI protections are not changed.
    and unresolved evidence is `unknown`.
 10. **Task lifecycle.** Tasks live under `.codex/tasks/wip/` while active, move to
     `.codex/tasks/review/` with State `REVIEW` for review, and to
-    `.codex/tasks/done/` only after acceptance. This record is in `review/`.
+    `.codex/tasks/done/` only after acceptance. This record is now in `done/`.
+11. **Merge strategy and closure path.** PR #30 was merged with a normal merge
+    commit (`22255c4e`) after CI passed on the exact approved head
+    (`a91cf697`). No squash, rebase, or force-push was used. Because direct commits
+    to `main` are prohibited, the post-merge task/HANDOFF closure is delivered on a
+    dedicated documentation-only branch and PR, with its own exact-head CI before
+    merge.
+12. **Production deployment remains separate.** Merge does not deploy. The
+    production pipx package, ref-api virtualenv, service, and local-transcribe
+    configuration are untouched; a separately authorized deployment is required.
 
 ## Read-only production topology check (minion-26)
 
@@ -251,14 +267,14 @@ change; the targeted changed-file safety checks pass.
   changes are explicitly not compared.
 - The reporter makes public GitHub metadata/commit/compare requests and one local
   `/health` request; network failure, rate-limit, or timeout degrade to `unknown`.
-- No production restart or deployment was performed. CI is triggered by a draft
-  PR because branch pushes alone did not run the workflow.
+- No production restart or deployment was performed. Feature CI was triggered by
+  PR #30 because branch pushes alone did not run the workflow; post-merge main CI
+  passed for the merge commit.
 
 ## Exactly one next step
 
-Reviewer inspects the draft PR against `main` for branch
-`fix/upgrade-instructions-detection`, the task record in
-`.codex/tasks/review/`, HANDOFF.md, diff, exact-head CI, and tests; then authorizes
-or declines a separately scoped merge/deployment. Do not merge the draft PR or run
-`ref --upgrade` from the old production binary until this branch is reviewed and
-deployed, because the old implementation mutates the installation.
+The feature is merged and the task is closed. The next action is a separately
+scoped, explicitly authorized production deployment of the merged `main` revision
+(install/upgrade the CLI and ref-api package, then a user-controlled
+`ref-api.service` restart). Do not run the old production `ref --upgrade` before
+deployment, and do not deploy under this task.
