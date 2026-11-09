@@ -140,8 +140,12 @@ every subcommand.
 - Implementation: `2ccde1d60f27224ade641fdd77de4590634c1e80`
 - Tests: `4e86bd5d1206b84513b783db2c0d3bf9c155dc08`
 - Task/handoff/agent docs: `ed60037ba294db7617e6e32e846bc39f7af273c3`
+- Review-state task move + evidence: `cb81789e735b38722664c7bbecbadcce492f9b87`
 - Draft PR #33: https://github.com/draeician/ref/pull/33
-- Final review-state docs commit: pushed to the same branch after the task move.
+- Exact-head CI for `cb81789`: workflow `tests`, run `42689895217`,
+  conclusion **success** (37s).
+- This HANDOFF update is a docs-only follow-up commit; PR #33 checks the final
+  head after it is pushed.
 
 ## Outstanding deployment steps (separately authorized, do not run here)
 

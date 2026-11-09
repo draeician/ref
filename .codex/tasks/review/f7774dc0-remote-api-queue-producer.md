@@ -155,3 +155,16 @@ secret scan. Record exact commands, exit codes, and environmental limits.
 Code, tests, task, HANDOFF, and agent lifecycle instructions updated together;
 full verification gate recorded; draft PR open; task moved to
 `.codex/tasks/review/` with State `REVIEW`. Merge/deploy remain unauthorized.
+
+## Review evidence (2026-11-09)
+
+- Draft PR #33: https://github.com/draeician/ref/pull/33
+- Implementation `2ccde1d60f27224ade641fdd77de4590634c1e80`
+- Tests `4e86bd5d1206b84513b783db2c0d3bf9c155dc08`
+- Docs/task `ed60037ba294db7617e6e32e846bc39f7af273c3`
+- Review-state move `cb81789e735b38722664c7bbecbadcce492f9b87`
+- Exact-head CI on `cb81789`: workflow `tests`, run `42689895217`, success.
+- Ref suite: 594 passed, 1 warning. Focused routing/queue/reconcile: 109 passed.
+- `local_transcribe` focused: 60 passed; read-only simulation confirmed the stale
+  config mismatch and that a corrected config enqueues without a Deno probe.
+- No deployment, live config edit, queue mutation, service restart, or merge.
