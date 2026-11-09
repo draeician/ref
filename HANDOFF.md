@@ -702,10 +702,15 @@ retention, and no-mutation behavior are covered by tests.
 
 ## 10. Final branch head and push verification
 
-This documentation commit is pushed to the same feature branch. The exact remote
-head is verified after push and reported to Drae; the application/test commit is
-`39d7b3510d6d5da63d31b37fa424ce52d294995f`. See the delivery message for the
-verified final remote SHA.
+- Application/test commit: `39d7b3510d6d5da63d31b37fa424ce52d294995f`
+- Verified evidence/documentation commit: `e5155acc6194bfb2e7090dd51a088f2676b03240`
+- Branch: `fix/upgrade-instructions-detection`
+- Both commits are pushed to `origin`. This handoff-only pointer update records
+  the evidence head; the exact final remote head after the pointer update is
+  verified with `git rev-parse origin/fix/upgrade-instructions-detection` and
+  reported in the delivery message to Drae.
+- Working tree was clean before this pointer update; no merge or deployment
+  occurred.
 
 ## 11. Exactly one next step
 
