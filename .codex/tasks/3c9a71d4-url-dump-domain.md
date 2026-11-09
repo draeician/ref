@@ -261,7 +261,13 @@ CI for PR #27 at its final head `5b23a0559cd2b0e147b1603474084bb7915a46b2`: work
 `pull_request`) → **conclusion success**, job `pytest` 05:39–05:40Z, no failed steps, log line
 **`542 passed, 1 warning in 12.95s`**; `gh pr checks 27 --repo draeician/ref --watch` reported `pytest pass 35s`, and afterwards
 `mergeable=MERGEABLE` / `mergeStateStatus=CLEAN`. The deployment records above were likewise committed on a dedicated branch
-(`docs/record-url-dump-deploy`) and opened as a documentation-only PR for independent review, not merged without authorization.
+(`docs/record-url-dump-deploy`) and opened as documentation-only PR
+https://github.com/draeician/ref/pull/28. After resolving a `HANDOFF.md` conflict against updated `main` while preserving both the
+November 2 deployment evidence and the later `ref --upgrade` records, PR #28 passed CI on head
+`42e60247454000a86b11c8595bb4057e84c0b755` (run `42679552349`, success) and was merged as
+`d51f83417b13b83dfbd5f5e8a66f830ff442cb91` at `2026-11-09T19:03:35Z` (normal merge commit). Post-merge CI on that exact main SHA:
+run `42679687766`, success. The feature branch was deleted locally and remotely. No application code, tests, or dependencies changed,
+and production was not modified by this merge.
 
 ## Known limits / risks (not claimed fixed)
 
@@ -276,8 +282,5 @@ CI for PR #27 at its final head `5b23a0559cd2b0e147b1603474084bb7915a46b2`: work
 
 ## Exactly one next step
 
-Reviewer: independently verify the production deployment on `minion-26` (`ref --version`, `/health`, a read-only
-`ref --url-dump DOMAIN` spot check) and authorize merging **this** documentation PR (branch `docs/record-url-dump-deploy`) so the
-record lands on `main` — direct commits to `main` are prohibited. No further production action is pending: nothing else was
-installed, configured, or restarted, and any future change (including rollback per `ROLLBACK.md` in the deploy backup dir) requires
-separate authorization.
+The task is closed: PR #26 is merged and deployed, and documentation PR #28 is merged. No further action is pending. Any future
+production change (including rollback per `ROLLBACK.md` in the deploy backup directory) requires separate authorization.
