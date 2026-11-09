@@ -6,6 +6,8 @@
 - **Branch:** `fix/upgrade-instructions-detection`
 - **Baseline:** `origin/main` = `80c6e379106a73c047cd517e56207bc62d558d7f`
 - **Implementation commit:** `39d7b3510d6d5da63d31b37fa424ce52d294995f`
+- **Evidence commit:** `e5155acc6194bfb2e7090dd51a088f2676b03240`
+- **Verified remote head before final record update:** `5e6367a0bc12bdcfacb8f1efdebe3914cba99ad6`
 - **Authorization:** implementation, tests, commit, push. **No merge, deployment, production package change, or service restart.**
 
 ## Original problem and root cause

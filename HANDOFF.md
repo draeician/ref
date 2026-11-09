@@ -703,13 +703,14 @@ retention, and no-mutation behavior are covered by tests.
 ## 10. Final branch head and push verification
 
 - Application/test commit: `39d7b3510d6d5da63d31b37fa424ce52d294995f`
-- Verified evidence/documentation commit: `e5155acc6194bfb2e7090dd51a088f2676b03240`
+- Evidence/documentation commit: `e5155acc6194bfb2e7090dd51a088f2676b03240`
+- Verified remote head before this final record update: `5e6367a0bc12bdcfacb8f1efdebe3914cba99ad6`
 - Branch: `fix/upgrade-instructions-detection`
-- Both commits are pushed to `origin`. This handoff-only pointer update records
-  the evidence head; the exact final remote head after the pointer update is
-  verified with `git rev-parse origin/fix/upgrade-instructions-detection` and
-  reported in the delivery message to Drae.
-- Working tree was clean before this pointer update; no merge or deployment
+- All commits are pushed to `origin`. This final handoff commit only records the
+  already-pushed head; the exact remote head after it is verified with
+  `git rev-parse origin/fix/upgrade-instructions-detection` and reported in the
+  delivery message to Drae.
+- Working tree was clean before this final record update; no merge or deployment
   occurred.
 
 ## 11. Exactly one next step
