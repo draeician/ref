@@ -8,20 +8,29 @@ A command-line tool for recording and managing URL references, with special supp
 pipx install ref-cli
 ```
 
-The optional FastAPI / `ref-api` server and client mode (`api_url`) landed **after** git tag **`v1.6.12-beta`** (commit `9088af3`, the last revision before that work). To stay on local-only `ref` without the API stack:
+Current versions use a client/server split: normal `ref` ingestion, search,
+listing, URL dump, and transcript updates **require** a running `ref-api`, and
+`api_url` is **not optional** for those operations. Install/configure the
+authoritative server first (see [HTTP API](#http-api-ref-api-authoritative-archive-server)),
+or point this client at an existing one.
+
+Older pre-API versions remain available for historical reference or deliberate
+local-only use. They do not have the current routing behavior:
 
 ```bash
-# Exact last pre-API commit (recommended if you want everything through the beta tag)
+# Exact last pre-API commit (historical local-only behavior)
 pipx install 'git+https://github.com/draeician/ref.git@v1.6.12-beta'
 
 # Or the last PyPI release before that line of work
 pipx install 'ref-cli==1.6.11'
 ```
 
-### Local transcription queue (optional)
+### Local transcription queue (server/worker side)
 
-When YouTube captions are unavailable, `ref` enqueues the URL for local
-transcription. It prefers the in-process
+On the archive host, when YouTube captions are unavailable, `ref-api`/`ref`
+enqueues the URL for local transcription. Remote clients do not need
+local-transcribe, Deno, Whisper, or a worker; only the worker host that downloads
+media and runs transcription needs those dependencies. The producer prefers the in-process
 [local-transcribe](https://github.com/draeician/local_transcribe) queue API,
 then an explicitly configured `lt` executable (`REF_LOCAL_TRANSCRIBE_LT`), then
 `lt` on `PATH`. The durable queue directory can be pinned with
@@ -38,9 +47,10 @@ video is queued for local transcription. The default `remote_first` preserves
 direct-caption behavior. Metadata enrichment and show-note discovery continue in
 both modes.
 
-### HTTP API (`ref-api`, optional)
+### HTTP API (`ref-api`, authoritative archive server)
 
-Run a LAN-facing archive server, or point `ref` at an existing one.
+`ref-api` is the authoritative archive writer and is required for normal `ref`
+ingestion. Run a LAN-facing archive server, or point `ref` at an existing one.
 
 **Archive host (this machine owns `~/references`):**
 
@@ -63,7 +73,14 @@ ref-api                           # foreground, 0.0.0.0:8000
 pipx install ref-cli              # no [api] extra required
 ```
 
-Set `api_url` in `~/.config/ref/config.yaml` to the server URL.
+Set `api_url` in `~/.config/ref/config.yaml` to the server URL (or export
+`REF_API_URL`). Clients only need the CLI and HTTP access: they do **not** need
+Google API credentials, Deno, Whisper, local-transcribe, or worker dependencies.
+Only the archive server and download/transcription worker hosts need those.
+
+If `api_url` is missing, normal ingest/search/list/transcript commands print
+setup instructions and exit nonzero. They never fall back to local CLI
+ingestion. `ref --status` reports the endpoint as unconfigured and exits 1.
 
 Requires **Python 3.8+** on the host running `ref-api`. **No authentication** yet — bind only on trusted networks.
 
@@ -121,24 +138,37 @@ Response shape: `{"results":[{"input":"…","url":"…","status":"added|exists|s
 
 ### Using `ref` as an API client
 
-Point the CLI at a running `ref-api` server by setting `api_url` in `~/.config/ref/config.yaml` (or `REF_API_URL` in the environment):
+Normal `ref` operation is API-client operation. Point the CLI at a running
+`ref-api` server by setting `api_url` in `~/.config/ref/config.yaml` (or
+`REF_API_URL` in the environment):
 
 ```yaml
 api_url: http://192.168.1.10:8000
 ```
 
-When `api_url` is set:
+`api_url` is **required** for normal ingestion, search, listing, URL dump, and
+transcript updates. If it is missing, those commands print setup guidance and
+exit nonzero; they never process locally.
 
-- `ref <url>` POSTs to `/urls` and prints the same stdout-style lines as local mode
+- `ref <url>` POSTs to `/urls` and prints the same stdout-style lines as before
 - `ref --search` (and `--search-url`, `--search-title`, etc.) call `GET /search` and render `-Hit Type:` lines as before
-- Exit code `1` when ingest returns `error` or the API is unreachable; `0` for added, exists, or skipped
+- Exit code `1` when ingest returns `error`, the API is unreachable, or no `api_url` is configured; `0` for added, exists, or skipped
 - `ref --backup` downloads a server-side backup into your local `paths.references` directory (respects `--nocompress`). On the archive host itself (loopback / local hostname `api_url`), it backs up the local file directly instead of HTTP self-download.
 - `ref --file urls.txt` POSTs each URL to `/urls` (file is read/written locally; archive updates happen on the server)
 - `ref --transcript <url>` calls `POST /transcript` on the server
-- `ref --status` GETs `/health` and reports connectivity (exit 1 if unreachable)
+- `ref --status` GETs `/health` and reports connectivity. A missing `api_url` is reported as **unconfigured** and exits 1; a configured but unreachable API also exits 1; a healthy API exits 0
 - `ref --url-dump DOMAIN` calls `GET /urls?domain=DOMAIN` and prints one raw URL per stdout line (newest first). Read-only: no local archive is created, migrated, or read. Requires `api_url`; matches the domain and its subdomains on the parsed hostname; exit 0 with empty output when nothing matches, exit 1 with the problem on stderr otherwise
 
-Other commands (`--integrity`, etc.) still run locally on the machine where you invoke `ref`.
+The `ref-api` server remains the authoritative writer. Explicit local
+inspection/maintenance commands (`--integrity`, local `--edit`/`--backup`, and
+server management such as `--install-server`, `--uninstall-server`,
+`--server-status`, `--upgrade`) retain their documented behavior. On the archive
+host, loopback `api_url` still routes normal ingest through the API rather than
+implicit local processing.
+
+Remote clients do not need Google credentials, Deno, Whisper, local-transcribe,
+or a worker. Only worker hosts that download media and run transcription need
+those dependencies.
 
 `ref --server-status` is different: it shows **local** `systemctl --user status ref-api` on the archive host.
 
@@ -209,18 +239,20 @@ Fetch order: YouTube Data API when `YOUTUBE_API_KEY` is set, otherwise **yt-dlp*
 
 ## Configuration
 
-Configuration lives in `~/.config/ref/config.yaml`. On first run, or when you run `ref --install-server` on a machine without that directory, a **documented template** is copied into place. Optional server env vars: `~/.config/ref/ref-api.env` (see `ref-api.env.template`).
+Configuration lives in `~/.config/ref/config.yaml`. On server setup (`ref --install-server`) or a local archive operation, a **documented template** is copied into place when the directory does not exist. Read-only client routing does not create it. Optional server env vars: `~/.config/ref/ref-api.env` (see `ref-api.env.template`).
 
 Key settings:
 
 ```yaml
-api_url: null                    # set to http://host:8000 for client mode
+api_url: http://192.168.1.10:8000  # required for normal ref ingestion
 paths:
-  references: ~/references
-skip_patterns: []                # glob or exact URL skips
+  references: ~/references          # archive host / local backup destination
+skip_patterns: []                   # glob or exact URL skips
 ```
 
-See the template file after bootstrap for full comments. Override client URL with `REF_API_URL`.
+A literal `api_url: null` leaves normal ingest/search/list/url-dump/transcript
+commands unconfigured. See the template file after bootstrap for full comments.
+Override the client URL with `REF_API_URL`.
 
 ### Skip Patterns
 
@@ -313,21 +345,24 @@ variables.
 
 ### Interactive Mode
 
-Run `ref` without arguments to enter interactive mode. You can:
+Run `ref` without arguments to enter interactive mode. `api_url` must be
+configured; otherwise the command prints setup guidance and exits nonzero. You
+can:
 
 - Enter a single URL or YouTube video ID
-- **Paste multiple URLs at once** (one per line) - all URLs will be processed sequentially
-- URLs matching skip patterns will be automatically skipped
+- **Paste multiple URLs at once** (one per line) - all URLs will be sent to ref-api sequentially
+- URLs matching skip patterns will be skipped
 
 ### File Processing
 
-Process URLs from a file:
+Process URLs from a file through ref-api:
 
 ```bash
 ref --file urls.txt
 ```
 
-URLs in the file that match skip patterns will be skipped and commented out in the file.
+`api_url` is required. URLs that match skip patterns are skipped and commented
+out in the local file; archive updates happen on the server.
 
 ### Title extraction
 
@@ -480,8 +515,10 @@ require a restart:
 systemctl --user restart ref-api.service
 ```
 
-**Note:** local-only CLI mode (no `api_url`) does not perform this new
-server-side automatic discovery. Use `ref-youtube-extract` explicitly in
-that mode to scan descriptions. Do not expose the unauthenticated ref-api
-to untrusted networks. Server-side destination/redirect protections remain
-necessary before accepting untrusted inputs from the public internet.
+**Note:** current normal CLI operation has no local ingestion mode; it routes
+through `ref-api`, which owns discovery. Legacy pre-API CLI installs (see the
+historical versions above) do not perform server-side automatic discovery and
+require running `ref-youtube-extract` explicitly. Do not expose the
+unauthenticated ref-api to untrusted networks. Server-side destination/redirect
+protections remain necessary before accepting untrusted inputs from the public
+internet.
