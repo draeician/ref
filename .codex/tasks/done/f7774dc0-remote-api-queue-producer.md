@@ -2,10 +2,12 @@
 
 - **Task ID:** f7774dc0
 - **Owner:** OpenCode
-- **State:** REVIEW
-- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/review/`.
-- **Branch:** `fix/remote-api-queue-producer`
+- **State:** DONE (code merge phase; production deployment not authorized)
+- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/done/`.
+- **Branch:** `fix/remote-api-queue-producer` (merged)
 - **Base:** `origin/main` = `377dc34160a78d7e8c601dbad3bdeb7a92f2f7a8`
+- **Approved head:** `0ec4d5847b1494e9ef347d4a821a89fd0604e6b5`
+- **Merge commit:** `f939efe4ac4e574a8e4f1b5991c85bd96822e4d6`
 - **Repositories:** `draeician/ref` (implementation); `draeician/local_transcribe` (read-only unless a verified producer defect requires a linked change).
 - **Authorization:** Implement, test, document, commit, push, and open draft PRs. **No** production deployment, live config edit, queue mutation, service restart, or merge during implementation.
 
@@ -236,3 +238,21 @@ Reviewed head: `0c73cc8d2cd0999a37ccf2a5186a6e18155d6937`. Task remains in
 
 No merge, deployment, live config change, pipx upgrade, queue modification, or
 service restart was performed.
+
+## Merge and closure (2026-11-09)
+
+- Approved head: `0ec4d5847b1494e9ef347d4a821a89fd0604e6b5`.
+- PR #33 marked ready, then merged with a **normal merge commit**:
+  `f939efe4ac4e574a8e4f1b5991c85bd96822e4d6` (parents `377dc341…` and
+  `0ec4d584…`). No squash, rebase, or force-push.
+- All approved commits are reachable from `main`.
+- Pre-merge exact-head CI: workflow `tests`, run `42692542822`, success.
+- Post-merge `main` CI: workflow `tests`, run `42694120987`, head
+  `f939efe4…`, success.
+- Local and remote `fix/remote-api-queue-producer` deleted after merge;
+  unrelated branches (`docs/unified-ref-consolidation-plan`,
+  `fix/youtube-auto-show-notes-api`) preserved.
+- Task moved to `.codex/tasks/done/` with State **DONE** for the code/merge
+  phase.
+- Production deployment and remediation remain outstanding and separately
+  authorized (see HANDOFF).
