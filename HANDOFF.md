@@ -1,3 +1,38 @@
+# HANDOFF — f7774dc0 remote-client routing and queue producer
+
+**Date:** 2026-11-09 (UTC)
+**Task ID:** `f7774dc0`
+**Owner:** OpenCode
+**State:** WIP (implementation in progress)
+**Branch:** `fix/remote-api-queue-producer`
+**Base:** `origin/main` = `377dc34160a78d7e8c601dbad3bdeb7a92f2f7a8`
+**Authorization:** Implement, test, document, push, and open a draft PR. No
+deployment, live config change, queue mutation, service restart, or merge.
+
+## Scope
+
+Fix Incident A (a remote `ref` client fell into the local archive-writer path and
+raised `DefaultCredentialsError`) and Incident B (transcription producer
+reporting after archive capture succeeded: Deno warning, queue UUID mismatch,
+and ambiguous pending-file fallback).
+
+## Status
+
+Implementation is in progress. This section will be replaced with the final
+root causes, decisions, file list, read-only production findings, exact test
+evidence, risks, commit SHA, PR link, outstanding deployment steps, and exactly
+one next action before the task moves to `review/`.
+
+See `.codex/tasks/wip/f7774dc0-remote-api-queue-producer.md` for the complete
+plan and claim.
+
+Reference: `docs/plans/unified-ref-consolidation.md` on
+`docs/unified-ref-consolidation-plan` (PR #29) motivates the single authoritative
+`ref-api` client/server split. This task implements the remote-client routing
+piece without changing that plan's unrelated scope.
+
+---
+
 # HANDOFF — YouTube transcript routing investigation
 
 **Date:** 2026-10-27 (UTC)
