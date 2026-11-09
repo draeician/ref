@@ -718,3 +718,100 @@ retention, and no-mutation behavior are covered by tests.
 Reviewer inspects the pushed branch, task record, HANDOFF, diff and test evidence;
 then authorizes or declines a separately scoped merge/deployment. Do not merge or
 deploy under this task.
+
+## 12. Review corrections — running API, Git ancestry, lifecycle, CI (2026-11-09)
+
+**Branch:** `fix/upgrade-instructions-detection`
+**Owner:** OpenCode
+**Task:** `b1255911` — now at `.codex/tasks/review/b1255911-upgrade-instructions-detection.md`, State `REVIEW`
+**Authorization:** correct the branch, verify, commit, push, open a draft PR. **No merge, deployment, production package change, or service restart.**
+
+### Defects found in review and their corrections
+
+1. **Running API was never inspected.** The first implementation compared only the
+   installed ref-api package. It now performs one bounded, read-only
+   `GET /health` (2 s timeout). Installed revision, running revision, and GitHub
+   default-branch revision are reported separately. Running state is
+   `current` / `stale` / `unknown`; unreachable or unreadable responses are
+   `unknown`, never `current`. A stale running process with current installed code
+   produces only a user-controlled `systemctl --user restart ref-api.service`
+   instruction. The reporter never restarts anything.
+2. **Any differing SHA was treated as outdated.** `compare_revisions()` now
+   returns only `exact` / `different` / `unknown`. GitHub commit resolution plus
+   the compare API classify the relationship as `exact` / `behind` (outdated) /
+   `ahead` / `divergent` / `unknown`. Abbreviated SHAs are resolved to full SHAs
+   first. `ahead` and `divergent` explicitly say "do not downgrade"; missing
+   GitHub evidence and unresolved abbreviations are `unknown` with no command.
+3. **Status and directory disagreed.** The task now follows
+   `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`. The record
+   was moved with `git mv` (history preserved) into `review/`, and its State is
+   `REVIEW`.
+4. **No remote CI run for the branch head.** A draft PR against `main` triggers
+   the existing `pull_request` workflow. The exact pushed head is verified below.
+   The PR is not merged and CI protections are unchanged.
+
+### Architectural decisions
+
+- `/health` is read-only and bounded. Endpoint precedence: explicit argument,
+  configured loopback `api_url`, then `ExecStart`-derived service URL. Non-loopback
+  configured URLs are ignored.
+- The running process is compared with the installed package, not with GitHub, so
+  a running-stale recommendation is independent of whether an upgrade is needed.
+- Revision ancestry requires GitHub evidence. A SHA difference alone is never a
+  downgrade recommendation; when evidence is missing the result is `unknown`.
+- `unknown` runtime or revision adds an unresolved status, so the report cannot
+  print "Nothing to do" or claim a service is current.
+- Lifecycle status lives in both the directory and the record; they must agree.
+
+### Exact verification (all commands actually run)
+
+Environment: `/tmp/opencode/ref-venv` (Python 3.14.4, editable `.[api,test]`).
+
+| Command | Exit | Result |
+|---|---:|---|
+| `python -m pytest -q` | 0 | **576 passed, 1 warning in 13.64s** |
+| `python -m pytest -q tests/test_upgrade.py` | 0 | **47 passed in 1.35s** |
+| `python -m pytest -q tests/test_upgrade.py tests/test_cli_api_routing.py tests/test_url_dump_api_cli.py tests/test_server_install.py` | 0 | **84 passed, 1 warning in 2.20s** |
+| `ruff check --select F,E9,ISC src/ref_cli/upgrade.py tests/test_upgrade.py` | 0 | All checks passed |
+| `python -m compileall -q src get_transcript.py` | 0 | Clean |
+| `python -c "import ref_cli.cli, ref_cli.upgrade, ref_api.server"` | 0 | Imports OK |
+| `python -m build --outdir /tmp/opencode/ref-dist` | 0 | Wheel + sdist built |
+| isolated venv + `ref_cli[...][api]` wheel install | 0 | `ref --version` exit 0 |
+| isolated `HOME=<fresh> ref --upgrade` | 0 | Exit 0; **0 files written to fresh HOME**; ahead, no downgrade |
+| `git diff --check` | 0 | Clean |
+| secret scan of changed files | 0 | Only `--host`/`--port` tokens; no credentials |
+
+Real read-only checks (no mutation, no restart):
+
+- minion-26 report: installed/running/GitHub all `80c6e3791`; runtime
+  `current`; `Nothing to do`.
+- `5b23a05` → `behind` (1 commit).
+- `39d7b3510` → `ahead` (1 commit), no downgrade.
+- `234b6747f` → `ahead` (4 commits), no downgrade.
+
+### Git, commit, and CI
+
+- Review-correction application/test commit:
+  `63395ce84c00a2684e8532b2e227e9c0f05d2d80`
+- Prior remote head preserved: `234b6747fc4686a9515410beef25fb643cde9d9b`
+- Branch: `fix/upgrade-instructions-detection`
+- Draft PR and exact-head GitHub Actions result: recorded in the delivery
+  message and the task record after push (the workflow only runs on `main` pushes
+  or `pull_request`, so the draft PR is what produces CI for this branch).
+
+### Unresolved limitations
+
+- Running-state classification needs a `/health` version containing `+g<sha>` (or
+  a matching package version); otherwise it stays `unknown`.
+- Relationship classification needs resolvable GitHub evidence; PyPI-only installs,
+  unresolvable abbreviations, and GitHub outages stay `unknown`.
+- Local wheel artifacts cannot reveal their upstream repository; the report states
+  this and offers only a conditional SHA-pinned Git reinstall.
+- Editable installs compare the recorded commit, not uncommitted changes.
+- No production restart or deployment was performed under this task.
+
+### Status and next action
+
+Task `b1255911` is `REVIEW` in `.codex/tasks/review/`. The next action is reviewer
+inspection of the draft PR, exact-head CI, diff, and this handoff. Do not merge or
+deploy until that review is complete.
