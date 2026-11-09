@@ -124,6 +124,61 @@ every subcommand.
 | Whitespace | `git diff --check` | clean |
 | Secret scan | regex over `git diff` | 0 credential-shaped matches |
 
+## Review corrections (2026-11-09, PR #33)
+
+Review of head `0c73cc8d2cd0999a37ccf2a5186a6e18155d6937` found three defects,
+corrected here without changing the documented read-only production findings.
+
+### 1 — `ref --status` treated missing API as local mode
+
+- `api_client.report_api_status()` now reports
+  `Mode: unconfigured (api_url is not set)` and
+  `Status: error (no ref-api endpoint configured)`, prints server/client setup
+  steps (`ref --install-server`, `api_url: http://SERVER_LAN_IP:8000`,
+  `export REF_API_URL=...`, `ref --status`), and returns **1**.
+- Healthy configured API still returns 0; configured-but-unreachable API
+  returns 1.
+- Regressions: `tests/test_api_client.py` missing/healthy/unreachable;
+  `tests/test_remote_client_routing.py` main-level status tests assert exit
+  codes and that no `.config`/`references` files are created.
+
+### 2 — Deno guidance hid the actionable queue error
+
+- Added `_summarize_queue_cli_stderr()`: the full original stderr is still
+  logged by `_enqueue_via_lt_cli`; the saved reference gets a bounded one-line
+  summary that starts at the first strong queue/UUID/mismatch/identity line and
+  drops Deno guidance lines. Unrelated errors are not filtered by the Deno
+  check unless a stronger queue line exists.
+- UUID validation and the pending-file "not queued" fallback are unchanged.
+- Regression `test_lt_failure_saved_reference_prefers_queue_error_over_deno_guidance`
+  replays the full original stderr block, asserts the saved status contains the
+  mismatch and both UUIDs, contains no Deno install guidance, is one line and
+  bounded, says "not queued", names `transcript-pending.md`, and that the full
+  stderr remains in the log.
+
+### 3 — README described API as optional
+
+- README now states normal ingestion/search/listing/url-dump/transcript require
+  `ref-api`; `api_url` is not optional; missing API never means local CLI
+  ingestion; `ref --status` reports unconfigured as an error; the API remains
+  the authoritative writer; explicit local backup/integrity/management commands
+  keep their behavior; remote clients need no Google credentials, Deno, Whisper,
+  or worker. Historical pre-API installs are kept in a separate legacy note.
+
+### Correction verification (actually run)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Focused | `pytest -q tests/test_api_client.py tests/test_remote_client_routing.py tests/test_transcript_queue_modes.py` | **59 passed** |
+| Full suite | `python -m pytest -q` | **597 passed, 1 warning** (13.71s) |
+| Syntax | `python -m compileall -q src tests` | exit 0 |
+| Build | `python -m build --wheel` | wheel built (`1.6.12b1.dev150+g0c73cc8d2`) |
+| CLI smoke — missing API | clean venv, empty `HOME`, `ref --status` | exit **1**, unconfigured guidance, **no files created** |
+| CLI smoke — healthy API | local `/health` server + `REF_API_URL` | exit **0**, `Status: ok`, **no files created** |
+| CLI smoke — unreachable API | `REF_API_URL=http://127.0.0.1:18998` | exit **1**, `Status: unreachable`, **no files created** |
+| Whitespace | `git diff --check` | clean |
+| Secret scan | regex over `git diff` | no credentials (only `YOUTUBE_API_KEY` variable name) |
+
 ## Risks and limitations
 
 - Installed `lt` 0.7.0 still prints the Deno warning until a separately

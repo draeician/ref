@@ -15,13 +15,27 @@
 [CLAIM] f7774dc0 remote-client routing + queue producer reporting
 repo: draeician/ref@fix/remote-api-queue-producer
 actor: OpenCode  role: Coder
-task-file: .codex/tasks/wip/f7774dc0-remote-api-queue-producer.md
+task-file: .codex/tasks/review/f7774dc0-remote-api-queue-producer.md
 plan:
 - Route all remote-capable CLI operations through ref-api before local bootstrap/logging
 - Add exact missing-api guidance; remove local fallbacks and credential prompt
 - Guard missing YouTube credentials; sanitize/bound queue-failure text
 - Add regression coverage for routing, queue fallback, and identity behavior
 - Verify full gate, push branch, open draft PR, move to review/
+```
+
+## Review corrections claim (2026-11-09)
+
+```
+[CLAIM] f7774dc0 review corrections on PR #33
+reviewed-head: 0c73cc8d2cd0999a37ccf2a5186a6e18155d6937
+branch: fix/remote-api-queue-producer
+state: REVIEW (stays in .codex/tasks/review/)
+plan:
+- Report missing api_url as unconfigured and exit nonzero from ref --status
+- Extract the actionable queue error ahead of the full Deno guidance block
+- Correct README to describe required ref-api routing and worker-only dependencies
+- Re-run full verification, push, update HANDOFF, confirm exact-head CI
 ```
 
 ## Incident A — remote client routing
@@ -168,3 +182,57 @@ full verification gate recorded; draft PR open; task moved to
 - `local_transcribe` focused: 60 passed; read-only simulation confirmed the stale
   config mismatch and that a corrected config enqueues without a Deno probe.
 - No deployment, live config edit, queue mutation, service restart, or merge.
+
+## Review corrections evidence (2026-11-09)
+
+Reviewed head: `0c73cc8d2cd0999a37ccf2a5186a6e18155d6937`. Task remains in
+`.codex/tasks/review/` with State `REVIEW`.
+
+### Correction 1 — `ref --status`
+
+- `src/ref_cli/api_client.py`: missing `api_url` now prints
+  `Mode: unconfigured (api_url is not set)` plus
+  `Status: error (no ref-api endpoint configured)`, actionable server/client
+  setup steps, and returns `1`. Healthy configured API returns `0`; configured
+  unreachable API returns `1`.
+- Tests: `tests/test_api_client.py` (`test_report_api_status_unconfigured`,
+  healthy, unreachable) and `tests/test_remote_client_routing.py` main-level
+  tests assert exit codes and no `.config`/`references` creation.
+
+### Correction 2 — queue stderr summarization
+
+- `src/ref_cli/cli.py`: added `_summarize_queue_cli_stderr()`. Full stderr stays
+  in the server log; the saved reference receives a bounded one-line summary
+  beginning at the first strong queue/UUID/mismatch/identity line with Deno
+  guidance removed. UUID validation and pending-file "not queued" fallback are
+  unchanged; unrelated errors are not hidden by broad filtering.
+- Test: `test_lt_failure_saved_reference_prefers_queue_error_over_deno_guidance`
+  replays the full Deno block + UUID mismatch and asserts the saved status has
+  the mismatch/both UUIDs, no Deno guidance, one bounded line, "not queued",
+  `transcript-pending.md`, while the full stderr remains logged.
+
+### Correction 3 — README
+
+- `README.md` now distinguishes current required-`ref-api` behavior from
+  historical pre-API local-only installs; states `api_url` is not optional,
+  missing API never means local ingestion, `ref --status` reports unconfigured
+  as an error, the API is authoritative, explicit local maintenance commands
+  keep their behavior, and only worker hosts need download/transcription
+  dependencies.
+
+### Verification (exact)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Focused | `pytest -q tests/test_api_client.py tests/test_remote_client_routing.py tests/test_transcript_queue_modes.py` | 59 passed |
+| Full | `python -m pytest -q` | 597 passed, 1 warning |
+| Syntax | `python -m compileall -q src tests` | exit 0 |
+| Build | `python -m build --wheel` | wheel built |
+| Missing API | clean venv, empty HOME, `ref --status` | exit 1, guidance, no files |
+| Healthy API | local `/health`, `REF_API_URL` | exit 0, `Status: ok`, no files |
+| Unreachable API | `REF_API_URL=http://127.0.0.1:18998` | exit 1, `Status: unreachable`, no files |
+| Whitespace | `git diff --check` | clean |
+| Secret scan | regex over `git diff` | no credentials |
+
+No merge, deployment, live config change, pipx upgrade, queue modification, or
+service restart was performed.
