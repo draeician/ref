@@ -921,3 +921,87 @@ updated the GitHub repository and local Git metadata.
 A separately authorized production deployment may update the CLI/ref-api
 installation to merged `main` and, if needed, restart `ref-api.service` under user
 control. Do not deploy under this task.
+
+## 14. PR #28 conflict resolution, merge, and cleanup (2026-11-09)
+
+**Authorization:** Drae explicitly authorized resolving PR #28 documentation
+conflicts, merging PR #28 into `main`, updating the task record and HANDOFF.md,
+and removing the merged feature branch. Production changes were **not**
+authorized and did not occur.
+
+**Original deployment:** The November 2 `ref --url-dump` production deployment on
+`minion-26` remains documented unchanged above and in the task file section
+"[DONE] Production deployment on `minion-26`". This merge did not alter it.
+
+**Conflict resolution**
+
+- PR #28 (`docs/record-url-dump-deploy`, head `5159878…`) was based on
+  `80c6e379` and conflicted with `main` at `6e8c33b` in `HANDOFF.md`.
+- `origin/main` was merged into the feature branch (no rebase/squash). The single
+  conflict was the URL-dump "Exactly one next step": the resolution kept the PR's
+  updated November 2 deployment next-step and preserved all later `ref --upgrade`
+  sections 1–13 appended on main.
+- The task record `.codex/tasks/3c9a71d4-url-dump-domain.md` merged without
+  conflict; its existing history, acceptance evidence, deployment evidence, and
+  backup/rollback information were preserved.
+- Resulting conflict-resolution commit: `42e60247454000a86b11c8595bb4057e84c0b755`
+  (`[docs] Merge main into docs/record-url-dump-deploy`).
+- Final diff vs `main` was documentation-only: `HANDOFF.md` and
+  `.codex/tasks/3c9a71d4-url-dump-domain.md`. No application code, tests,
+  dependencies, or configuration changed.
+
+**Verification (all actually run on the resolved tree)**
+
+| Check | Result |
+|---|---|
+| Full `python -m pytest -q` | **576 passed, 1 warning in 14.34s** |
+| Conflict markers in `HANDOFF.md` | none |
+| `git diff --check` | clean |
+| Main `##` HANDOFF headers preserved | all present |
+| Deployment evidence present | `dev129+g80c6e3791`, backup dir `20261102T1416Z-pr26-url-dump`, `ROLLBACK.md` |
+| `ref --upgrade` sections preserved | sections 1–13 present |
+| Diff vs `main` | only the two documentation files |
+| Secret scan of changed docs | no credentials (only the scan-pattern text) |
+| PR #28 exact-head CI (`42e6024…`) | run `42679552349`, **success** |
+
+**Merge record**
+
+- PR: #28 — https://github.com/draeician/ref/pull/28
+- Reviewed head: `42e60247454000a86b11c8595bb4057e84c0b755`
+- Merge strategy: normal merge commit (no squash/rebase/force-push)
+- Actual merge commit: `d51f83417b13b83dfbd5f5e8a66f830ff442cb91`
+- Merge timestamp: `2026-11-09T19:03:35Z`
+- Post-merge CI on exact main SHA: workflow `tests`, event `push`, run
+  `42679687766`, head `d51f8341…`, conclusion **success**
+- PR commits `5159878…` and `42e6024…` are reachable from `main`; the deployment
+  documentation is present on `main`.
+
+**Branch cleanup results**
+
+- Local `main` fast-forwarded to `d51f8341…`; matches `origin/main`.
+- Local `docs/record-url-dump-deploy` deleted safely after ancestor verification
+  (`git branch -d`, was `42e6024`).
+- Remote `docs/record-url-dump-deploy` deleted by GitHub on merge; confirmed
+  absent and pruned.
+- Unrelated branches preserved: `docs/unified-ref-consolidation-plan`,
+  `fix/youtube-auto-show-notes-api`.
+- Working tree clean.
+
+**Task status**
+
+- Task `3c9a71d4` (`ref --url-dump DOMAIN`): **DONE / MERGED / DEPLOYED**;
+  record at `.codex/tasks/3c9a71d4-url-dump-domain.md`. PR #28 closure recorded.
+
+**Remaining blockers**
+
+- None for this merge/cleanup.
+- Any future production change, including rollback per `ROLLBACK.md`, requires
+  separate authorization. The pre-existing `--url-dump` behavior limits are
+  unchanged and still documented in the task record.
+
+**Production confirmation**
+
+No package deployment, pipx upgrade, ref-api virtualenv change,
+`ref-api.service` restart, Minion configuration change, or production data
+modification occurred. This work changed only repository documentation and local
+Git metadata.
