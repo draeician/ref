@@ -793,11 +793,17 @@ Real read-only checks (no mutation, no restart):
 
 - Review-correction application/test commit:
   `63395ce84c00a2684e8532b2e227e9c0f05d2d80`
+- Documentation/task/lifecycle commit pushed for CI:
+  `903e89b8a88fc1142cbedbbc2f9638888fb8e5e7`
 - Prior remote head preserved: `234b6747fc4686a9515410beef25fb643cde9d9b`
 - Branch: `fix/upgrade-instructions-detection`
-- Draft PR and exact-head GitHub Actions result: recorded in the delivery
-  message and the task record after push (the workflow only runs on `main` pushes
-  or `pull_request`, so the draft PR is what produces CI for this branch).
+- Draft PR: https://github.com/draeician/ref/pull/30 (base `main`, draft, open;
+  not merged)
+- Exact-head CI: workflow `tests`, event `pull_request`, run `42660825495`,
+  head `903e89b8a88fc1142cbedbbc2f9638888fb8e5e7`, conclusion **success**
+  (pytest job 35s).
+- CI protections were not changed. The workflow runs on `pull_request`; the branch
+  push alone had no run, which is why the draft PR was required.
 
 ### Unresolved limitations
 

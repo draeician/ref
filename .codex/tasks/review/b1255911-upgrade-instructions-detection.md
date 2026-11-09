@@ -81,9 +81,11 @@ exist; this record was moved with `git mv` (history preserved) to
 
 ### Correction 4 — remote CI
 
-A draft PR against `main` is opened to trigger the existing `pull_request`
-workflow. The exact pushed head's GitHub Actions result is recorded in
-`HANDOFF.md`. The PR is not merged, and CI protections are not changed.
+Draft PR https://github.com/draeician/ref/pull/30 (base `main`) triggers the
+existing `pull_request` workflow. Exact-head CI for
+`903e89b8a88fc1142cbedbbc2f9638888fb8e5e7`: workflow `tests`, run `42660825495`,
+conclusion **success** (pytest job 35s). The PR remains draft/open and is not
+merged; CI protections are not changed.
 
 ## Implementation summary
 
