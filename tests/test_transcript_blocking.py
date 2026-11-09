@@ -12,10 +12,10 @@ from ref_cli import cli
 import get_transcript
 
 QUEUED_BLOCKED = (
-    "Transcript unavailable (YouTube blocked; queued for local-transcribe)"
+    "Transcript unavailable (YouTube blocked; transcription pending; not queued)"
 )
 QUEUED_NO_CAPTIONS = (
-    "Transcript unavailable (no captions; queued for local-transcribe)"
+    "Transcript unavailable (no captions; transcription pending; not queued)"
 )
 QUEUED_WORKER = (
     "Transcript unavailable (queued for local-transcribe worker; execution exec-1)"
@@ -236,7 +236,9 @@ def test_add_url_to_pending_appends_new_url_when_api_missing(monkeypatch, tmp_pa
     outcome = cli.add_url_to_pending_file(video_url, video_id)
 
     assert outcome.action == "pending_file"
-    assert outcome.message == "Transcript unavailable (queued in transcript-pending.md)"
+    assert outcome.message == (
+        "Transcript unavailable; recorded in transcript-pending.md; not queued"
+    )
     assert pending_file.read_text().strip() == video_url
     printed = capsys.readouterr().out
     assert "pipx install" not in printed

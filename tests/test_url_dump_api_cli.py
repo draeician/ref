@@ -270,7 +270,8 @@ def test_run_url_dump_requires_api_url(monkeypatch, capsys) -> None:
     assert exc.value.code == 1
     mock_dump.assert_not_called()
     captured = capsys.readouterr()
-    assert "requires api_url" in captured.err
+    assert "ref: No API server configured." in captured.err
+    assert "No URL processed." in captured.err
     # stdout stays pure even on failure.
     assert captured.out == ""
 

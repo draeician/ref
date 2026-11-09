@@ -133,7 +133,7 @@ def test_local_only_missing_transcript_skips_remote_and_labels_status(
     assert any("intentionally skipped" in r.message for r in caplog.records)
     formatted = cli.format_transcript_failure(failure_info)
     assert formatted == (
-        "Transcript unavailable (local-only mode; queued for local-transcribe)"
+        "Transcript unavailable (local-only mode; transcription pending; not queued)"
     )
 
 
@@ -442,6 +442,49 @@ def test_pending_fallback_write_failure_is_not_reported_as_recorded(
     assert "transcript-pending.md could not be updated" in outcome.message
     assert "recorded in transcript-pending.md" not in outcome.message
     assert "local-only mode" in outcome.message
+
+
+def test_lt_failure_saved_reference_is_one_line_and_not_claimed_queued(
+    monkeypatch, tmp_path
+):
+    queue_dir = _make_queue(tmp_path)
+    lt_path = _make_lt(tmp_path)
+    pending = tmp_path / "transcript-pending.md"
+    monkeypatch.setattr(cli, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(cli, "TRANSCRIPT_PENDING_FILE", str(pending))
+    monkeypatch.setenv(transcript_queue.ENV_LT_PATH, str(lt_path))
+    monkeypatch.setenv(transcript_queue.ENV_QUEUE_DIR, str(queue_dir))
+    _block_python_queue_api(monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr=(
+                "\x1b[33mWarning: Deno runtime not detected\x1b[0m\n"
+                "✗ Queue UUID mismatch for /queue:\n"
+                "  found 'aaa', expected 'bbb'\n"
+            ),
+        )
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    outcome = cli.add_url_to_pending_file(
+        VIDEO_URL, VIDEO_ID, failure_reason="local-only mode"
+    )
+
+    assert outcome.action == "pending_file"
+    text = pending.read_text(encoding="utf-8")
+    assert VIDEO_URL in text
+    assert "\n" not in outcome.message
+    assert "not queued" in outcome.message
+    assert "recorded in transcript-pending.md" in outcome.message
+    assert "lt queue add exited 1" in outcome.message
+    assert "Queue UUID mismatch" in outcome.message
+    assert "Deno runtime" not in outcome.message
+    # Bounded for the saved reference row.
+    assert len(outcome.message) <= 320
 
 
 def test_lt_cli_parser_ignores_warning_lines(monkeypatch, tmp_path):

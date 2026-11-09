@@ -461,7 +461,7 @@ def test_api_process_one_during_cooldown_returns_valid_result(monkeypatch, tmp_p
     assert result.status == "added"
     assert result.url == VIDEO_URL_A
     assert "suppressed by IP cooldown" in (result.output or "") or (
-        "queued in transcript-pending.md" in (result.output or "")
+        "recorded in transcript-pending.md" in (result.output or "")
     )
     assert VIDEO_URL_A in pending.read_text()
     assert VIDEO_URL_A in references.read_text()

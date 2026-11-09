@@ -38,6 +38,28 @@ def test_bootstrap_config_dir_creates_documented_template(config_home):
     assert server_install.REF_API_ENV_TEMPLATE.exists()
 
 
+def test_bootstrap_preserves_existing_api_url(config_home):
+    server_install.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    server_install.CONFIG_FILE.write_text(
+        "api_url: http://archive.lan:8000\n"
+        "paths:\n"
+        "  references: ~/references\n"
+        "  transcripts: ~/references/transcripts\n",
+        encoding="utf-8",
+    )
+
+    server_install.bootstrap_config_dir()
+    server_install.bootstrap_config_dir()
+
+    import yaml
+
+    config = yaml.safe_load(server_install.CONFIG_FILE.read_text(encoding="utf-8"))
+    assert config["api_url"] == "http://archive.lan:8000"
+    # Missing keys are added, never replacing the user's endpoint.
+    assert "removable_keys" in config
+    assert "skip_patterns" in config
+
+
 def test_set_local_api_url_updates_null(config_home):
     server_install.bootstrap_config_dir()
     assert server_install.set_local_api_url("0.0.0.0", 8000) is True
