@@ -551,3 +551,164 @@ to unwind. Nothing was deployed to `minion-26`, so there is nothing to unwind in
 through that PR. The **deployment** decision (install the merged code on `minion-26`, restart `ref-api`, smoke-test
 `ref --url-dump DOMAIN`) is a separate authorization that was not granted; nothing has been installed, upgraded, or restarted, and it
 must not be done until separately authorized.
+
+---
+
+# HANDOFF — `ref --upgrade` read-only installation detection and instructions
+
+**Task:** `b1255911` — [fix] Make `ref --upgrade` strictly read-only and topology-aware
+**Owner:** OpenCode
+**Branch:** `fix/upgrade-instructions-detection`
+**Task record:** `.codex/tasks/b1255911-upgrade-instructions-detection.md`
+**Application/test commit:** `39d7b3510d6d5da63d31b37fa424ce52d294995f`
+**Date:** 2026-11-09 (UTC)
+
+## 1. Original problem and root cause
+
+On `minion-26`, the CLI and API are separate installations. The CLI launcher
+`/home/draeician/.local/bin/ref` resolves into the dedicated service venv
+`/home/draeician/.local/share/ref-services/ref-api/bin/ref`; a separate pipx
+`ref-cli` install also exists. `ref-api.service` runs
+`.../ref-services/ref-api/bin/ref-api --host 0.0.0.0 --port 8000`.
+
+The old `ref --upgrade` assumed the running Python environment contained
+`pipx_metadata.json`. In the service venv it does not, so the command printed
+`Install source: not detected as a pipx venv.` The old command also had an
+automatic `perform_upgrade()` path that ran pipx upgrades/injection and restarted
+systemd, contrary to the required read-only contract.
+
+## 2. Implementation summary
+
+- Removed automatic installation/upgrade/injection/service-restart execution.
+- `ref --upgrade` now resolves the running executable, symlink target,
+  interpreter and environment, then reads `ref_cli-*.dist-info`, `METADATA`,
+  PEP 610 `direct_url.json`, `INSTALLER`, and `_version.py`.
+- Independently enumerates pipx installs from `PIPX_HOME`, XDG data home and
+  conventional pipx homes; it does not assume pipx owns the PATH executable and
+  works without a `pipx` executable.
+- Parses `ref-api.service` `ExecStart`, identifies the service venv/interpreter,
+  installed version/revision/source, and whether CLI/API share an environment.
+- Queries GitHub once for the default branch and latest commit SHA without
+  credentials. Handles unavailable, timeout, rate limit, malformed responses,
+  unknown provenance, editable/uncommitted source, and abbreviated SHAs.
+- Prints per-installation status, pinned Git upgrade commands, `[api]`
+  preservation for service environments, restart requirements, verification
+  commands, and rollback guidance.
+- Claims `current` only when a revision comparison supports it. Prints
+  `Nothing to do` when both installations match GitHub, and addresses only the
+  outdated installation when they differ.
+- `--upgrade` is dispatched before archive bootstrap/migration. CLI import skips
+  `~/references/logs` file handlers for `--upgrade`, so it writes no application
+  data.
+
+## 3. Files changed
+
+- `src/ref_cli/upgrade.py` — read-only topology detection, GitHub check,
+  comparison, instructions, verification, rollback.
+- `src/ref_cli/cli.py` — read-only dispatch/help and read-only logging mode.
+- `tests/test_upgrade.py` — 37 regression tests, including real `cli.main()`
+  dispatch and no-mutation assertions.
+- `README.md` — read-only behavior and split-environment upgrade/restart guidance.
+- `.codex/tasks/b1255911-upgrade-instructions-detection.md` — task record.
+- `HANDOFF.md` — this section.
+
+## 4. Architectural decisions (Decision Journal)
+
+1. Detection performs **no subprocess calls**; it reads pipx metadata, dist-info,
+   PEP 610, and the systemd unit directly.
+2. The running environment is derived from the interpreter/executable, not from
+   whichever `ref` is first on PATH.
+3. pipx and dedicated service venvs are inspected independently; a service venv
+   is never assumed to be pipx-managed.
+4. A PyPI-only or unknown-provenance install is `unknown`, never falsely
+   `current`.
+5. Dedicated service upgrades use the service venv's own Python and retain
+   `ref-cli[api]`.
+6. A local wheel/artifact is not treated as a source repository; missing upstream
+   provenance is stated explicitly.
+7. Service restart is recommended only when the environment used by
+   `ref-api.service` changes.
+8. This repo has no `.codex/tasks/wip/` or `review/`; task `3c9a71d4` documents
+   the hash-file convention, so review state is recorded in the task file.
+
+## 5. Read-only host-specific result on minion-26
+
+The new reporter was run from the development venv with explicit read-only paths.
+It did not call pip, pipx or systemctl and changed nothing. It detected:
+
+- CLI environment: dedicated service venv; resolved executable symlink;
+  installed revision `80c6e3791`; GitHub main
+  `80c6e379106a73c047cd517e56207bc62d558d7f`; status `current`.
+- Separate pipx `ref-cli`: source `git+https://github.com/draeician/ref`;
+  installed revision `80c6e3791`; status `current`.
+- `ref-api`: same environment as CLI; service `ExecStart` correctly identified;
+  status `current`.
+
+Both installations are current, so the command prints no reinstall steps.
+
+## 6. Exact verification commands and results
+
+Development environment: `/tmp/opencode/ref-venv` (Python 3.14.4, editable
+`.[api,test]`, local-only ruff/build). No global package installs.
+
+| Command | Exit | Result |
+|---|---:|---|
+| `/tmp/opencode/ref-venv/bin/python -m pytest -q` | 0 | **566 passed, 1 warning in 13.67s** |
+| `... -m pytest -q tests/test_upgrade.py tests/test_cli_api_routing.py tests/test_url_dump_api_cli.py tests/test_server_install.py` | 0 | **74 passed, 1 warning in 2.05s** |
+| `/tmp/opencode/ref-venv/bin/ruff check --select F,E9,ISC src/ref_cli/upgrade.py tests/test_upgrade.py` | 0 | All checks passed |
+| `/tmp/opencode/ref-venv/bin/python -m compileall -q src get_transcript.py` | 0 | Clean |
+| `/tmp/opencode/ref-venv/bin/python -c "import ref_cli.cli, ref_cli.upgrade, ref_api.server"` | 0 | Imports OK |
+| `/tmp/opencode/ref-venv/bin/python -m build --outdir /tmp/opencode/ref-dist` | 0 | Wheel + sdist built |
+| isolated wheel smoke install with `[api]` | 0 | `ref --version` exit 0 |
+| isolated fresh-HOME `ref --upgrade` | 0 | Exit 0; **0 files written to fresh HOME** |
+| `git diff --check` | 0 | Clean |
+| secret scan of changed files | 0 | Only non-secret variable names; no credentials |
+
+No repo-configured ruff/flake8/mypy gate exists. A full default ruff pass reports
+pre-existing legacy `cli.py` issues unrelated to this change; targeted
+changed-file checks pass.
+
+## 7. Failed checks and unresolved limitations
+
+- No required check failed.
+- PyPI-only installs without a SHA or `direct_url.json` remain `unknown`.
+- Local wheel artifacts cannot reveal their upstream repository; output states
+  this and offers only a conditional SHA-pinned Git reinstall.
+- Editable installs compare the recorded commit but not uncommitted changes.
+- GitHub network failure/rate limiting/timeout degrades status to `unknown`.
+- The old production binary still contains the mutating implementation until this
+  branch is reviewed and separately deployed. Do not run the old
+  `ref --upgrade` in production.
+
+## 8. Installation compatibility findings
+
+Confirmed by read-only inspection on `minion-26`: CLI launcher symlink into a
+dedicated service venv, separate pipx VCS install, dedicated service venv with
+PEP 610 artifact provenance, user systemd unit with an explicit `ExecStart`, and
+identical CLI/API revision `80c6e3791`. Missing metadata, corrupt pipx metadata,
+PyPI, local repository, editable, local wheel, missing pipx executable, missing
+service, unreadable unit, GitHub failure/rate limit/timeout, abbreviated SHAs,
+split versions, current-both, only-one-outdated, unknown provenance, `[api]`
+retention, and no-mutation behavior are covered by tests.
+
+## 9. Git, push, and task status
+
+- Branch: `fix/upgrade-instructions-detection`
+- Application/test commit: `39d7b3510d6d5da63d31b37fa424ce52d294995f`
+- Task status: IN-REVIEW; task record at
+  `.codex/tasks/b1255911-upgrade-instructions-detection.md`
+- No merge, deployment, production package change, virtualenv modification, pipx
+  mutation, `ref-api` restart, or host configuration change occurred.
+
+## 10. Final branch head and push verification
+
+This documentation commit is pushed to the same feature branch. The exact remote
+head is verified after push and reported to Drae; the application/test commit is
+`39d7b3510d6d5da63d31b37fa424ce52d294995f`. See the delivery message for the
+verified final remote SHA.
+
+## 11. Exactly one next step
+
+Reviewer inspects the pushed branch, task record, HANDOFF, diff and test evidence;
+then authorizes or declines a separately scoped merge/deployment. Do not merge or
+deploy under this task.
