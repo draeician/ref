@@ -149,12 +149,22 @@ every subcommand.
 
 ## Outstanding deployment steps (separately authorized, do not run here)
 
-1. Back up and correct the live `~/.config/local-transcribe/config.yaml`
-   `queue.path` and `expected_uuid` to the production queue identity.
-2. Upgrade the installed `lt` on `minion-26` from 0.7.0 to `local_transcribe/main`
-   (0.8.1+) so the Deno probe is download-path only.
+1. Back up and correct the live `~/.config/local-transcribe/config.yaml`:
+   `cp ~/.config/local-transcribe/config.yaml ~/.config/local-transcribe/config.yaml.bak-$(date -u +%Y%m%dT%H%M%SZ)`,
+   then set `queue.path` to
+   `/opt/md2/music/youtube/transcripts/transcription-queue` and
+   `expected_uuid` to `8c6fc098-8cbe-41ae-9689-dd759797a582`. Keep
+   `expected_nfs_version: 3` for the fail-closed worker guard.
+2. Upgrade the installed `lt` on `minion-26` from 0.7.0 (`25b89f1`) to
+   `local_transcribe/main` (0.8.1 at `b3cf22e` or newer) so the Deno probe is
+   download-path only. Exact pipx command:
+   `pipx install --force 'git+https://github.com/draeician/local_transcribe.git@b3cf22ee5da337fab9dcd37fb97506f5beab012b'`
+   (or `pipx install --force .` from a checked-out, verified `main`).
+   Verify with `lt --version` and
+   `lt queue path --queue-dir /opt/md2/music/youtube/transcripts/transcription-queue`.
 3. Restart `ref-api.service` and verify a controlled enqueue against the real
-   queue.
+   queue (one deliberately chosen URL; confirm a pending execution and no Deno
+   warning).
 4. Recover any `transcript-pending.md` entries with `ref --transcript` after the
    queue is healthy.
 
