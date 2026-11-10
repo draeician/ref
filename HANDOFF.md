@@ -9,6 +9,48 @@
 **Authorized local_transcribe:** `b3cf22ee5da337fab9dcd37fb97506f5beab012b`
 **Task record:** `.codex/tasks/review/7d2c9e41-deploy-remote-api-queue-fix.md`
 
+## NFSv3 producer cutover readiness preflight (task 19294572)
+
+- **Report:** `docs/investigations/nfs-v3-cutover-readiness.md`
+- **Task:** `.codex/tasks/review/19294572-nfs-v3-producer-cutover-preflight.md`
+  (State **REVIEW**; no cutover executed).
+- **Worker liveness (aether): PASS.** Fresh PID `1011088` matches
+  `worker.lock`/`state.json`; one service, one process, one NLM lock; heartbeat
+  advanced `16:24:07 → 16:32:53` and the claimed execution changed
+  `104072e0… → fe513590…`; completed advanced 5710 → 5711. Heartbeat is
+  claim-driven, so the old 2026-11-07 value is explained by an idle/old worker,
+  not a stuck one. The Oct-15 zero-byte `.tmp` is a harmless orphan (its
+  execution completed 2026-10-19); do not delete it.
+- **Worker stability caveat:** a GPU illegal-memory-access core-dump at
+  `2026-11-10 14:29:45` caused a systemd restart (`NRestarts=14`); the worker
+  recovered the in-flight job. Repeated `'transcript' is empty` failures were
+  also observed. Live, but not proven stable.
+- **Producer preflight (minion-26):** `/health` ok at
+  `1.6.12b1.dev157+gce7329976`; `ref-api` active with `NRestarts=0`; `lt` 0.8.1
+  from pipx git commit `b3cf22e`; queue UUID
+  `8c6fc098-8cbe-41ae-9689-dd759797a582` and `queue.id` hash `28998c9e…`; NFSv4.2
+  `/opt/md2` healthy; server NFSv3 export available to `192.168.22.0/24`;
+  `/mnt/ref-queue-v3` absent/free; 1.1T free / 2% inodes; passwordless sudo
+  unavailable; queue ACL is NFSv4 (`+`) and v3 ACL mapping is unverified.
+- **Queue state (OBSERVED, unexplained):** `1,373` pending, all `origin=ref`,
+  `priority=20`; completed 5711, failed 206, cancelled 670, keys 9770;
+  `transcript-pending.md` is present again (529 lines, sha256
+  `a7c3c5e3…`). This appeared after the 2026-11-09 baseline (`pending=0`) and
+  was not created by this preflight. Do not replay or delete it here.
+- **Recommendation:** **GO** for authorized mount installation and post-mount
+  validation; **NO-GO for the canary now** because a ref-produced canary
+  (`priority=20`) sorts behind 1,373 same-priority jobs, the worker has recent
+  GPU core-dumps/empty-transcript failures, and v3 ACL access is unverified.
+  Canary becomes **conditional GO** after a backlog/priority authorization, a
+  stability window, v3 ACL write validation, and fresh liveness checks.
+- **Rollback:** take fresh backups immediately before any change; never use the
+  2026-11-09 `local-transcribe.config.yaml.before` (stale
+  `/tmp/lt-smoke-queue-59553` / `6a058908-116f-41c9-987f-d5f4ef38667e`).
+  Ordered rollback is in the report §7.
+- **Unchanged:** `queue.expected_uuid` and `expected_nfs_version: 3`;
+  `/opt/md2` and the aether worker mount are not modified.
+- **Deployment task `7d2c9e41` remains in review/ with State REVIEW.**
+
 ## NFS investigation documentation merge closure (PR #37)
 
 - Approved head: `02402f3551c947f0a7762fcce776108158b85307`.
