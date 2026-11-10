@@ -9,6 +9,38 @@
 **Authorized local_transcribe:** `b3cf22ee5da337fab9dcd37fb97506f5beab012b`
 **Task record:** `.codex/tasks/review/7d2c9e41-deploy-remote-api-queue-fix.md`
 
+## NFS investigation documentation merge closure (PR #37)
+
+- Approved head: `02402f3551c947f0a7762fcce776108158b85307`.
+- Pre-merge exact-head CI: workflow `tests`, run `42754666584`, **success**.
+- PR #37 merged with a **normal merge commit**:
+  `5431afbe20b2712d587477f367cab690778a40c0` (parents `6b77a85…` and
+  `02402f3…`). No squash, rebase, force-push, or direct `main` commit.
+- Post-merge `main` CI: workflow `tests`, run `42842666520`, head `5431afb…`,
+  **success**.
+- Final `main` after this merge: `5431afbe20b2712d587477f367cab690778a40c0`
+  (`6b77a85…` plus the docs-only PR #37, including both approved commits
+  `0d0b587…` and `02402f3…`).
+- Documentation-only diff: `HANDOFF.md` and
+  `docs/investigations/2026-11-10-nfs-producer-mount-investigation.md`.
+- Local `docs/nfs-producer-investigation` and its remote tracking ref were
+  deleted after merge; refs pruned. Unrelated remote branches
+  (`docs/unified-ref-consolidation-plan`, `fix/youtube-auto-show-notes-api`) were
+  preserved.
+- Task `7d2c9e41` remains in `.codex/tasks/review/` with State **REVIEW**; the
+  deployment is not DONE while the blockers below remain.
+
+### Outstanding work preserved after this merge
+
+This merge is documentation/evidence only. The following remain outstanding and
+require separate production authorization:
+
+1. Dedicated NFSv3 producer mount not implemented.
+2. Worker heartbeat/liveness still unresolved (stale `2026-11-07` heartbeat).
+3. Canary not executed.
+4. nomnom not upgraded (SSH/pipx deployment outstanding).
+5. Historical transcript recovery still outstanding.
+
 ## Documentation merge closure (PR #35)
 
 - Approved head: `cc810656ed85905218ef984160c76c0331452901`.
