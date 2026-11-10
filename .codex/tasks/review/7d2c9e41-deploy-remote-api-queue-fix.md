@@ -214,3 +214,19 @@ Rollback:
 - No nomnom change (access blocker).
 - No queue.id change, queue purge, job deletion/rewrite, bulk replay, worker
   install/relocation, or archive rewrite.
+
+## Stabilization closure note (2026-11-10)
+
+- This task remains in `.codex/tasks/review/` with State **REVIEW**; it is not
+  DONE.
+- The proposed additional NFSv3 producer mount is **cancelled, superseded, and
+  not authorized**. Keep the existing NFSv4.2 producer mount on `minion-26` and
+  the existing NFSv3/NLM worker mount on `aether`; do not install
+  `/mnt/ref-queue-v3`; preserve the shared queue UUID
+  `8c6fc098-8cbe-41ae-9689-dd759797a582`; do not weaken NFS/NLM safety
+  validation.
+- Remaining blockers are unchanged: canary/backlog authorization, worker
+  stability, cross-protocol producer safety audit, remote-client deployment, and
+  historical transcript recovery.
+- No production mount, configuration edit, service restart, queue write, canary,
+  or backlog replay was performed by this closure.

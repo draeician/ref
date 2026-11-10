@@ -2,13 +2,28 @@
 
 - **Date:** 2026-11-10 (UTC)
 - **Task:** `19294572` — NFSv3 producer cutover readiness preflight
+  (`.codex/tasks/done/19294572-nfs-v3-producer-cutover-preflight.md`, State
+  **DONE**)
 - **Related deployment task:** `7d2c9e41` (remains in `.codex/tasks/review/`,
   State `REVIEW`; ownership unchanged)
-- **Branch:** `ops/nfs-v3-producer-preflight`
+- **Branch:** `ops/nfs-v3-producer-preflight` (merged and deleted)
 - **Base:** `origin/main` = `2cf3e9c755004be5a1072e7f38c6cfe613efe0e2`
-- **Status:** Preflight complete; **no cutover executed**
+- **Status:** Historical preflight complete; **no cutover executed**. The
+  proposed additional NFSv3 producer mount is **superseded and not authorized**
+  (2026-11-10 stabilization closure).
 - **Scope:** Live **read-only** verification on `aether` and `minion-26`, plus a
-  proposed cutover, rollback, and canary plan.
+  proposed cutover, rollback, and canary plan. Historical evidence only.
+
+> **Status update — 2026-11-10 stabilization closure: SUPERSEDED / NOT AUTHORIZED.**
+>
+> The proposed additional NFSv3 producer mount/cutover is cancelled. Keep the
+> existing NFSv4.2 producer mount on `minion-26` and the existing NFSv3/NLM
+> worker mount on `aether`; do not install `/mnt/ref-queue-v3`; preserve the
+> shared queue UUID `8c6fc098-8cbe-41ae-9689-dd759797a582`; do not weaken NFS/NLM
+> safety validation. The observations, gate design, rollback, and canary plan
+> below are retained as historical evidence only. Cross-protocol producer safety
+> remains unproven and requires a separate **read-only** audit. No mount or
+> canary is authorized.
 
 ## Evidence labels
 
@@ -45,7 +60,10 @@ restarted by systemd (`NRestarts=14`), and recovered the in-flight job. It has
 also logged repeated `TranscriptPublishError: 'transcript' is empty` failures.
 Liveness is therefore established, but **stability is not guaranteed**.
 
-### Cutover readiness — GO, conditional
+### Cutover readiness — GO, conditional (SUPERSEDED — not authorized)
+
+**Historical assessment only.** The 2026-11-10 stabilization closure cancels the
+proposed additional NFSv3 producer mount; do not install `/mnt/ref-queue-v3`.
 
 The dedicated NFSv3 producer mount is technically feasible:
 
@@ -1473,14 +1491,15 @@ verified, and `/opt/md2` identity matches.
 | Decision | Result |
 | --- | --- |
 | Worker liveness | **GO / PASS** — fresh PID/lock, heartbeat advanced, active claims, one worker, harmless `.tmp`. |
-| Mount installation (authorized) | **GO, conditional** — NFSv3 export available, path free, client supports v3; requires sudo, fresh backups, unit review, and post-mount ACL validation. |
+| Mount installation | **SUPERSEDED — not authorized.** The 2026-11-10 stabilization closure cancels the proposed additional NFSv3 producer mount. |
 | Canary now | **NO-GO** — 1,373 same-priority backlog, recent GPU crash/restarts, empty-transcript failures, and unverified v3 ACL. |
-| Canary after conditions | **CONDITIONAL GO** — after backlog/priority authorization, a stability window, v3 ACL write validation, and fresh liveness checks. |
+| Canary after conditions | **NOT AUTHORIZED** — the closure authorizes no canary; any future proposal needs separate authorization. |
 
-**Recommended next action:** authorize the mount installation and post-mount
-read-only/ACL validation only; keep the canary blocked until the backlog/priority
-decision and worker-stability observation are complete. Do not change
-`queue.expected_uuid` or `expected_nfs_version: 3`.
+**Closure decision:** keep the existing NFSv4.2 producer mount on `minion-26` and
+the NFSv3/NLM worker mount on `aether`; do not install `/mnt/ref-queue-v3`; do
+not weaken NFS/NLM safety validation; preserve the shared queue UUID
+`8c6fc098-8cbe-41ae-9689-dd759797a582`. Cross-protocol producer safety remains
+unproven and requires a separate **read-only** audit.
 
 **No canary is authorized by this correction.** The `1,373`-job backlog, recent
 GPU instability, and unverified NFSv3 permissions remain unresolved; the NO-GO
@@ -1552,3 +1571,19 @@ wc -l /opt/md2/music/youtube/transcripts/transcript-pending.md
 # Unit name
 systemd-escape --path --suffix=mount /mnt/ref-queue-v3
 ```
+
+---
+
+## 11. Stabilization closure (2026-11-10)
+
+The proposed additional NFSv3 producer mount is **cancelled, superseded, and not
+authorized**. No `/mnt/ref-queue-v3` mount was installed.
+
+- Keep the existing NFSv4.2 producer mount on `minion-26`.
+- Keep the existing NFSv3/NLM worker mount on `aether`.
+- Preserve the shared queue UUID `8c6fc098-8cbe-41ae-9689-dd759797a582`.
+- Do not weaken NFS/NLM safety validation.
+- Do not execute the proposed cutover, rollback, or canary procedures in this
+  document; they are retained as historical evidence only.
+- Cross-protocol producer safety remains unproven and requires a separate
+  **read-only** audit. This closure does not claim it has been demonstrated.
