@@ -49,8 +49,9 @@
   Capture the exact original `ref-api.service` unit, its effective
   `FragmentPath`/`DropInPaths`/`ExecStart`, and the (currently none) drop-ins.
   Rollback restores that unit so the only `ExecStartPre` is
-  `/usr/bin/mountpoint -q /opt/md2`, removes the new v3 gate/`ref-queue-v3`
-  dependency, reloads **both** managers (`systemctl --user daemon-reload` and
+  `/usr/bin/mountpoint -q /opt/md2`, restores the original queue paths, removes
+  the new v3 gate/`ref-queue-v3` dependency and dedicated mount, reloads
+  **both** managers (`systemctl --user daemon-reload` and
   `sudo systemctl daemon-reload`), verifies the effective unit with
   `systemctl --user cat`/`show`, then restarts and validates against the original
   `/opt/md2` queue. Ordered procedure is report §7.
@@ -60,8 +61,11 @@
   `mountvers=3`/`proto=tcp`/`hard`/`local_lock=none`, source
   `depot.draeician.com:/mnt/tank/md2`, `queue.id` hash `28998c9e…`, UUID
   `8c6fc098…`, and producer read/search/write access. Missing or mismatched
-  values prevent the API from starting. This gate supersedes the earlier
-  mountpoint-only suggestion in the merged investigation.
+  values prevent the API from starting. After editing the user unit, the cutover
+  must run `systemctl --user daemon-reload` and verify the effective two
+  `ExecStartPre` lines with `systemctl --user cat`/`show` before restarting.
+  This gate supersedes the earlier mountpoint-only suggestion in the merged
+  investigation.
 - **Canary NO-GO preserved:** this correction does **not** authorize a canary;
   the 1,373-job backlog, GPU instability, and unverified NFSv3 permissions remain
   unresolved.

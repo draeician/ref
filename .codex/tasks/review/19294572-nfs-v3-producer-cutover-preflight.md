@@ -74,4 +74,11 @@ plan:
   unit, then restarts and validates against the original `/opt/md2` queue.
 - §5.4 now defines a fail-closed `ref-queue-v3-gate` that validates target,
   source, NFS protocol/options, UUID/hash, and permissions before API start.
+  It also requires `systemctl --user daemon-reload` after editing the user unit,
+  followed by `systemctl --user cat`/`show` verification of the effective two
+  `ExecStartPre` lines before any restart.
+- §7 ordering is explicit: stop `ref-api`; restore the exact service unit/drop-ins
+  and original queue paths; remove the dedicated mount; reload both managers;
+  verify the effective unit; then restart and validate against the original
+  `/opt/md2` queue.
 - Canary NO-GO is unchanged; no authorization is implied.

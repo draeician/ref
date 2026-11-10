@@ -905,6 +905,24 @@ ExecStartPre=/usr/bin/mountpoint -q /opt/md2
 ExecStartPre=/home/draeician/.local/bin/ref-queue-v3-gate
 ```
 
+After editing `~/.config/systemd/user/ref-api.service` (or adding a drop-in that
+changes it), reload the **user** manager and verify the effective unit before
+restarting the API:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user cat ref-api.service
+systemctl --user show ref-api.service \
+  -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles
+```
+
+`cat` must show exactly two `ExecStartPre` lines in order: the original
+`/usr/bin/mountpoint -q /opt/md2` first, then
+`/home/draeician/.local/bin/ref-queue-v3-gate`. `show` must retain the original
+`FragmentPath`, `ExecStart`, and `EnvironmentFiles`, and `DropInPaths` must be
+empty (or exactly the original drop-ins). Do not restart `ref-api` until the
+reloaded effective unit is verified and the gate exits 0.
+
 Both lines run in order; either failure prevents `ref-api` from starting on a
 wrong filesystem or wrong queue identity. If the gate script is missing, systemd
 fails the start (fail closed). Keep `Restart=on-failure`; a missing/mismatched
@@ -1218,20 +1236,7 @@ queue.
    `ExecStartPre=/usr/bin/mountpoint -q /opt/md2`; it must **not** contain
    `ref-queue-v3-gate` or any `/mnt/ref-queue-v3` dependency.
 
-3. **Reload the user manager and verify the effective unit**:
-   ```bash
-   systemctl --user daemon-reload
-   systemctl --user cat ref-api.service
-   systemctl --user show ref-api.service \
-     -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles
-   ```
-   Verify with `cat` that the only `ExecStartPre` is the original
-   `/usr/bin/mountpoint -q /opt/md2` (there is no `ref-queue-v3-gate` line), and
-   with `show` that `FragmentPath`/`DropInPaths`/`EnvironmentFiles` match
-   `$BK/ref-api.service.show.before`. If `DropInPaths` was empty before, it must
-   be empty again.
-
-4. **Restore the original queue paths**:
+3. **Restore the original queue paths**:
    ```bash
    cp -p "$BK/ref-api.env.before" "$HOME/.config/ref/ref-api.env"
    cp -p "$BK/local-transcribe.config.yaml.before" "$HOME/.config/local-transcribe/config.yaml"
@@ -1242,23 +1247,32 @@ queue.
    UUID `8c6fc098-8cbe-41ae-9689-dd759797a582`,
    `expected_nfs_version: 3`.
 
-5. **Remove the dedicated mount safely** (ref-api is already stopped):
+4. **Remove the dedicated mount safely** (ref-api is already stopped):
    ```bash
    sudo systemctl stop 'mnt-ref\x2dqueue\x2dv3.mount'    # or umount /mnt/ref-queue-v3
    sudo systemctl disable 'mnt-ref\x2dqueue\x2dv3.mount'
    sudo rm -f '/etc/systemd/system/mnt-ref\x2dqueue\x2dv3.mount'
-   sudo systemctl daemon-reload
    findmnt /mnt/ref-queue-v3 && echo "STILL MOUNTED: STOP" || echo "unmounted"
    ```
    Do not remove `/opt/md2`, its fstab entry, or the aether worker mount.
 
-6. **Reload both relevant managers** (idempotent safety after steps 3 and 5):
+5. **Reload both relevant managers** after the service, path, and mount changes:
    ```bash
    systemctl --user daemon-reload
    sudo systemctl daemon-reload
    ```
-   Re-verify the user unit with `systemctl --user cat ref-api.service` and
-   `systemctl --user show ref-api.service -p FragmentPath -p DropInPaths -p ExecStart`.
+
+6. **Verify the reloaded effective unit**:
+   ```bash
+   systemctl --user cat ref-api.service
+   systemctl --user show ref-api.service \
+     -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles
+   ```
+   Verify with `cat` that the only `ExecStartPre` is the original
+   `/usr/bin/mountpoint -q /opt/md2` (there is no `ref-queue-v3-gate` line), and
+   with `show` that `FragmentPath`/`DropInPaths`/`EnvironmentFiles` match
+   `$BK/ref-api.service.show.before`. If `DropInPaths` was empty before, it must
+   be empty again.
 
 7. **Verify `/opt/md2` health and identity**:
    ```bash
@@ -1302,10 +1316,10 @@ queue.
     canary evidence for review.
 
 Service stop/start boundaries: stop `ref-api` before any service/path/mount
-change; restore the service unit and reload the **user** manager before
-restarting; remove the mount and reload the **system** manager before restarting;
-start only after the v3 mount is gone, the original `ExecStartPre` is verified,
-and `/opt/md2` identity matches.
+change; restore the service unit and paths, remove the mount, then reload both
+the **user** and **system** managers; verify the effective user unit with `cat`
+and `show`; start only after the v3 mount is gone, the original `ExecStartPre` is
+verified, and `/opt/md2` identity matches.
 
 ---
 
@@ -1397,14 +1411,23 @@ ls -la ~/.config/systemd/user/ref-api.service.d 2>&1
 lt queue path --queue-dir "$Q"
 lt queue doctor --queue-dir "$Q"
 
-# Service snapshot / effective-unit verification / both-manager reload
+# Service snapshot (before cutover)
 cp -p ~/.config/systemd/user/ref-api.service "$BK/ref-api.service.unit.before"
 systemctl --user cat ref-api.service > "$BK/ref-api.service.cat.before"
 systemctl --user show ref-api.service -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles > "$BK/ref-api.service.show.before"
+
+# Cutover user-service change: edit the unit to add the gate, then reload/verify
 systemctl --user daemon-reload
-sudo systemctl daemon-reload
+systemctl --user cat ref-api.service
+systemctl --user show ref-api.service -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles
 grep -E '^ExecStartPre=' "$BK/ref-api.service.cat.before"
 grep -E '^DropInPaths=' "$BK/ref-api.service.show.before"
+
+# Rollback / mount teardown: after restoring the unit/paths and removing the mount
+systemctl --user daemon-reload
+sudo systemctl daemon-reload
+systemctl --user cat ref-api.service
+systemctl --user show ref-api.service -p FragmentPath -p DropInPaths -p ExecStart
 
 # Counts and baselines
 for d in pending processing retry completed failed cancelled; do printf '%s=%s\n' "$d" "$(ls "$Q/$d" | wc -l)"; done
