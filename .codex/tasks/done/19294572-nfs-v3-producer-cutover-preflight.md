@@ -2,12 +2,14 @@
 
 - **Task ID:** `19294572`
 - **Owner:** OpenCode
-- **State:** REVIEW
-- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/review/` (preflight complete; cutover not executed).
-- **Branch:** `ops/nfs-v3-producer-preflight`
+- **State:** DONE
+- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/done/` (preflight complete; cutover not executed; proposed mount superseded).
+- **Branch:** `ops/nfs-v3-producer-preflight` (merged and deleted)
 - **Base:** `origin/main` = `2cf3e9c755004be5a1072e7f38c6cfe613efe0e2`
 - **Related deployment task:** `7d2c9e41` (remains in `.codex/tasks/review/`, State `REVIEW`; ownership unchanged)
 - **Deliverable:** `docs/investigations/nfs-v3-cutover-readiness.md`
+- **Outcome:** Preflight complete; the proposed additional NFSv3 producer mount is
+  superseded and not authorized; no production change was performed.
 - **Authorization:** Live **read-only** verification and a documented cutover plan.
   No mount/remount, service restart, queue or archive write, production config
   edit, canary, or main merge.
@@ -98,3 +100,22 @@ plan:
   or overwrites unrelated drop-ins; the §5.7 drop-in copy is evidence only.
 - Prior service backups, reload/verification ordering, startup checks, and canary
   NO-GO are preserved.
+
+## Completion — stabilization closure (2026-11-10)
+
+- Deliverable merged via PR #39. Approved head
+  `792478b530bf5826799025faa49d2aacb5cd53eb`; pre-merge CI workflow `tests`, run
+  `42915544619`, **success**.
+- PR #39 merged with normal merge commit
+  `df662a65e953e522b5d350183d2090385f8019ab` (parents `2cf3e9c…` and
+  `792478b…`). Post-merge `main` CI workflow `tests`, run `42916787616`,
+  **success**.
+- Closure evidence recorded in PR #40 (head `756f553…`; merge
+  `b9bbffac64ff84f4c25ecd5053c03eb6d25d4d96`; final `main` CI run `42917143613`,
+  **success**).
+- The stabilization closure supersedes and does **not** authorize the proposed
+  additional NFSv3 producer mount. No mount was installed, and no production
+  change was performed.
+- State changed from `REVIEW` to `DONE` for preflight completion only. Deployment
+  task `7d2c9e41` remains in `review/` with State `REVIEW` until its production
+  acceptance criteria are satisfied or it is formally superseded.

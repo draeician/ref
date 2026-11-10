@@ -9,11 +9,58 @@
 **Authorized local_transcribe:** `b3cf22ee5da337fab9dcd37fb97506f5beab012b`
 **Task record:** `.codex/tasks/review/7d2c9e41-deploy-remote-api-queue-fix.md`
 
-## NFSv3 producer cutover readiness preflight (task 19294572)
+## Stabilization closure — final architecture decision (2026-11-10)
 
-- **Report:** `docs/investigations/nfs-v3-cutover-readiness.md`
-- **Task:** `.codex/tasks/review/19294572-nfs-v3-producer-cutover-preflight.md`
-  (State **REVIEW**; no cutover executed).
+- **Housekeeping task:** `.codex/tasks/review/8bc15624-close-stabilization-round.md`
+  (State **REVIEW**; documentation and task lifecycle only).
+- **Decision:** the proposed additional NFSv3 producer mount for `minion-26` is
+  **cancelled, superseded, and not authorized**.
+- **Retained:** the existing NFSv4.2 producer mount on `minion-26` and the
+  existing NFSv3/NLM worker mount on `aether`. Do not install
+  `/mnt/ref-queue-v3`.
+- **Preserved:** the shared queue path and UUID
+  `8c6fc098-8cbe-41ae-9689-dd759797a582`; do not weaken NFS/NLM safety
+  validation.
+- **Not proven:** cross-protocol producer safety. A separate **read-only** audit
+  is required before any future proposal; this closure does not claim it has been
+  demonstrated.
+- **Historical evidence preserved:** both NFS investigation documents retain
+  their observations, commands, and proposed procedures, now marked superseded
+  at the top.
+- **No production action:** no mount, configuration edit, service restart,
+  queue/archive write, canary, or backlog replay was performed by this closure.
+
+### Branch audit (2026-11-10)
+
+| Branch | Classification | Action |
+| --- | --- | --- |
+| `main` | Canonical; `b9bbffa` equals `origin/main` | Keep |
+| `docs/unified-ref-consolidation-plan` | Open draft PR #29; 3 commits ahead / 44 behind; not merged | Preserve |
+| `fix/youtube-auto-show-notes-api` | Unmerged divergent work; 6 commits ahead / 144 behind; no PR; all six commits absent from `main` | Preserve pending separate review |
+
+No merged housekeeping branch was eligible for deletion. Neither preserved
+branch is authorization to merge or delete it.
+
+### Remaining work (follow-ups only, not authorization)
+
+1. Run a separate **read-only** audit of cross-protocol producer safety; do not
+   claim it has been proven.
+2. Investigate the origin of the 1,373 pending `origin=ref`, `priority=20` jobs.
+3. Investigate the recreated 529-line `transcript-pending.md`; do not replay or
+   delete it.
+4. Track worker GPU crashes/core-dumps and empty-transcript failures.
+5. Complete the outstanding remote-client deployment, including nomnom access.
+6. Design a safe historical transcript recovery path; no bulk replay.
+7. Review existing unrelated GitHub issues (#17, #12, #4, #3) and draft PR #29
+   separately.
+
+## NFSv3 producer cutover readiness preflight (task 19294572 — historical)
+
+- **Report:** `docs/investigations/nfs-v3-cutover-readiness.md` (historical;
+  proposed mount superseded and not authorized).
+- **Task:** `.codex/tasks/done/19294572-nfs-v3-producer-cutover-preflight.md`
+  (State **DONE**: preflight complete; no cutover executed, and the proposed
+  mount is superseded).
 - **Worker liveness (aether): PASS.** Fresh PID `1011088` matches
   `worker.lock`/`state.json`; one service, one process, one NLM lock; heartbeat
   advanced `16:24:07 → 16:32:53` and the claimed execution changed
@@ -92,16 +139,19 @@
   `df662a65e953e522b5d350183d2090385f8019ab`.
 - Documentation-only diff: `HANDOFF.md`,
   `docs/investigations/nfs-v3-cutover-readiness.md`, and
-  `.codex/tasks/review/19294572-nfs-v3-producer-cutover-preflight.md`.
+  `.codex/tasks/review/19294572-nfs-v3-producer-cutover-preflight.md` (the task
+  was later moved to `done/` by the stabilization closure).
 - The PR includes the exact-token fail-closed startup gate, negative
   protocol/option tests, scoped rollback that preserves unrelated drop-ins, and
   the preserved canary **NO-GO**.
 - Local and remote `ops/nfs-v3-producer-preflight` deleted after merge; tracking
   refs pruned. Unrelated branches (`docs/unified-ref-consolidation-plan`,
   `fix/youtube-auto-show-notes-api`) preserved.
-- Tasks `19294572` and `7d2c9e41` remain in `.codex/tasks/review/` with State
-  **REVIEW**; deployment is not DONE. No production mount, config edit, service
-  restart, queue write, canary, or backlog replay was performed.
+- At the time of that merge, tasks `19294572` and `7d2c9e41` remained in
+  `.codex/tasks/review/` with State **REVIEW**. The stabilization closure later
+  completed `19294572`; `7d2c9e41` remains in `review/`. Deployment is not DONE.
+  No production mount, config edit, service restart, queue write, canary, or
+  backlog replay was performed.
 - This closure PR records merge evidence only and changes documentation only.
 
 ## NFS investigation documentation merge closure (PR #37)
@@ -1190,6 +1240,13 @@ systemd, contrary to the required read-only contract.
    `ref-api.service` changes.
 8. This repo has no `.codex/tasks/wip/` or `review/`; task `3c9a71d4` documents
    the hash-file convention, so review state is recorded in the task file.
+9. (2026-11-10, stabilization closure) The proposed additional NFSv3 producer
+   mount is **cancelled, superseded, and not authorized**. Keep the existing
+   NFSv4.2 producer mount on `minion-26` and the NFSv3/NLM worker mount on
+   `aether`; do not install `/mnt/ref-queue-v3`; preserve the shared queue UUID
+   `8c6fc098-8cbe-41ae-9689-dd759797a582`; do not weaken NFS/NLM safety
+   validation. Cross-protocol producer safety remains unproven and requires a
+   separate **read-only** audit.
 
 ## 5. Read-only host-specific result on minion-26
 

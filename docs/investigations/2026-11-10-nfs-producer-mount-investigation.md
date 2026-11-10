@@ -2,11 +2,23 @@
 
 - **Date:** 2026-11-10 (UTC)
 - **Task:** 7d2c9e41 — deployment/queue-producer investigation
-- **Status:** Investigation complete; implementation **not** performed
+- **Status:** Historical investigation; implementation **not** performed. The
+  proposed additional NFSv3 producer mount is **superseded and not authorized**
+  (2026-11-10 stabilization closure).
 - **Report owner:** Pi (documentation only)
 - **Related task record:** `.codex/tasks/review/7d2c9e41-deploy-remote-api-queue-fix.md`
 - **Scope:** Read-only NFS/mount and local-transcribe queue analysis. No host,
   mount, service, repository, or queue change is described as executed here.
+
+> **Status update — 2026-11-10 stabilization closure: SUPERSEDED / NOT AUTHORIZED.**
+>
+> The proposed additional NFSv3 producer mount is cancelled. Keep the existing
+> NFSv4.2 producer mount on `minion-26` and the existing NFSv3/NLM worker mount on
+> `aether`; do not install `/mnt/ref-queue-v3`; preserve the shared queue UUID
+> `8c6fc098-8cbe-41ae-9689-dd759797a582`; do not weaken NFS/NLM safety
+> validation. The historical observations, commands, and proposed procedures
+> below are retained as evidence only. Cross-protocol producer safety remains
+> unproven and requires a separate **read-only** audit.
 
 ## Evidence labels
 
@@ -34,9 +46,10 @@ non-secret queue settings are shown for operational reproducibility.
 - The producer enqueue path does **not** perform mount/NLM validation, so this
   is a diagnostic/guard mismatch rather than a broken mount. The worker host is
   correctly NFSv3 with `rpc.statd` and a held NLM lock.
-- The recommended remediation is a dedicated **NFSv3 producer mount** of the same
-  export, with the producer queue path pointed at that mount and the NFSv3 guard
-  preserved. This is **proposed**, not executed.
+- The historical recommended remediation was a dedicated **NFSv3 producer mount**
+  of the same export, with the producer queue path pointed at that mount and the
+  NFSv3 guard preserved. It was **proposed**, not executed, and is now
+  **superseded and not authorized** by the 2026-11-10 stabilization closure.
 
 ---
 
@@ -380,7 +393,10 @@ end-to-end.
 
 ---
 
-## 11. Recommended implementation (PROPOSED — not executed)
+## 11. Historical proposed implementation (SUPERSEDED — not authorized; not executed)
+
+**This section is retained as historical evidence. The proposed additional NFSv3
+producer mount is cancelled and is not authorized for installation.**
 
 ### Preferred: dedicated NFSv3 producer mount
 
@@ -578,7 +594,10 @@ Rollback steps:
 
 ---
 
-## 13. Canary acceptance criteria (PROPOSED)
+## 13. Canary acceptance criteria (HISTORICAL — not authorized)
+
+**The stabilization closure authorizes no canary. These criteria are retained as
+historical evidence and do not authorize a queue submission.**
 
 Before submission:
 
@@ -615,7 +634,8 @@ After submission (exactly one URL):
 
 ## 14. Remaining unknowns and blockers
 
-1. **No v3 producer mount was created or tested on minion-26.**
+1. **No v3 producer mount was created or tested on minion-26; the proposal is
+   now cancelled and not authorized.**
 2. **Producer NFS guard mismatch remains** (`expected_nfs_version: 3` vs
    minion-26 v4.2), so `lt queue path`/`doctor` fail the version check.
 3. **Canary not executed** — withheld under the deployment STOP rule; no queue,
@@ -640,9 +660,9 @@ After submission (exactly one URL):
    `6a058908-116f-41c9-987f-d5f4ef38667e`) and must not be used for rollback;
    fresh backups are required (§12).
 10. **The v3 mount unit remains illustrative and unauthorized** — no unit was
-    installed, enabled, or started; the escaped filename must be generated with
-    `systemd-escape` and the unit validated before any authorized activation
-    (§11).
+    installed, enabled, or started; the proposal is now cancelled. Do not install
+    `/mnt/ref-queue-v3`. Any future proposal requires a separate read-only
+    cross-protocol safety audit and explicit authorization (§11).
 
 ---
 
