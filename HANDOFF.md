@@ -3,11 +3,31 @@
 **Date:** 2026-11-09/10 (UTC)
 **Task ID:** `7d2c9e41`
 **Owner:** OpenCode
-**State:** REVIEW (deployment performed; canary and nomnom blocked)
-**Branch:** `ops/deploy-remote-api-queue-fix`
+**State:** REVIEW (deployment documentation merged; task not DONE)
+**Branch:** `ops/deploy-remote-api-queue-fix` (merged and deleted)
 **Authorized ref:** `ce73299760787abfd4e69b29c51c450cae0ab9d0`
 **Authorized local_transcribe:** `b3cf22ee5da337fab9dcd37fb97506f5beab012b`
 **Task record:** `.codex/tasks/review/7d2c9e41-deploy-remote-api-queue-fix.md`
+
+## Documentation merge closure (PR #35)
+
+- Approved head: `cc810656ed85905218ef984160c76c0331452901`.
+- Pre-merge exact-head CI: workflow `tests`, run `42723569512`, **success**.
+- PR #35 merged with a **normal merge commit**:
+  `97fa789ab2bf9a51c52c4ce037d5c4c3eedc7861` (parents `ce73299…` and
+  `cc81065…`). No squash, rebase, force-push, or direct `main` commit.
+- Post-merge `main` CI: workflow `tests`, run `42726678726`, head `97fa789…`,
+  **success**.
+- Final `main` after this merge: `97fa789ab2bf9a51c52c4ce037d5c4c3eedc7861`
+  (`ce73299…` plus the docs-only PR #35).
+- Documentation-only diff: `HANDOFF.md` and
+  `.codex/tasks/review/7d2c9e41-deploy-remote-api-queue-fix.md`.
+- Local and remote `ops/deploy-remote-api-queue-fix` deleted after merge;
+  tracking refs pruned. Unrelated branches
+  (`docs/unified-ref-consolidation-plan`, `fix/youtube-auto-show-notes-api`)
+  preserved.
+- Task `7d2c9e41` stays in `.codex/tasks/review/` with State **REVIEW**;
+  deployment is not DONE while the blockers below remain.
 
 ## Deployed state (minion-26)
 
