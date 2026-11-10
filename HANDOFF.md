@@ -43,10 +43,28 @@
   GPU core-dumps/empty-transcript failures, and v3 ACL access is unverified.
   Canary becomes **conditional GO** after a backlog/priority authorization, a
   stability window, v3 ACL write validation, and fresh liveness checks.
-- **Rollback:** take fresh backups immediately before any change; never use the
-  2026-11-09 `local-transcribe.config.yaml.before` (stale
+- **Rollback / service restoration:** take fresh backups immediately before any
+  change; never use the 2026-11-09 `local-transcribe.config.yaml.before` (stale
   `/tmp/lt-smoke-queue-59553` / `6a058908-116f-41c9-987f-d5f4ef38667e`).
-  Ordered rollback is in the report §7.
+  Capture the exact original `ref-api.service` unit, its effective
+  `FragmentPath`/`DropInPaths`/`ExecStart`, and the (currently none) drop-ins.
+  Rollback restores that unit so the only `ExecStartPre` is
+  `/usr/bin/mountpoint -q /opt/md2`, removes the new v3 gate/`ref-queue-v3`
+  dependency, reloads **both** managers (`systemctl --user daemon-reload` and
+  `sudo systemctl daemon-reload`), verifies the effective unit with
+  `systemctl --user cat`/`show`, then restarts and validates against the original
+  `/opt/md2` queue. Ordered procedure is report §7.
+- **Fail-closed startup gate:** the proposed cutover adds
+  `~/.local/bin/ref-queue-v3-gate` as an `ExecStartPre` after the existing
+  `/opt/md2` check. It validates the exact target, `nfs`/`vers=3`/
+  `mountvers=3`/`proto=tcp`/`hard`/`local_lock=none`, source
+  `depot.draeician.com:/mnt/tank/md2`, `queue.id` hash `28998c9e…`, UUID
+  `8c6fc098…`, and producer read/search/write access. Missing or mismatched
+  values prevent the API from starting. This gate supersedes the earlier
+  mountpoint-only suggestion in the merged investigation.
+- **Canary NO-GO preserved:** this correction does **not** authorize a canary;
+  the 1,373-job backlog, GPU instability, and unverified NFSv3 permissions remain
+  unresolved.
 - **Unchanged:** `queue.expected_uuid` and `expected_nfs_version: 3`;
   `/opt/md2` and the aether worker mount are not modified.
 - **Deployment task `7d2c9e41` remains in review/ with State REVIEW.**

@@ -63,3 +63,15 @@ plan:
 - `7d2c9e41` untouched and still in `review/` with State `REVIEW`.
 - No mount, remount, service restart, queue/archive write, config edit, canary,
   backlog replay, or main merge was performed.
+
+## Review correction — rollback/service/gate (2026-11-10)
+
+- Report §4.11 and §5.7 now capture the exact original `ref-api.service` unit,
+  effective `FragmentPath`/`DropInPaths`/`ExecStart`/`EnvironmentFiles`, and the
+  fact that no drop-ins currently exist.
+- §7 rollback now restores the service unit/drop-ins, removes the v3 gate and
+  dependency, reloads both `--user` and system managers, verifies the effective
+  unit, then restarts and validates against the original `/opt/md2` queue.
+- §5.4 now defines a fail-closed `ref-queue-v3-gate` that validates target,
+  source, NFS protocol/options, UUID/hash, and permissions before API start.
+- Canary NO-GO is unchanged; no authorization is implied.

@@ -57,9 +57,12 @@ The dedicated NFSv3 producer mount is technically feasible:
   or the aether worker mount.
 
 **Conditions:** authorized interactive sudo (passwordless sudo is unavailable),
-fresh pre-change backups, a post-mount UID/ACL write validation, and review of
-the exact mount unit. NFSv3 ACL compatibility remains unverified until the mount
-exists.
+fresh pre-change backups (exact service unit, drop-ins, queue paths, queue
+identity, archive hash), a post-mount UID/ACL write validation, review of the
+exact mount unit, and validation of the fail-closed startup gate. Rollback must
+restore the original `ref-api.service`/drop-ins, remove the v3 gate, reload both
+systemd managers, and validate the API against the original `/opt/md2` queue.
+NFSv3 ACL compatibility remains unverified until the mount exists.
 
 ### Canary readiness — NO-GO at this time
 
@@ -632,7 +635,11 @@ consumer; `crontab` is empty; `~/.config/ref/config.yaml` only sets
 
 ```bash
 systemctl --user cat ref-api.service
+systemctl --user show ref-api.service \
+  -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles
 ```
+
+Effective unit (exact original, captured before any cutover):
 
 ```ini
 # /home/draeician/.config/systemd/user/ref-api.service
@@ -652,9 +659,27 @@ RestartSec=5
 WantedBy=default.target
 ```
 
+Effective metadata at capture:
+
+```text
+FragmentPath=/home/draeician/.config/systemd/user/ref-api.service
+DropInPaths=
+ExecStart={ path=/home/draeician/.local/share/ref-services/ref-api/bin/ref-api ; argv[]=/home/draeician/.local/share/ref-services/ref-api/bin/ref-api --host 0.0.0.0 --port 8000 ; ... }
+EnvironmentFiles=/home/draeician/.config/ref/ref-api.env (ignore_errors=yes)
+```
+
+- **No drop-ins exist** (`DropInPaths=` is empty; there is no
+  `~/.config/systemd/user/ref-api.service.d/` directory). The single unit file
+  above is the complete pre-cutover service definition.
+- The only `ExecStartPre` is `/usr/bin/mountpoint -q /opt/md2`. Any cutover
+  service change must preserve that line and add the new gate; rollback must
+  restore exactly this unit and remove the added gate/drop-ins.
+- Snapshot this unit, the (absent) drop-in directory, and the `show` output in
+  the fresh backup before editing (§5.7).
+
 This is a **user** unit; the new mount is a **system** unit. Cross-manager
-ordering cannot be assumed; the fail-closed `ExecStartPre` check is the reliable
-gate. Keep the `/opt/md2` check because the transcripts path still depends on it.
+ordering cannot be assumed; the fail-closed `ExecStartPre` gate is the reliable
+guard. Keep the `/opt/md2` check because the transcripts path still depends on it.
 
 ### 4.12 Current producer diagnostics (OBSERVED baseline)
 
@@ -750,8 +775,8 @@ WantedBy=multi-user.target
 Notes:
 
 - `nofail` and `_netdev` are fstab-generator conventions. For this native mount
-  unit, use `After=network-online.target` and the `ref-api` `mountpoint` gate;
-  do not rely on `nofail` to make a missing mount safe.
+  unit, use `After=network-online.target` and the fail-closed startup gate in
+  §5.4; do not rely on `nofail` to make a missing mount safe.
 - Do **not** use `nolock`, `soft`, `local_lock=flock`, or nested mounts.
 - `Where=` must exactly match the escaped unit name.
 
@@ -784,22 +809,108 @@ systemctl is-enabled 'mnt-ref\x2dqueue\x2dv3.mount'
 Keep the unit in `/etc/systemd/system/` (not `/run`). Do not also add the same
 mount to `/etc/fstab`; choose one mechanism to avoid duplicate units.
 
-### 5.4 Reliable ref-api startup dependency
+### 5.4 Reliable fail-closed ref-api startup gate
 
 `ref-api.service` is a systemd **user** unit; the mount is a **system** unit.
-Keep the existing `/opt/md2` check and add a bounded wait for the v3 mount. Two
-`ExecStartPre` lines run in order and fail closed:
+Cross-manager ordering cannot be assumed. Keep the existing `/opt/md2` check and
+add a **fail-closed gate** that runs as the user and validates the mount
+protocol, source, target, queue UUID/hash, and permissions before the API starts.
+
+Do not rely on a bare `mountpoint` check for the v3 mount: it would accept any
+filesystem at that path, including a stale local directory or the wrong export.
+
+Install the gate as a user-owned executable:
+
+```bash
+install -m 0755 /dev/stdin "$HOME/.local/bin/ref-queue-v3-gate" <<'GATE'
+#!/bin/sh
+set -eu
+export PATH=/usr/local/bin:/usr/bin:/bin
+
+MNT=/mnt/ref-queue-v3
+Q="$MNT/music/youtube/transcripts/transcription-queue"
+EXPECTED_SOURCE=depot.draeician.com:/mnt/tank/md2
+EXPECTED_UUID=8c6fc098-8cbe-41ae-9689-dd759797a582
+EXPECTED_HASH=28998c9e2a2181badcb5d30436aa4829141b931aefe32b4e3a416c83eaa4c5ea
+
+# Bounded wait for the system mount unit, then fail closed.
+i=0
+while [ "$i" -lt 30 ]; do
+  /usr/bin/mountpoint -q "$MNT" && break
+  i=$((i + 1))
+  sleep 2
+done
+/usr/bin/mountpoint -q "$MNT" || { echo "v3 queue mount not present" >&2; exit 1; }
+
+tgt=$(findmnt -T "$Q" -o TARGET -n)
+src=$(findmnt -T "$Q" -o SOURCE -n)
+fstype=$(findmnt -T "$Q" -o FSTYPE -n)
+opts=$(findmnt -T "$Q" -o OPTIONS -n)
+
+[ "$tgt" = "$MNT" ] || { echo "wrong mount target: $tgt" >&2; exit 1; }
+[ "$src" = "$EXPECTED_SOURCE" ] || { echo "wrong source: $src" >&2; exit 1; }
+[ "$fstype" = "nfs" ] || { echo "wrong fstype: $fstype" >&2; exit 1; }
+case "$opts" in *vers=3*) ;; *) echo "missing vers=3" >&2; exit 1;; esac
+case "$opts" in *mountvers=3*) ;; *) echo "missing mountvers=3" >&2; exit 1;; esac
+case "$opts" in *proto=tcp*) ;; *) echo "missing proto=tcp" >&2; exit 1;; esac
+case "$opts" in *hard*) ;; *) echo "missing hard" >&2; exit 1;; esac
+case "$opts" in *local_lock=none*) ;; *) echo "missing local_lock=none" >&2; exit 1;; esac
+
+[ -d "$Q" ] || { echo "queue dir missing" >&2; exit 1; }
+[ -r "$Q/queue.id" ] || { echo "queue.id unreadable" >&2; exit 1; }
+[ -w "$Q" ] || { echo "queue dir not writable by producer" >&2; exit 1; }
+[ -x "$Q" ] || { echo "queue dir not searchable" >&2; exit 1; }
+
+[ "$(sha256sum "$Q/queue.id" | awk '{print $1}')" = "$EXPECTED_HASH" ] \
+  || { echo "queue.id hash mismatch" >&2; exit 1; }
+
+python3 - "$Q/queue.id" "$EXPECTED_UUID" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if d.get("queue_uuid") == sys.argv[2] else 1)
+PY
+GATE
+```
+
+The gate validates:
+
+- the path is an actual mount at exactly `/mnt/ref-queue-v3`;
+- `FSTYPE=nfs`, `SOURCE=depot.draeician.com:/mnt/tank/md2`;
+- `vers=3`, `mountvers=3`, `proto=tcp`, `hard`, `local_lock=none`;
+- `queue.id` sha256 equals `28998c9e…` and `queue_uuid` equals
+  `8c6fc098-8cbe-41ae-9689-dd759797a582`;
+- the queue directory is readable, searchable, and writable by the producer
+  user. `test -w` is an access check, not a write probe; a real write probe
+  remains separately authorized.
+
+Gate acceptance tests before switching the producer:
+
+```bash
+# With the v3 mount absent, this must fail.
+/home/draeician/.local/bin/ref-queue-v3-gate; echo "exit=$?"   # expect nonzero
+
+# After the authorized mount is up and validated, this must succeed.
+/home/draeician/.local/bin/ref-queue-v3-gate; echo "exit=$?"   # expect 0
+```
+
+Do not start `ref-api` unless the gate exits 0. The gate's checks are static
+read-only validations; they reject a wrong target/source/protocol, UUID/hash
+mismatch, and missing/non-writable queue before systemd launches the API.
+
+The effective service changes (illustrative, not authorized):
 
 ```ini
 [Service]
 ExecStartPre=/usr/bin/mountpoint -q /opt/md2
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do /usr/bin/mountpoint -q /mnt/ref-queue-v3 && exit 0; sleep 2; done; echo "v3 queue mount not present" >&2; exit 1'
+ExecStartPre=/home/draeician/.local/bin/ref-queue-v3-gate
 ```
 
-The loop tolerates a mount that appears shortly after the user manager starts,
-then fails rather than starting the producer on the wrong path. Keep
-`Restart=on-failure`; a mount failure causes a bounded retry loop, not silent
-degradation.
+Both lines run in order; either failure prevents `ref-api` from starting on a
+wrong filesystem or wrong queue identity. If the gate script is missing, systemd
+fails the start (fail closed). Keep `Restart=on-failure`; a missing/mismatched
+mount produces a bounded retry loop rather than silent degradation. Back up the
+gate script with the service snapshot, and remove it during rollback if it is no
+longer referenced.
 
 ### 5.5 Producer configuration changes
 
@@ -857,7 +968,21 @@ mkdir -p "$BK" && chmod 700 "$BK"
 
 cp -p "$HOME/.config/ref/ref-api.env" "$BK/ref-api.env.before"
 cp -p "$HOME/.config/local-transcribe/config.yaml" "$BK/local-transcribe.config.yaml.before"
-systemctl --user cat ref-api.service > "$BK/ref-api.service.unit.before"
+
+# Exact service unit + drop-ins + effective view (currently no drop-ins).
+cp -p "$HOME/.config/systemd/user/ref-api.service" "$BK/ref-api.service.unit.before"
+systemctl --user cat ref-api.service > "$BK/ref-api.service.cat.before"
+systemctl --user show ref-api.service \
+  -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles \
+  > "$BK/ref-api.service.show.before"
+if [ -d "$HOME/.config/systemd/user/ref-api.service.d" ]; then
+  mkdir -p "$BK/ref-api.service.d.before"
+  cp -a "$HOME/.config/systemd/user/ref-api.service.d/." "$BK/ref-api.service.d.before/"
+else
+  mkdir -p "$BK/ref-api.service.d.before"   # record that none existed
+fi
+ls -l "$HOME/.local/bin/ref-queue-v3-gate" 2>/dev/null \
+  > "$BK/ref-queue-v3-gate.before" || echo "absent" > "$BK/ref-queue-v3-gate.before"
 
 Q=/opt/md2/music/youtube/transcripts/transcription-queue
 cp -p "$Q/queue.id" "$BK/queue.id.before"
@@ -876,11 +1001,19 @@ Verify the backup contains the known-good values before proceeding:
 grep -E 'REF_LOCAL_TRANSCRIBE_QUEUE_(DIR|UUID)' "$BK/ref-api.env.before"
 grep -A3 '^queue:' "$BK/local-transcribe.config.yaml.before"
 test -s "$BK/ref-api.env.before" && test -s "$BK/local-transcribe.config.yaml.before"
+grep -E '^ExecStartPre=' "$BK/ref-api.service.cat.before"
+grep -E '^DropInPaths=' "$BK/ref-api.service.show.before"
 ```
 
-Expected known-good values: `/opt/md2/music/youtube/transcripts/transcription-queue`,
-`8c6fc098-8cbe-41ae-9689-dd759797a582`, `expected_nfs_version: 3`. If the fresh
-backup does not contain exactly these, **STOP**.
+Expected:
+
+- queue path `/opt/md2/music/youtube/transcripts/transcription-queue`, UUID
+  `8c6fc098-8cbe-41ae-9689-dd759797a582`, `expected_nfs_version: 3`;
+- exactly one `ExecStartPre=/usr/bin/mountpoint -q /opt/md2`;
+- `DropInPaths=` empty;
+- gate script marked `absent`.
+
+If the fresh backup does not contain exactly these, **STOP**.
 
 Record `$BK` in the change task before the first mount/config change.
 
@@ -890,8 +1023,11 @@ Record `$BK` in the change task before the first mount/config change.
 
 ### 6.1 Preconditions (all must be true)
 
-- Fresh backups taken and verified (§5.7); rollback path recorded.
+- Fresh backups taken and verified (§5.7), including the exact service unit,
+  drop-ins (none), gate-script absence, and queue paths; rollback path recorded.
 - Mount installed, validated, enabled, and mounted; `findmnt` shows NFSv3.
+- `ref-queue-v3-gate` installed and tested: it rejects a missing mount, wrong
+  target/source/protocol, wrong UUID/hash, and non-writable queue permissions.
 - Producer `lt queue doctor` is all-ok including `nfs_version: ok (v3)`.
 - Post-mount UID/ACL write validation performed under separate authorization.
 - Worker liveness freshly re-checked (§3); exactly one worker; no stuck
@@ -1017,6 +1153,8 @@ STOP immediately (do not force, do not delete queue entries) if any of:
 
 - Mount is missing, read-only, not NFSv3, or `/mnt/ref-queue-v3` is not the
   expected export.
+- The fail-closed gate can be bypassed or accepts a wrong filesystem/source/
+  protocol/UUID/permissions; or the restored unit still references the v3 gate.
 - `queue.id` hash/UUID changes; identity mismatch.
 - Duplicate key/execution, second worker, duplicate NLM owner, or stuck
   processing.
@@ -1054,46 +1192,120 @@ Do not submit the canary until one option is approved.
 Use only the fresh backup from §5.7. Never restore the 2026-11-09
 `local-transcribe.config.yaml.before`.
 
-1. **Stop the producer** (`systemctl --user stop ref-api.service`); confirm
-   inactive before changing paths.
-2. **Restore configs** from `$BK`:
-   - `ref-api.env` ← `$BK/ref-api.env.before`
-   - `local-transcribe/config.yaml` ← `$BK/local-transcribe.config.yaml.before`
-   - Verify the restored queue path is
-     `/opt/md2/music/youtube/transcripts/transcription-queue`, UUID
-     `8c6fc098-8cbe-41ae-9689-dd759797a582`, `expected_nfs_version: 3`.
-3. **Tear down the v3 mount** (after ref-api is stopped):
+The order is deliberate: stop the producer, restore the **service
+configuration** and original queue paths, remove the dedicated mount, reload
+both systemd managers, then restart and validate the API against the original
+queue.
+
+1. **Stop the producer**:
    ```bash
-   sudo systemctl stop 'mnt-ref\x2dqueue\x2dv3.mount'   # or umount /mnt/ref-queue-v3
+   systemctl --user stop ref-api.service
+   systemctl --user is-active ref-api.service || true   # expect inactive/failed
+   ```
+   Confirm it is stopped before changing the service, paths, or mount.
+
+2. **Restore the exact original user service and remove the NFSv3 dependency**:
+   ```bash
+   cp -p "$BK/ref-api.service.unit.before" "$HOME/.config/systemd/user/ref-api.service"
+   rm -rf "$HOME/.config/systemd/user/ref-api.service.d"
+   if [ -d "$BK/ref-api.service.d.before" ] && [ -n "$(ls -A "$BK/ref-api.service.d.before")" ]; then
+     mkdir -p "$HOME/.config/systemd/user/ref-api.service.d"
+     cp -a "$BK/ref-api.service.d.before/." "$HOME/.config/systemd/user/ref-api.service.d/"
+   fi
+   rm -f "$HOME/.local/bin/ref-queue-v3-gate"
+   ```
+   The restored unit must contain exactly the original
+   `ExecStartPre=/usr/bin/mountpoint -q /opt/md2`; it must **not** contain
+   `ref-queue-v3-gate` or any `/mnt/ref-queue-v3` dependency.
+
+3. **Reload the user manager and verify the effective unit**:
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user cat ref-api.service
+   systemctl --user show ref-api.service \
+     -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles
+   ```
+   Verify with `cat` that the only `ExecStartPre` is the original
+   `/usr/bin/mountpoint -q /opt/md2` (there is no `ref-queue-v3-gate` line), and
+   with `show` that `FragmentPath`/`DropInPaths`/`EnvironmentFiles` match
+   `$BK/ref-api.service.show.before`. If `DropInPaths` was empty before, it must
+   be empty again.
+
+4. **Restore the original queue paths**:
+   ```bash
+   cp -p "$BK/ref-api.env.before" "$HOME/.config/ref/ref-api.env"
+   cp -p "$BK/local-transcribe.config.yaml.before" "$HOME/.config/local-transcribe/config.yaml"
+   grep -E '^REF_LOCAL_TRANSCRIBE_QUEUE_(DIR|UUID)' "$HOME/.config/ref/ref-api.env"
+   grep -A3 '^queue:' "$HOME/.config/local-transcribe/config.yaml"
+   ```
+   Expected: path `/opt/md2/music/youtube/transcripts/transcription-queue`,
+   UUID `8c6fc098-8cbe-41ae-9689-dd759797a582`,
+   `expected_nfs_version: 3`.
+
+5. **Remove the dedicated mount safely** (ref-api is already stopped):
+   ```bash
+   sudo systemctl stop 'mnt-ref\x2dqueue\x2dv3.mount'    # or umount /mnt/ref-queue-v3
    sudo systemctl disable 'mnt-ref\x2dqueue\x2dv3.mount'
-   sudo rm '/etc/systemd/system/mnt-ref\x2dqueue\x2dv3.mount'
+   sudo rm -f '/etc/systemd/system/mnt-ref\x2dqueue\x2dv3.mount'
+   sudo systemctl daemon-reload
+   findmnt /mnt/ref-queue-v3 && echo "STILL MOUNTED: STOP" || echo "unmounted"
+   ```
+   Do not remove `/opt/md2`, its fstab entry, or the aether worker mount.
+
+6. **Reload both relevant managers** (idempotent safety after steps 3 and 5):
+   ```bash
+   systemctl --user daemon-reload
    sudo systemctl daemon-reload
    ```
-   Confirm `findmnt /mnt/ref-queue-v3` returns nothing.
-4. **Verify `/opt/md2` health and identity**:
-   `findmnt -T "$Q"` shows NFSv4.2; `sha256sum "$Q/queue.id"` matches
-   `28998c9e…`; UUID matches `8c6fc098…`.
-5. **Verify no v3 references remain**:
+   Re-verify the user unit with `systemctl --user cat ref-api.service` and
+   `systemctl --user show ref-api.service -p FragmentPath -p DropInPaths -p ExecStart`.
+
+7. **Verify `/opt/md2` health and identity**:
+   ```bash
+   Q=/opt/md2/music/youtube/transcripts/transcription-queue
+   findmnt -T "$Q" -o TARGET,SOURCE,FSTYPE,OPTIONS -n   # expect nfs4/vers=4.2
+   sha256sum "$Q/queue.id"                             # expect 28998c9e…
+   cat "$Q/queue.id"                                   # expect 8c6fc098-…
+   ```
+
+8. **Verify no v3 references remain**:
    ```bash
    grep -R -- 'ref-queue-v3' "$HOME/.config/ref" "$HOME/.config/local-transcribe" \
      "$HOME/.config/systemd/user" || echo none
+   grep -R -- 'lt-smoke-queue-59553\|6a058908-116f-41c9-987f-d5f4ef38667e' \
+     "$HOME/.config/ref" "$HOME/.config/local-transcribe" || echo none
    ```
-   Also confirm the stale smoke-test path/UUID appear nowhere.
-6. **Restart ref-api** only after the configs and `/opt/md2` are verified:
-   `systemctl --user start ref-api.service`; check `/health`, `ref --status`,
-   and the pre-cutover `lt queue path` baseline (the `found 4, expected 3`
-   message is expected and is not a new failure).
-7. **Archive integrity:** compare `sha256sum ~/references/references.md` and its
-   size/mtime with `$BK/references.md.sha256.before`/`.stat.before`. If a canary
-   ran, account for exactly the canary row; do not restore an archive snapshot
-   over newer writes.
-8. **Queue integrity:** confirm counts match the pre-change snapshot except for
-   the canary execution; do not delete or rewrite queue entries. Preserve any
-   canary evidence for review.
+   The stale smoke-test values must appear nowhere.
 
-Service stop/start boundaries: stop before any config/path edit; tear down the
-mount before restoring configs or after stopping ref-api; start only after the
-v3 mount is gone and `/opt/md2` identity is verified.
+9. **Restart and validate against the original queue**:
+   ```bash
+   systemctl --user start ref-api.service
+   curl -fsS http://127.0.0.1:8000/health
+   ref --status
+   tr '\0' '\n' < /proc/$(systemctl --user show -p MainPID --value ref-api.service)/environ \
+     | grep -E '^REF_LOCAL_TRANSCRIBE_QUEUE_(DIR|UUID)'
+   lt queue path --queue-dir "$Q"
+   ```
+   Expected: `/health` reports the installed version, `ref --status` is `ok`,
+   the running process env points at `/opt/md2/...` with UUID
+   `8c6fc098-…`, and `lt queue path` shows the pre-cutover baseline
+   (`found 4, expected 3`). That baseline message is expected and is **not** a
+   new failure; the canary remains NO-GO.
+
+10. **Archive integrity:** compare `sha256sum ~/references/references.md` and
+    its size/mtime with `$BK/references.md.sha256.before`/`.stat.before`. If a
+    canary ran, account for exactly the canary row; do not restore an archive
+    snapshot over newer writes.
+
+11. **Queue integrity:** confirm counts match the pre-change snapshot except for
+    the canary execution; do not delete or rewrite queue entries. Preserve any
+    canary evidence for review.
+
+Service stop/start boundaries: stop `ref-api` before any service/path/mount
+change; restore the service unit and reload the **user** manager before
+restarting; remove the mount and reload the **system** manager before restarting;
+start only after the v3 mount is gone, the original `ExecStartPre` is verified,
+and `/opt/md2` identity matches.
 
 ---
 
@@ -1115,10 +1327,16 @@ v3 mount is gone and `/opt/md2` identity is verified.
 6. **Disk pressure:** `/opt/md2` 99% used (1.1T free); inodes 2%.
 7. **sudo:** passwordless sudo unavailable; mount installation requires an
    authorized interactive session.
-8. **Cross-manager ordering:** user `ref-api` vs system mount; the bounded
-   `mountpoint` gate is the mitigation, but it must be tested after installation.
+8. **Cross-manager ordering / wrong-path startup:** user `ref-api` vs system
+   mount. The fail-closed `ref-queue-v3-gate` validates mount target, source,
+   protocol, UUID/hash, and permissions before start; test it after installation.
 9. **Server clock skew:** NFS-side mtimes appeared several minutes offset; use
    in-file UTC timestamps for heartbeat/transition reasoning.
+10. **Service rollback completeness:** the cutover edits the user unit (adds the
+    gate) and creates a gate script. Backups must cover the exact unit, drop-ins
+    (currently none), and gate absence; rollback must restore them, run
+    `systemctl --user daemon-reload`, and verify the effective unit with
+    `systemctl --user cat`/`show`.
 
 ---
 
@@ -1135,6 +1353,10 @@ v3 mount is gone and `/opt/md2` identity is verified.
 read-only/ACL validation only; keep the canary blocked until the backlog/priority
 decision and worker-stability observation are complete. Do not change
 `queue.expected_uuid` or `expected_nfs_version: 3`.
+
+**No canary is authorized by this correction.** The `1,373`-job backlog, recent
+GPU instability, and unverified NFSv3 permissions remain unresolved; the NO-GO
+stands until a separate authorization and the §6 preconditions are met.
 
 ---
 
@@ -1170,9 +1392,19 @@ stat -c 'uid=%u gid=%g %U:%G mode=%a %n' "$Q" "$Q/queue.id"
 ls -ld "$Q"
 grep -E '^REF_LOCAL_TRANSCRIBE|^REF_YOUTUBE_TRANSCRIPT_MODE' ~/.config/ref/ref-api.env
 systemctl --user cat ref-api.service
-systemctl --user show ref-api.service -p MainPID -p ActiveState -p NRestarts
+systemctl --user show ref-api.service -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles
+ls -la ~/.config/systemd/user/ref-api.service.d 2>&1
 lt queue path --queue-dir "$Q"
 lt queue doctor --queue-dir "$Q"
+
+# Service snapshot / effective-unit verification / both-manager reload
+cp -p ~/.config/systemd/user/ref-api.service "$BK/ref-api.service.unit.before"
+systemctl --user cat ref-api.service > "$BK/ref-api.service.cat.before"
+systemctl --user show ref-api.service -p FragmentPath -p DropInPaths -p ExecStart -p EnvironmentFiles > "$BK/ref-api.service.show.before"
+systemctl --user daemon-reload
+sudo systemctl daemon-reload
+grep -E '^ExecStartPre=' "$BK/ref-api.service.cat.before"
+grep -E '^DropInPaths=' "$BK/ref-api.service.show.before"
 
 # Counts and baselines
 for d in pending processing retry completed failed cancelled; do printf '%s=%s\n' "$d" "$(ls "$Q/$d" | wc -l)"; done
