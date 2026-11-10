@@ -29,6 +29,26 @@
 - Task `7d2c9e41` stays in `.codex/tasks/review/` with State **REVIEW**;
   deployment is not DONE while the blockers below remain.
 
+## NFS producer investigation report
+
+- **Report:** `docs/investigations/2026-11-10-nfs-producer-mount-investigation.md`
+- **Findings (OBSERVED):** minion-26 mounts
+  `depot.draeician.com:/mnt/tank/md2` over **NFSv4.2** at `/opt/md2`; aether
+  mounts the same export over **NFSv3** (with `mountvers=3` and `rpc.statd`) and
+  holds the NLM worker lock. Both resolve queue UUID
+  `8c6fc098-8cbe-41ae-9689-dd759797a582` (`queue.id` sha256 `28998c9e…`).
+- **Guard mismatch (OBSERVED):** `queue.expected_nfs_version: 3` is preserved on
+  minion-26, so `lt queue path`/`doctor` report `found 4, expected 3`. The
+  producer enqueue path does not consult mount validation/NLM; the worker host is
+  correctly NFSv3.
+- **Recommended next action (PROPOSED, not executed):** add a dedicated NFSv3
+  producer mount of the same export, point `REF_LOCAL_TRANSCRIBE_QUEUE_DIR` and
+  `queue.path` at it, keep the UUID and NFSv3 guard, then run the bounded canary
+  under the report's acceptance criteria.
+- **Blockers retained:** dedicated v3 mount untested; guard mismatch unresolved;
+  canary not executed; nomnom SSH/pipx deployment outstanding; pending transcript
+  recovery not implemented; stale worker heartbeat observation; `/opt/md2` at 99%.
+
 ## Deployed state (minion-26)
 
 - `ref-api.service` runs from the dedicated venv
