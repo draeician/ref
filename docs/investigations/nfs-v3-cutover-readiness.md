@@ -850,11 +850,62 @@ opts=$(findmnt -T "$Q" -o OPTIONS -n)
 [ "$tgt" = "$MNT" ] || { echo "wrong mount target: $tgt" >&2; exit 1; }
 [ "$src" = "$EXPECTED_SOURCE" ] || { echo "wrong source: $src" >&2; exit 1; }
 [ "$fstype" = "nfs" ] || { echo "wrong fstype: $fstype" >&2; exit 1; }
-case "$opts" in *vers=3*) ;; *) echo "missing vers=3" >&2; exit 1;; esac
-case "$opts" in *mountvers=3*) ;; *) echo "missing mountvers=3" >&2; exit 1;; esac
-case "$opts" in *proto=tcp*) ;; *) echo "missing proto=tcp" >&2; exit 1;; esac
-case "$opts" in *hard*) ;; *) echo "missing hard" >&2; exit 1;; esac
-case "$opts" in *local_lock=none*) ;; *) echo "missing local_lock=none" >&2; exit 1;; esac
+
+# Split the comma-delimited option list into exact tokens. Never use substring
+# matching: mountvers=3 must not satisfy vers=3, and mountproto=tcp must not
+# satisfy proto=tcp. Each required value must appear exactly once, conflicting
+# values are rejected, and unsafe/local-only locking options are refused.
+validate_options() {
+  printf '%s\n' "$1" | tr ',' '\n' | awk '
+    $0 == "vers=3"            { vers++ }
+    $0 ~ /^vers=/ &&
+      $0 != "vers=3"          { wrong=1 }
+    $0 == "mountvers=3"       { mountvers++ }
+    $0 ~ /^mountvers=/ &&
+      $0 != "mountvers=3"     { wrong=1 }
+    $0 == "proto=tcp"         { proto++ }
+    $0 ~ /^proto=/ &&
+      $0 != "proto=tcp"       { wrong=1 }
+    $0 == "hard"              { hard++ }
+    $0 == "local_lock=none"   { locnone++ }
+    $0 ~ /^local_lock=/ &&
+      $0 != "local_lock=none" { wrong=1 }
+    $0 == "soft" || $0 == "nolock" { unsafe=1 }
+    END {
+      if (wrong) {
+        print "wrong or conflicting mount option value" > "/dev/stderr"
+        exit 1
+      }
+      if (unsafe) {
+        print "unsafe option soft/nolock/local-only locking" > "/dev/stderr"
+        exit 1
+      }
+      if (vers != 1) {
+        print "expected exactly one vers=3, found " vers+0 > "/dev/stderr"
+        exit 1
+      }
+      if (mountvers != 1) {
+        print "expected exactly one mountvers=3, found " mountvers+0 > "/dev/stderr"
+        exit 1
+      }
+      if (proto != 1) {
+        print "expected exactly one proto=tcp, found " proto+0 > "/dev/stderr"
+        exit 1
+      }
+      if (hard != 1) {
+        print "expected option hard exactly once, found " hard+0 > "/dev/stderr"
+        exit 1
+      }
+      if (locnone != 1) {
+        print "expected exactly one local_lock=none, found " locnone+0 > "/dev/stderr"
+        exit 1
+      }
+    }
+  '
+}
+
+validate_options "$opts" \
+  || { echo "invalid mount options: $opts" >&2; exit 1; }
 
 [ -d "$Q" ] || { echo "queue dir missing" >&2; exit 1; }
 [ -r "$Q/queue.id" ] || { echo "queue.id unreadable" >&2; exit 1; }
@@ -876,7 +927,13 @@ The gate validates:
 
 - the path is an actual mount at exactly `/mnt/ref-queue-v3`;
 - `FSTYPE=nfs`, `SOURCE=depot.draeician.com:/mnt/tank/md2`;
-- `vers=3`, `mountvers=3`, `proto=tcp`, `hard`, `local_lock=none`;
+- exact comma-delimited tokens for `vers=3`, `mountvers=3`, `proto=tcp`, `hard`,
+  and `local_lock=none`, each present exactly once. Substring matches do not
+  count: `mountvers=3` cannot satisfy `vers=3`, and `mountproto=tcp` cannot
+  satisfy `proto=tcp`;
+- rejection of `soft`, `nolock`, and local-only locking (`local_lock=all`,
+  `local_lock=flock`, `local_lock=posix`), even when a required option is also
+  present;
 - `queue.id` sha256 equals `28998c9e…` and `queue_uuid` equals
   `8c6fc098-8cbe-41ae-9689-dd759797a582`;
 - the queue directory is readable, searchable, and writable by the producer
@@ -893,6 +950,44 @@ Gate acceptance tests before switching the producer:
 /home/draeician/.local/bin/ref-queue-v3-gate; echo "exit=$?"   # expect 0
 ```
 
+Negative option-parsing tests (must fail) — run before installation:
+
+The harness extracts the installed gate's `validate_options` function and feeds
+it synthetic option strings. Only the baseline may succeed; every other case
+must be rejected. In particular, `mountproto=tcp` supplies no `proto=tcp` token
+and `mountvers=3` supplies no `vers=3` token.
+
+```bash
+GATE=$HOME/.local/bin/ref-queue-v3-gate
+eval "$(sed -n '/^validate_options()/,/^}/p' "$GATE")"
+
+check() {
+  opts=$1; expect=$2
+  if validate_options "$opts"; then rc=0; else rc=1; fi
+  printf 'exit=%s expected=%s %s\n' "$rc" "$expect" "$opts"
+  [ "$rc" -eq "$expect" ] || { echo "UNEXPECTED RESULT" >&2; exit 1; }
+}
+
+check 'vers=3,mountvers=3,proto=tcp,hard,local_lock=none' 0
+check 'vers=4,mountvers=3,proto=tcp,hard,local_lock=none' 1
+check 'vers=3,mountvers=4,proto=tcp,hard,local_lock=none' 1
+check 'vers=3,mountvers=3,mountproto=tcp,hard,local_lock=none' 1
+check 'vers=3,mountvers=3,proto=udp,hard,local_lock=none' 1
+check 'vers=3,mountvers=3,proto=tcp,soft,local_lock=none' 1
+check 'vers=3,mountvers=3,proto=tcp,nolock,local_lock=none' 1
+check 'vers=3,mountvers=3,proto=tcp,hard,local_lock=all' 1
+check 'vers=3,mountvers=3,proto=tcp,hard,local_lock=flock' 1
+check 'vers=3,mountvers=3,proto=tcp,hard' 1
+check 'vers=3,mountvers=3,proto=tcp,hard,local_lock=none,soft' 1
+check 'vers=3,mountvers=3,proto=tcp,hard,local_lock=none,mountvers=4' 1
+check 'vers=3,mountvers=3,proto=tcp,hard,local_lock=none,local_lock=all' 1
+```
+
+Expected: baseline `exit=0`; every other line `exit=1`. The `mountproto=tcp`
+case fails because only exact `proto=tcp` tokens count, and the `vers=4` /
+duplicate `mountvers=4` cases fail because `mountvers=3` is not accepted as
+`vers=3`.
+
 Do not start `ref-api` unless the gate exits 0. The gate's checks are static
 read-only validations; they reject a wrong target/source/protocol, UUID/hash
 mismatch, and missing/non-writable queue before systemd launches the API.
@@ -905,9 +1000,11 @@ ExecStartPre=/usr/bin/mountpoint -q /opt/md2
 ExecStartPre=/home/draeician/.local/bin/ref-queue-v3-gate
 ```
 
-After editing `~/.config/systemd/user/ref-api.service` (or adding a drop-in that
-changes it), reload the **user** manager and verify the effective unit before
-restarting the API:
+The proposed cutover edits `~/.config/systemd/user/ref-api.service` directly.
+If a drop-in is used instead, use a single cutover-owned file named
+`~/.config/systemd/user/ref-api.service.d/10-ref-queue-v3.conf`; do not modify
+unrelated drop-ins. After changing the user service, reload the **user** manager
+and verify the effective unit before restarting the API:
 
 ```bash
 systemctl --user daemon-reload
@@ -919,9 +1016,10 @@ systemctl --user show ref-api.service \
 `cat` must show exactly two `ExecStartPre` lines in order: the original
 `/usr/bin/mountpoint -q /opt/md2` first, then
 `/home/draeician/.local/bin/ref-queue-v3-gate`. `show` must retain the original
-`FragmentPath`, `ExecStart`, and `EnvironmentFiles`, and `DropInPaths` must be
-empty (or exactly the original drop-ins). Do not restart `ref-api` until the
-reloaded effective unit is verified and the gate exits 0.
+`FragmentPath`, `ExecStart`, and `EnvironmentFiles`, and `DropInPaths` must not
+contain `10-ref-queue-v3.conf` (it may contain only the original unrelated
+drop-ins). Do not restart `ref-api` until the reloaded effective unit is
+verified and the gate exits 0.
 
 Both lines run in order; either failure prevents `ref-api` from starting on a
 wrong filesystem or wrong queue identity. If the gate script is missing, systemd
@@ -987,7 +1085,7 @@ mkdir -p "$BK" && chmod 700 "$BK"
 cp -p "$HOME/.config/ref/ref-api.env" "$BK/ref-api.env.before"
 cp -p "$HOME/.config/local-transcribe/config.yaml" "$BK/local-transcribe.config.yaml.before"
 
-# Exact service unit + drop-ins + effective view (currently no drop-ins).
+# Exact service unit + drop-in snapshot + effective view (currently no drop-ins).
 cp -p "$HOME/.config/systemd/user/ref-api.service" "$BK/ref-api.service.unit.before"
 systemctl --user cat ref-api.service > "$BK/ref-api.service.cat.before"
 systemctl --user show ref-api.service \
@@ -1012,6 +1110,10 @@ printf 'keys=%s\n' "$(find "$Q/keys" -maxdepth 1 -type f | wc -l)" >> "$BK/queue
 sha256sum "$HOME/references/references.md" > "$BK/references.md.sha256.before"
 stat -c '%s %y %n' "$HOME/references/references.md" > "$BK/references.md.stat.before"
 ```
+
+The drop-in copy is a **snapshot for evidence and comparison**, not a directory
+to restore wholesale. Rollback must not overwrite or delete unrelated drop-ins;
+it removes only a cutover-owned `10-ref-queue-v3.conf` if that file was created.
 
 Verify the backup contains the known-good values before proceeding:
 
@@ -1045,7 +1147,9 @@ Record `$BK` in the change task before the first mount/config change.
   drop-ins (none), gate-script absence, and queue paths; rollback path recorded.
 - Mount installed, validated, enabled, and mounted; `findmnt` shows NFSv3.
 - `ref-queue-v3-gate` installed and tested: it rejects a missing mount, wrong
-  target/source/protocol, wrong UUID/hash, and non-writable queue permissions.
+  target/source/protocol, unsafe/local-only locking, wrong UUID/hash, and
+  non-writable queue permissions; the §5.4 negative option tests all fail as
+  expected.
 - Producer `lt queue doctor` is all-ok including `nfs_version: ok (v3)`.
 - Post-mount UID/ACL write validation performed under separate authorization.
 - Worker liveness freshly re-checked (§3); exactly one worker; no stuck
@@ -1222,19 +1326,21 @@ queue.
    ```
    Confirm it is stopped before changing the service, paths, or mount.
 
-2. **Restore the exact original user service and remove the NFSv3 dependency**:
+2. **Restore the exact original user service and remove the cutover-owned
+   NFSv3 dependency**:
    ```bash
    cp -p "$BK/ref-api.service.unit.before" "$HOME/.config/systemd/user/ref-api.service"
-   rm -rf "$HOME/.config/systemd/user/ref-api.service.d"
-   if [ -d "$BK/ref-api.service.d.before" ] && [ -n "$(ls -A "$BK/ref-api.service.d.before")" ]; then
-     mkdir -p "$HOME/.config/systemd/user/ref-api.service.d"
-     cp -a "$BK/ref-api.service.d.before/." "$HOME/.config/systemd/user/ref-api.service.d/"
-   fi
+   # The proposed cutover edits the main unit, so no drop-in is created. If a
+   # dedicated drop-in was used instead, remove only that cutover-owned file.
+   # Never delete the drop-in directory or unrelated drop-ins.
+   rm -f "$HOME/.config/systemd/user/ref-api.service.d/10-ref-queue-v3.conf"
    rm -f "$HOME/.local/bin/ref-queue-v3-gate"
    ```
    The restored unit must contain exactly the original
    `ExecStartPre=/usr/bin/mountpoint -q /opt/md2`; it must **not** contain
-   `ref-queue-v3-gate` or any `/mnt/ref-queue-v3` dependency.
+   `ref-queue-v3-gate` or any `/mnt/ref-queue-v3` dependency. Leave all unrelated
+   drop-ins untouched; do not restore the §5.7 drop-in snapshot over the live
+   directory.
 
 3. **Restore the original queue paths**:
    ```bash
@@ -1270,9 +1376,11 @@ queue.
    ```
    Verify with `cat` that the only `ExecStartPre` is the original
    `/usr/bin/mountpoint -q /opt/md2` (there is no `ref-queue-v3-gate` line), and
-   with `show` that `FragmentPath`/`DropInPaths`/`EnvironmentFiles` match
-   `$BK/ref-api.service.show.before`. If `DropInPaths` was empty before, it must
-   be empty again.
+   with `show` that `FragmentPath`/`ExecStart`/`EnvironmentFiles` match
+   `$BK/ref-api.service.show.before` and `DropInPaths` contains no
+   `10-ref-queue-v3.conf`. If `DropInPaths` was empty before and no unrelated
+   drop-ins were added, it must be empty again; otherwise it must contain only
+   the unrelated drop-ins.
 
 7. **Verify `/opt/md2` health and identity**:
    ```bash
@@ -1347,10 +1455,16 @@ verified, and `/opt/md2` identity matches.
 9. **Server clock skew:** NFS-side mtimes appeared several minutes offset; use
    in-file UTC timestamps for heartbeat/transition reasoning.
 10. **Service rollback completeness:** the cutover edits the user unit (adds the
-    gate) and creates a gate script. Backups must cover the exact unit, drop-ins
-    (currently none), and gate absence; rollback must restore them, run
-    `systemctl --user daemon-reload`, and verify the effective unit with
-    `systemctl --user cat`/`show`.
+    gate) and creates a gate script. Backups must cover the exact unit, the
+    drop-in snapshot (currently none), and gate absence; rollback restores the
+    unit, removes only the cutover-owned drop-in/gate, preserves unrelated
+    drop-ins, runs `systemctl --user daemon-reload`, and verifies the effective
+    unit with `systemctl --user cat`/`show`.
+11. **Startup-gate option parsing:** substring checks are unsafe because
+    `mountvers=3` contains `vers=3` and `mountproto=tcp` contains `proto=tcp`.
+    The gate uses exact comma-delimited tokens, rejects wrong/duplicate values,
+    and rejects `soft`, `nolock`, and local-only locking. Run the negative tests
+    in §5.4 before installation.
 
 ---
 

@@ -82,3 +82,19 @@ plan:
   verify the effective unit; then restart and validate against the original
   `/opt/md2` queue.
 - Canary NO-GO is unchanged; no authorization is implied.
+
+## Review correction — fail-closed gate parsing and scoped rollback (2026-11-10)
+
+- §5.4 `ref-queue-v3-gate` now splits the comma-delimited mount options into
+  exact tokens. `mountvers=3` cannot satisfy `vers=3`, and `mountproto=tcp`
+  cannot satisfy `proto=tcp`.
+- The gate requires exactly one `vers=3`, `mountvers=3`, `proto=tcp`, `hard`,
+  and `local_lock=none`; it rejects duplicate/wrong values, `soft`, `nolock`,
+  and local-only locking (`local_lock=all|flock|posix`).
+- §5.4 adds negative option-parsing tests covering each wrong protocol/option
+  combination, including the two substring cases.
+- §7 rollback restores the exact unit and removes only the cutover-owned
+  `10-ref-queue-v3.conf` and gate script. It never deletes the drop-in directory
+  or overwrites unrelated drop-ins; the §5.7 drop-in copy is evidence only.
+- Prior service backups, reload/verification ordering, startup checks, and canary
+  NO-GO are preserved.

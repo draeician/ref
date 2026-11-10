@@ -50,18 +50,24 @@
   `FragmentPath`/`DropInPaths`/`ExecStart`, and the (currently none) drop-ins.
   Rollback restores that unit so the only `ExecStartPre` is
   `/usr/bin/mountpoint -q /opt/md2`, restores the original queue paths, removes
-  the new v3 gate/`ref-queue-v3` dependency and dedicated mount, reloads
+  only the cutover-owned gate/`10-ref-queue-v3.conf` and dedicated mount, reloads
   **both** managers (`systemctl --user daemon-reload` and
   `sudo systemctl daemon-reload`), verifies the effective unit with
   `systemctl --user cat`/`show`, then restarts and validates against the original
-  `/opt/md2` queue. Ordered procedure is report §7.
+  `/opt/md2` queue. It never recursively deletes the drop-in directory or
+  overwrites unrelated drop-ins. Ordered procedure is report §7.
 - **Fail-closed startup gate:** the proposed cutover adds
   `~/.local/bin/ref-queue-v3-gate` as an `ExecStartPre` after the existing
-  `/opt/md2` check. It validates the exact target, `nfs`/`vers=3`/
-  `mountvers=3`/`proto=tcp`/`hard`/`local_lock=none`, source
+  `/opt/md2` check. It parses the comma-delimited mount options into exact
+  tokens and requires exactly one `vers=3`, `mountvers=3`, `proto=tcp`, `hard`,
+  and `local_lock=none`; `mountvers=3` cannot satisfy `vers=3` and
+  `mountproto=tcp` cannot satisfy `proto=tcp`. It rejects wrong or duplicate
+  values, `soft`, `nolock`, and local-only locking (`local_lock=all|flock|posix`).
+  It also validates the exact target, `nfs` fstype, source
   `depot.draeician.com:/mnt/tank/md2`, `queue.id` hash `28998c9e…`, UUID
   `8c6fc098…`, and producer read/search/write access. Missing or mismatched
-  values prevent the API from starting. After editing the user unit, the cutover
+  values prevent the API from starting; §5.4 documents negative tests for each
+  wrong protocol/option combination. After editing the user unit, the cutover
   must run `systemctl --user daemon-reload` and verify the effective two
   `ExecStartPre` lines with `systemctl --user cat`/`show` before restarting.
   This gate supersedes the earlier mountpoint-only suggestion in the merged
