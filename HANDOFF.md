@@ -45,9 +45,31 @@
   producer mount of the same export, point `REF_LOCAL_TRANSCRIBE_QUEUE_DIR` and
   `queue.path` at it, keep the UUID and NFSv3 guard, then run the bounded canary
   under the report's acceptance criteria.
+- **Rollback correction:** the 2026-11-09 pre-deployment backup is **not** a
+  valid rollback source — its `local-transcribe.config.yaml.before` predates the
+  UUID correction and holds the stale `/tmp/lt-smoke-queue-59553` /
+  `6a058908-116f-41c9-987f-d5f4ef38667e`. Take **fresh backups immediately
+  before** any future mount/config change; roll back only to that fresh,
+  known-good post-correction config (queue UUID
+  `8c6fc098-8cbe-41ae-9689-dd759797a582`, `expected_nfs_version: 3`). Never
+  reintroduce the stale smoke-test values.
+- **Mount-unit correction:** do not guess the unit filename. Generate it with
+  `systemd-escape --path --suffix=mount /mnt/ref-queue-v3`
+  (→ `mnt-ref\x2dqueue\x2dv3.mount`, systemd 259). Validate with
+  `systemd-analyze verify` + `daemon-reload` + `systemctl cat`, enable for
+  boot persistence, keep the mount independent of `/opt/md2`, and gate
+  `ref-api` startup with `ExecStartPre=/usr/bin/mountpoint -q /mnt/ref-queue-v3`.
+  The unit remains **illustrative and unauthorized** for installation.
+- **Worker-liveness correction:** active systemd status is **not** proof of
+  progress, and lock metadata alone is **not** proof of current ownership. The
+  stale `2026-11-07T17:50:25+00:00` heartbeat is **unresolved**. Before canary,
+  freshly demonstrate: live process/lock match, current logs and
+  heartbeat/progress, exactly one worker, and no stuck `processing/` state.
+  **If liveness cannot be demonstrated, STOP.**
 - **Blockers retained:** dedicated v3 mount untested; guard mismatch unresolved;
   canary not executed; nomnom SSH/pipx deployment outstanding; pending transcript
-  recovery not implemented; stale worker heartbeat observation; `/opt/md2` at 99%.
+  recovery not implemented; worker liveness/heartbeat unresolved; `/opt/md2` at
+  99%; UID/ACL behavior on a v3 mount unverified.
 
 ## Deployed state (minion-26)
 
