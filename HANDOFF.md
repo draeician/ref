@@ -79,6 +79,31 @@
   `/opt/md2` and the aether worker mount are not modified.
 - **Deployment task `7d2c9e41` remains in review/ with State REVIEW.**
 
+## NFSv3 cutover preflight documentation merge closure (PR #39)
+
+- Approved head: `792478b530bf5826799025faa49d2aacb5cd53eb`.
+- Pre-merge exact-head CI: workflow `tests`, run `42915544619`, **success**.
+- PR #39 merged with a **normal merge commit**:
+  `df662a65e953e522b5d350183d2090385f8019ab` (parents `2cf3e9c…` and
+  `792478b…`). No squash, rebase, force-push, or direct `main` commit.
+- Post-merge `main` CI: workflow `tests`, run `42916787616`, head `df662a6…`,
+  **success**.
+- Final `main` after this merge:
+  `df662a65e953e522b5d350183d2090385f8019ab`.
+- Documentation-only diff: `HANDOFF.md`,
+  `docs/investigations/nfs-v3-cutover-readiness.md`, and
+  `.codex/tasks/review/19294572-nfs-v3-producer-cutover-preflight.md`.
+- The PR includes the exact-token fail-closed startup gate, negative
+  protocol/option tests, scoped rollback that preserves unrelated drop-ins, and
+  the preserved canary **NO-GO**.
+- Local and remote `ops/nfs-v3-producer-preflight` deleted after merge; tracking
+  refs pruned. Unrelated branches (`docs/unified-ref-consolidation-plan`,
+  `fix/youtube-auto-show-notes-api`) preserved.
+- Tasks `19294572` and `7d2c9e41` remain in `.codex/tasks/review/` with State
+  **REVIEW**; deployment is not DONE. No production mount, config edit, service
+  restart, queue write, canary, or backlog replay was performed.
+- This closure PR records merge evidence only and changes documentation only.
+
 ## NFS investigation documentation merge closure (PR #37)
 
 - Approved head: `02402f3551c947f0a7762fcce776108158b85307`.
