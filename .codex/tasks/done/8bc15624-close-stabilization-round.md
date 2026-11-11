@@ -2,11 +2,15 @@
 
 - **Task ID:** `8bc15624`
 - **Owner:** OpenCode
-- **State:** REVIEW
-- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/review/` pending ChatGPT review. It is not DONE and nothing is merged.
-- **Branch:** `chore/close-stabilization-round`
+- **State:** DONE
+- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/done/` after PR #41 was reviewed, merged, and post-merge CI passed.
+- **Branch:** `chore/close-stabilization-round` (merged and deleted)
 - **Base:** `origin/main` = `b9bbffac64ff84f4c25ecd5053c03eb6d25d4d96`
-- **Related tasks:** `19294572` (complete after verified evidence), `7d2c9e41` (remains REVIEW)
+- **Related tasks:** `19294572` (DONE), `7d2c9e41` (remains REVIEW)
+- **Delivery PR:** [#41](https://github.com/draeician/ref/pull/41) — merged.
+- **Merge commit:** `bcf864e775626004215236e8f93341feb453df73`.
+- **Closure branch:** `docs/close-stabilization-round-8bc15624` (docs-only
+  closure PR; not merged).
 - **Authorization:** Repository documentation, task lifecycle, and Git housekeeping
   only. No production changes, mounts, service restarts, queue/archive
   modifications, backlog replay, new features, or deletion of unmerged branches.
@@ -17,7 +21,7 @@
 [CLAIM] 8bc15624 Close the ref stabilization round
 repo: draeician/ref@chore/close-stabilization-round
 actor: OpenCode  role: Housekeeping/documentation
-task-file: .codex/tasks/review/8bc15624-close-stabilization-round.md
+task-file: .codex/tasks/wip/8bc15624-close-stabilization-round.md
 plan:
 - Record cancellation of the additional NFSv3 producer mount
 - Preserve existing NFSv4.2 producer and NFSv3/NLM worker mounts
@@ -173,12 +177,15 @@ Result: clean.
   - `.codex/tasks/done/19294572-...md` exists with State `DONE`;
   - `.codex/tasks/review/7d2c9e41-...md` exists with State `REVIEW`;
   - no copy of `19294572` remains in `review/`;
-  - this task is in `review/` with State `REVIEW`.
+  - at the time of PR #41, this task was in `review/` with State `REVIEW`;
+    it moved to `done/` with State `DONE` only after merge and post-merge CI
+    (see below).
 - Branch preservation: `origin/docs/unified-ref-consolidation-plan` =
   `ad2aae34f222f32ea02ab3386898cf559ec87823` (draft PR #29) and
   `origin/fix/youtube-auto-show-notes-api` =
   `8446400bf902746282c5c198edc5d8e73a53e153` (six unmerged divergent commits)
-  are unchanged. No branch was deleted.
+  were unchanged at the time of PR #41. No branch was deleted during that review
+  round; only the merged housekeeping branch was deleted afterward (see below).
 
 ### Limitations
 
@@ -190,9 +197,31 @@ Result: clean.
   housekeeping PR; it does not substitute for review by ChatGPT or merge approval
   by Drae.
 
+### Merge, post-merge CI, and cleanup (2026-11-10/11)
+
+- PR #41 head matched the approved HEAD
+  `d663ac13ed3725320a53dbd8bb79190f980539a4`; PR state `OPEN`, mergeable
+  `MERGEABLE`, merge state `CLEAN`; exact-head CI run `42925244767` (`tests`,
+  `pull_request`) completed **success**.
+- Merged with a **normal merge commit** (no squash/rebase/force-push):
+  `bcf864e775626004215236e8f93341feb453df73`, parents
+  `b9bbffac64ff84f4c25ecd5053c03eb6d25d4d96` and
+  `d663ac13ed3725320a53dbd8bb79190f980539a4`. The approved head is an ancestor
+  of `origin/main`.
+- Post-merge `main` CI: run `42928999802` (`tests`, `push`) completed **success**
+  on `bcf864e775626004215236e8f93341feb453df73`. GitHub created the push run
+  about 11 minutes after the merge; it was not skipped.
+- Branch cleanup: local `chore/close-stabilization-round` deleted with
+  `git branch -d`; remote `origin/chore/close-stabilization-round` deleted and
+  confirmed absent with `git ls-remote --heads origin`. Only `main` and the two
+  preserved branches remain.
+- Preserved as required: `7d2c9e41` in `review/` with State `REVIEW`, draft PR
+  #29 (`docs/unified-ref-consolidation-plan`), and
+  `fix/youtube-auto-show-notes-api`.
+
 ## Result
 
-Documentation-only stabilization closure:
+Documentation-only stabilization closure, merged via PR #41:
 
 - `HANDOFF.md` records the final decision, the branch audit, the follow-up list,
   and a new append-only Decision Journal item 9.
@@ -201,8 +230,10 @@ Documentation-only stabilization closure:
 - `19294572` is closed as `DONE` with verified PR #39/#40 merge and CI evidence.
 - `7d2c9e41` remains in `review/` with State `REVIEW`; production work is not
   marked DONE.
-- No branch was deleted, no mount was installed, and no production change was
-  made.
+- No mount was installed and no production change was made.
+- The merged housekeeping branch was deleted locally and remotely after merge;
+  no unmerged branch was deleted.
 
-The housekeeping PR is opened against `main` with exact-head CI evidence in the
-PR body. **STOP for ChatGPT review; do not merge.**
+This task is `DONE` after review, merge, and successful post-merge CI. A separate
+docs-only closure PR records the merge/CI/cleanup evidence; it remains open for
+ChatGPT review and is **not** merged by this task.

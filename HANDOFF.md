@@ -11,8 +11,8 @@
 
 ## Stabilization closure — final architecture decision (2026-11-10)
 
-- **Housekeeping task:** `.codex/tasks/review/8bc15624-close-stabilization-round.md`
-  (State **REVIEW**; documentation and task lifecycle only).
+- **Housekeeping task:** `.codex/tasks/done/8bc15624-close-stabilization-round.md`
+  (State **DONE**; documentation and task lifecycle only).
 - **Decision:** the proposed additional NFSv3 producer mount for `minion-26` is
   **cancelled, superseded, and not authorized**.
 - **Retained:** the existing NFSv4.2 producer mount on `minion-26` and the
@@ -30,6 +30,24 @@
 - **No production action:** no mount, configuration edit, service restart,
   queue/archive write, canary, or backlog replay was performed by this closure.
 
+### Final closure record (2026-11-10/11)
+
+- PR [#41](https://github.com/draeician/ref/pull/41) was reviewed, approved, and
+  merged with a **normal merge commit** (no squash, rebase, force-push, or direct
+  push to `main`): `bcf864e775626004215236e8f93341feb453df73`, parents
+  `b9bbffac64ff84f4c25ecd5053c03eb6d25d4d96` and
+  `d663ac13ed3725320a53dbd8bb79190f980539a4`.
+- Approved PR head: `d663ac13ed3725320a53dbd8bb79190f980539a4` (matched at
+  merge). Pre-merge exact-head CI: run `42925244767` (`tests`,
+  `pull_request`), **success**.
+- Post-merge `main` CI: run `42928999802` (`tests`, `push`) on `bcf864e`,
+  **success**. The approved head is an ancestor of `origin/main`.
+- The merged housekeeping branch was deleted locally and remotely; confirmed
+  absent with `git ls-remote --heads origin`. Only `main` and the two preserved
+  branches remain.
+- The closure record is delivered in a separate docs-only PR that **remains open
+  for ChatGPT review and is not merged**.
+
 ### Branch audit (2026-11-10)
 
 | Branch | Classification | Action |
@@ -38,8 +56,9 @@
 | `docs/unified-ref-consolidation-plan` | Open draft PR #29; 3 commits ahead / 44 behind; not merged | Preserve |
 | `fix/youtube-auto-show-notes-api` | Unmerged divergent work; 6 commits ahead / 144 behind; no PR; all six commits absent from `main` | Preserve pending separate review |
 
-No merged housekeeping branch was eligible for deletion. Neither preserved
-branch is authorization to merge or delete it.
+At audit time, no merged housekeeping branch was eligible for deletion. After PR
+#41 merged, only its own branch was deleted. Neither preserved branch is
+authorization to merge or delete it.
 
 ### Remaining work (follow-ups only, not authorization)
 
