@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -27,7 +28,26 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="Enable uvicorn auto-reload (development)",
     )
+    parser.add_argument(
+        "--rollback-check",
+        action="store_true",
+        help=(
+            "Read-only check: exit 0 when an older ref-api can be started safely, "
+            "or 2 when pending/running/failed Reddit discovery jobs or a corrupt "
+            "queue block downgrade. Run offline after stopping the service. Does "
+            "not start the server."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def run_rollback_check() -> int:
+    """Print downgrade safety as JSON and return a process exit code."""
+    from ref_api import service
+
+    result = service.rollback_safety()
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("safe") else 2
 
 
 def main(argv=None) -> None:
@@ -38,6 +58,10 @@ def main(argv=None) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    args = parse_args(argv)
+    if args.rollback_check:
+        sys.exit(run_rollback_check())
 
     try:
         import uvicorn
@@ -50,7 +74,6 @@ def main(argv=None) -> None:
         )
         sys.exit(1)
 
-    args = parse_args(argv)
     uvicorn.run(
         "ref_api.app:app",
         host=args.host,

@@ -42,6 +42,12 @@ from ref_cli.utils.colors import success, error, warning, info, url, title, high
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, RequestBlocked
 from ref_cli import transcript_block, transcript_queue
+from ref_cli.capture import (
+    capture_frame,
+    record_error,
+    record_primary,
+    sanitize_error_detail,
+)
 
 # Import the new transcript functionality
 try:
@@ -1004,13 +1010,22 @@ def get_title_from_url(url: str) -> str:
         logging.error(error_msg)
         return error_msg
 
-    lynx_command = ('lynx -dump -nolist -force_html -hiddenlinks=ignore '
-                    '-display_charset=UTF-8 -assume_charset=UTF-8 -pseudo_inlines '
-                    f'-dont_wrap_pre -source {shlex.quote(url)}')
-    verbose_logger.log(f"Executing lynx command: {lynx_command}")
+    # Invoke lynx directly (no shell). A shell wrapper would survive
+    # ``subprocess.run(timeout=...)`` as an orphan along with its lynx child,
+    # leaving processes and pipes behind after a timeout. With an argv list,
+    # ``run`` kills the actual lynx process it started.
+    lynx_command = [
+        "lynx", "-dump", "-nolist", "-force_html", "-hiddenlinks=ignore",
+        "-display_charset=UTF-8", "-assume_charset=UTF-8", "-pseudo_inlines",
+        "-dont_wrap_pre", "-source", url,
+    ]
+    verbose_logger.log(
+        "Executing lynx command: "
+        + " ".join(shlex.quote(sanitize_error_detail(part, limit=1000)) for part in lynx_command)
+    )
 
     try:
-        result = subprocess.run(lynx_command, shell=True, capture_output=True, text=True, errors="ignore", timeout=30)
+        result = subprocess.run(lynx_command, capture_output=True, text=True, errors="ignore", timeout=30)
         
         if result.returncode != 0:
             logging.error(f"Lynx command failed with return code {result.returncode}")
@@ -1095,11 +1110,11 @@ def get_title_from_url(url: str) -> str:
         logging.error("Lynx command timed out")
         return "Error: Request timed out"
     except subprocess.SubprocessError as e:
-        logging.error(f"Subprocess error occurred: {e}")
-        return f"Error: Subprocess error - {e}"
+        logging.error("Subprocess error occurred: %s", sanitize_error_detail(e))
+        return f"Error: Subprocess error - {sanitize_error_detail(e)}"
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        return f"Error: Unexpected error - {e}"
+        logging.error("An unexpected error occurred: %s", sanitize_error_detail(e))
+        return f"Error: Unexpected error - {sanitize_error_detail(e)}"
 
 def check_integrity():
     """
@@ -1400,15 +1415,18 @@ def record_youtube_playlist_link(url: str, force: bool) -> None:
     )
     playlist_title, playlist_uploader = _youtube_playlist_metadata(list_ids[0], youtube)
     current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-    if not url_exists_in_file(simplified_url, UNIFIED) or force:
-        _append_reference_line(
-            f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube\n"
-        )
-        print(f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube")
-        logging.info(f"Added playlist URL: {simplified_url}")
-    else:
-        print(f"URL {simplified_url} already recorded.")
-        logging.info(f"Duplicate URL: {simplified_url}")
+    with _archive_lock:
+        if not url_exists_in_file(simplified_url, UNIFIED) or force:
+            _append_reference_line(
+                f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube\n"
+            )
+            record_primary("added", simplified_url, source="YouTube")
+            print(f"{current_time}|[{simplified_url}]|({playlist_title})|{playlist_uploader}|YouTube")
+            logging.info(f"Added playlist URL: {simplified_url}")
+        else:
+            print(f"URL {simplified_url} already recorded.")
+            record_primary("exists", simplified_url, source="YouTube")
+            logging.info(f"Duplicate URL: {simplified_url}")
 
 def ensure_path_exists(file_path: str):
     """
@@ -2634,7 +2652,10 @@ def log_error(error_type: str, url: str, error_message: str) -> None:
         url (str): The URL that caused the error
         error_message (str): The detailed error message
     """
-    error_msg = f"{error_type} - URL: {url} - Error: {error_message}"
+    error_msg = (
+        f"{error_type} - URL: {sanitize_error_detail(url, limit=1000)} - "
+        f"Error: {sanitize_error_detail(error_message, limit=1000)}"
+    )
     error_logger.error(error_msg)
     logging.error(error_msg)
 
@@ -2667,41 +2688,70 @@ def _record_general_url(simplified_url: str, force: bool, current_time: str) -> 
     if title.startswith("Error: 'lynx' is not installed"):
         print(title)
         print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
+        record_error(sanitize_error_detail(title))
         return
     elif title == "Dead link":
         log_error("URL Processing", simplified_url, "Dead link detected")
         print(f"Error: The URL {simplified_url} is a dead link.")
+        record_error("Dead link detected")
     elif title in ("Timeout error", "Error: Request timed out"):
         log_error("URL Processing", simplified_url, "Request timed out")
         print(f"Error: The request to {simplified_url} timed out.")
+        record_error("Request timed out")
     elif title == "Too many redirects":
         log_error("URL Processing", simplified_url, "Too many redirects")
         print(f"Error: The URL {simplified_url} has too many redirects.")
+        record_error("Too many redirects")
     elif title.startswith("Error: Unexpected error"):
-        log_error("URL Processing", simplified_url, title)
+        reason = sanitize_error_detail(
+            title[len("Error: Unexpected error"):].lstrip(" -:") or "unexpected error"
+        )
+        log_error("URL Processing", simplified_url, f"Unexpected error: {reason}")
+        # Preserve the historical first line for CLI consumers, but keep the
+        # actionable reason next to it instead of discarding it.
         print("Error: An unexpected error occurred.")
+        print(f"Reason: {reason}")
+        record_error(f"Unexpected error: {reason}")
     elif title.startswith("Error: Lynx command failed") or title.startswith("Error: Subprocess error"):
-        log_error("URL Processing", simplified_url, title)
-        print(f"Error: Could not fetch {simplified_url} ({title}).")
+        reason = sanitize_error_detail(title)
+        log_error("URL Processing", simplified_url, reason)
+        print(f"Error: Could not fetch {simplified_url} ({reason}).")
+        record_error(f"Could not fetch title ({reason})")
     elif title and not title.startswith("Error"):
         # Check-then-append is a single critical section so two concurrent
         # submissions of the same URL cannot both append a duplicate row.
         with _archive_lock:
             if url_exists_in_file(simplified_url, UNIFIED) and not force:
                 print(f"URL {simplified_url} already recorded.")
+                record_primary("exists", simplified_url, source="General")
                 logging.info(f"Duplicate URL: {simplified_url}")
             else:
                 _append_reference_line(f"{current_time}|[{simplified_url}]|({title})|General|General\n")
+                record_primary("added", simplified_url, source="General")
                 print(f"{current_time}|[{simplified_url}]|({title})|General|General")
                 logging.info(f"Added URL: {simplified_url}")
     elif title.startswith("Error"):
-        log_error("URL Processing", simplified_url, title)
-        print(f"Error: {simplified_url} returned: {title}")
+        reason = sanitize_error_detail(title)
+        log_error("URL Processing", simplified_url, reason)
+        print(f"Error: {simplified_url} returned: {reason}")
+        record_error(reason)
     else:
         log_error("URL Processing", simplified_url, f"Invalid URL with title: {title}")
         print("Invalid URL")
+        record_error("Invalid URL (no usable title)")
 
-def process_url(url: str, force: bool) -> None:
+def process_url(url: str, force: bool, *, discover_reddit_links: bool = True) -> None:
+    """Process one URL inside a tracked capture frame.
+
+    The frame depth lets :mod:`ref_cli.capture` distinguish the submitted URL
+    from recursive child work, so a child URL can never replace the primary
+    capture result.
+    """
+    with capture_frame():
+        return _process_url(url, force, discover_reddit_links=discover_reddit_links)
+
+
+def _process_url(url: str, force: bool, *, discover_reddit_links: bool = True) -> None:
     """
     Processes a given URL to extract and record relevant information.
     """
@@ -2712,17 +2762,26 @@ def process_url(url: str, force: bool) -> None:
         verbose_logger.log("Detected YouTube search results page - not supported")
         log_error("URL Processing", url, "YouTube search results pages are not supported")
         print("Error: YouTube search results pages are not supported")
+        record_error("YouTube search results pages are not supported")
         raise ValueError("YouTube search results pages are not supported")
     
     if url.lower().endswith('.pdf'):
         verbose_logger.log("Processing PDF URL")
         current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         title = os.path.basename(urlparse(url).path)
-        if not url_exists_in_file(url, UNIFIED) or force:
-            verbose_logger.log(f"Adding PDF entry with title: {title}")
-            _append_reference_line(f"{current_time}|[{url}]|({title})|PDF Document|General\n")
-            print(f"{current_time}|[{url}]|({title})|PDF Document|General")
-            logging.info(f"Added PDF URL: {url}")
+        # Duplicate check and append are one critical section. There is
+        # deliberately no stdout line for an existing PDF; the structured
+        # capture result still reports ``exists``.
+        with _archive_lock:
+            if not url_exists_in_file(url, UNIFIED) or force:
+                verbose_logger.log(f"Adding PDF entry with title: {title}")
+                _append_reference_line(f"{current_time}|[{url}]|({title})|PDF Document|General\n")
+                record_primary("added", url, source="PDF Document")
+                print(f"{current_time}|[{url}]|({title})|PDF Document|General")
+                logging.info(f"Added PDF URL: {url}")
+            else:
+                record_primary("exists", url, source="PDF Document")
+                logging.info(f"Duplicate PDF URL: {url}")
         return
 
     try:
@@ -2731,9 +2790,10 @@ def process_url(url: str, force: bool) -> None:
         simplified_url = simplify_url(resolved_url)
         logging.debug(f"Simplified URL after resolving redirects: {simplified_url}")
     except Exception as e:
-        error_message = f"Failed to process URL: {e}"
+        error_message = f"Failed to process URL: {sanitize_error_detail(e)}"
         log_error("URL Processing", url, error_message)
         print(f"Error: {error_message}. Skipping...")
+        record_error(error_message)
         raise
 
     current_time = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
@@ -2751,6 +2811,7 @@ def process_url(url: str, force: bool) -> None:
             if title.startswith("Error: 'lynx' is not installed"):
                 print(title)
                 print("Please install lynx to fetch webpage titles, or use the --force flag to add the URL without a title.")
+                record_error(sanitize_error_detail(title))
                 return
             
             # Always check if transcript exists and fetch if it doesn't
@@ -2794,21 +2855,28 @@ def process_url(url: str, force: bool) -> None:
                         logging.info(f"No transcript available for Rumble video {video_id}")
             
             # Add or update the reference entry (uploader=channel, source=Rumble)
-            if not url_exists_in_file(simplified_url, UNIFIED) or force:
-                _append_reference_line(
-                    f"{current_time}|[{simplified_url}]|({title})|{channel}|Rumble|{transcript_file}\n",
-                )
-                print(f"{current_time}|[{simplified_url}]|({title})|{channel}|Rumble|{transcript_file}")
-                logging.info(f"Added Rumble URL: {simplified_url}")
-            else:
+            existing = False
+            with _archive_lock:
+                if not url_exists_in_file(simplified_url, UNIFIED) or force:
+                    _append_reference_line(
+                        f"{current_time}|[{simplified_url}]|({title})|{channel}|Rumble|{transcript_file}\n",
+                    )
+                    record_primary("added", simplified_url, source="Rumble")
+                    print(f"{current_time}|[{simplified_url}]|({title})|{channel}|Rumble|{transcript_file}")
+                    logging.info(f"Added Rumble URL: {simplified_url}")
+                else:
+                    existing = True
+            if existing:
                 # Update existing entry with transcript / channel if needed
                 update_reference_entry(
                     simplified_url, title, channel, transcript_file, source="Rumble"
                 )
+                record_primary("exists", simplified_url, source="Rumble")
         except Exception as e:
-            error_message = f"Failed to process Rumble URL: {e}"
+            error_message = f"Failed to process Rumble URL: {sanitize_error_detail(e)}"
             log_error("Rumble Processing", simplified_url, error_message)
             print(f"Error: {error_message}")
+            record_error(error_message)
     elif _is_youtube_channel_url(simplified_url):
         _record_general_url(simplified_url, force, current_time)
     elif _is_youtube_community_post(simplified_url):
@@ -2822,6 +2890,9 @@ def process_url(url: str, force: bool) -> None:
                 print(f"Error: Failed to process linked video {video_url}: {e}")
     elif _is_reddit_url(simplified_url):
         _record_general_url(simplified_url, force, current_time)
+        if not discover_reddit_links:
+            # ref-api queues discovery durably instead of doing it here.
+            return
         try:
             from ref_cli.reddit import discover_outbound_urls
             outbound_urls = discover_outbound_urls(simplified_url)
@@ -2847,8 +2918,14 @@ def process_url(url: str, force: bool) -> None:
                 with _archive_lock:
                     if not url_exists_in_file(playlist_url, UNIFIED) or force:
                         _append_reference_line(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube\n")
+                        record_primary("added", playlist_url, source="YouTube")
                         print(f"{current_time}|[{playlist_url}]|({playlist_title})|{playlist_uploader}|YouTube")
                         logging.info(f"Added playlist URL: {playlist_url}")
+                    else:
+                        # No stdout line for an existing playlist; structured
+                        # capture still reports ``exists``.
+                        record_primary("exists", playlist_url, source="YouTube")
+                        logging.info(f"Duplicate playlist URL: {playlist_url}")
                 for video_id, title, uploader, published_at in videos:
                     title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -2909,6 +2986,13 @@ def process_url(url: str, force: bool) -> None:
                     else:
                         print(f"URL {video_url} already recorded.")
                         logging.info(f"Duplicate URL: {video_url}")
+                    # First primary capture wins; this is a no-op when the
+                    # playlist URL was already recorded above.
+                    record_primary(
+                        "exists" if url_exists and not force else "added",
+                        video_url,
+                        source="YouTube",
+                    )
             else:  # Single Video
                 video_id, title, uploader, published_at = result
                 title = re.sub('[^0-9a-zA-Z]+', ' ', title).strip()
@@ -2971,14 +3055,21 @@ def process_url(url: str, force: bool) -> None:
                     print(f"URL {video_url} already recorded.")
                     print(f"Title: {title}")
                     logging.info(f"Duplicate URL: {video_url}")
+                record_primary(
+                    "exists" if url_exists and not force else "added",
+                    video_url,
+                    source="YouTube",
+                )
         except YouTubeCredentialsError as e:
             error_message = str(e)
             log_error("YouTube Processing", simplified_url, error_message)
             print(f"Error: {error_message}")
+            record_error(error_message)
         except ValueError as e:
-            error_message = f"Invalid YouTube URL: {e}"
+            error_message = f"Invalid YouTube URL: {sanitize_error_detail(e)}"
             log_error("YouTube Processing", simplified_url, error_message)
             print(f"Error: {error_message}")
+            record_error(error_message)
     else:
         _record_general_url(simplified_url, force, current_time)
 

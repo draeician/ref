@@ -17,6 +17,8 @@ def _patch_subprocess(monkeypatch, html):
     def fake_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and cmd[:2] == ['which', 'lynx']:
             return subprocess.CompletedProcess(cmd, 0, '', '')
+        if isinstance(cmd, list) and cmd[:1] == ['lynx']:
+            return subprocess.CompletedProcess(cmd, 0, html, '')
         if isinstance(cmd, str) and 'lynx' in cmd:
             return subprocess.CompletedProcess(cmd, 0, html, '')
         raise AssertionError('unexpected subprocess.run: %r' % (cmd,))
@@ -482,20 +484,42 @@ def test_oembed_rate_limit_waits_before_eleventh_request(monkeypatch, tmp_path):
     assert len(cli._oembed_request_times) == 1
 
 
-def test_general_title_uses_shell_quoted_url(monkeypatch):
-    """A URL from third-party show notes must not execute shell substitutions."""
-    import shlex
-
+def test_general_title_passes_url_as_argv_without_shell(monkeypatch):
+    """A URL from third-party show notes must be an argv item, never shell text."""
     unsafe = "https://example.com/path?q=$(whoami)"
     calls = []
 
     def fake_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and cmd[:2] == ["which", "lynx"]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
-        calls.append(cmd)
+        calls.append((cmd, kwargs))
         return subprocess.CompletedProcess(cmd, 0, "<title>Example</title>", "")
 
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
     assert cli.get_title_from_url(unsafe) == "Example"
     assert len(calls) == 1
-    assert f"-source {shlex.quote(unsafe)}" in calls[0]
+    cmd, kwargs = calls[0]
+    assert isinstance(cmd, list)
+    assert cmd[-2:] == ["-source", unsafe]
+    assert not kwargs.get("shell", False)
+
+
+def test_lynx_timeout_kills_direct_process_without_shell(monkeypatch):
+    """Timeout cleanup must target lynx itself, not an orphaned shell wrapper."""
+    calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[:2] == ["which", "lynx"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        calls.append((cmd, kwargs))
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli.get_title_from_url("https://example.com/slow") == "Error: Request timed out"
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert isinstance(cmd, list)
+    assert cmd[0] == "lynx"
+    assert not kwargs.get("shell", False)
+    assert kwargs.get("timeout") == 30

@@ -42,6 +42,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from ref_api.atomic_json import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 QUEUE_DIRNAME = "show_notes_queue"
@@ -51,6 +53,14 @@ JOBS_FILENAME = "jobs.json"
 # single discovered URL.
 KIND_DISCOVER = "discover"
 KIND_INGEST = "ingest"
+
+# Discovery source. ``source`` is an additive, optional field: existing snapshots
+# have no value and therefore load as YouTube, while new Reddit discovery jobs
+# use the same ``discover`` kind so an older ref-api can still read the table
+# (it degrades to a no-op YouTube discovery instead of corrupting the queue).
+SOURCE_YOUTUBE = "youtube"
+SOURCE_REDDIT = "reddit"
+ALLOWED_SOURCES = frozenset({SOURCE_YOUTUBE, SOURCE_REDDIT})
 
 # Non-terminal states are never re-claimed by the worker.
 TERMINAL_STATES = frozenset({"done", "failed"})
@@ -187,6 +197,12 @@ class ShowNotesQueue:
         if kind not in (KIND_DISCOVER, KIND_INGEST):
             raise ValueError(f"job {job_id!r} has invalid kind {kind!r}")
 
+        source = job.get("source")
+        if source is None:
+            source = SOURCE_YOUTUBE
+        elif source not in ALLOWED_SOURCES:
+            raise ValueError(f"job {job_id!r} has invalid source {source!r}")
+
         attempts = job.get("attempts")
         if attempts is None:
             attempts = 0
@@ -234,6 +250,7 @@ class ShowNotesQueue:
             "url_key": url_key,
             "parent_video_id": parent_video_id,
             "kind": kind,
+            "source": source,
             "status": status,
             "attempts": attempts,
             "next_attempt_at": _ts(job.get("next_attempt_at"), "next_attempt_at"),
@@ -247,10 +264,10 @@ class ShowNotesQueue:
         if self._corrupt:
             raise QueueCorruptError(self._corrupt_error)
 
-    def _prune_terminal(self) -> None:
+    def _prune_terminal(self, jobs: Dict[str, Dict[str, Any]]) -> None:
         """Compact terminal history to ``MAX_TERMINAL_JOBS`` (oldest first)."""
         terminal = [
-            job for job in self._jobs.values() if job.get("status") in TERMINAL_STATES
+            job for job in jobs.values() if job.get("status") in TERMINAL_STATES
         ]
         if len(terminal) <= MAX_TERMINAL_JOBS:
             return
@@ -258,21 +275,24 @@ class ShowNotesQueue:
             key=lambda job: (job.get("updated_at", 0.0), job.get("enqueued_at", 0.0))
         )
         for job in terminal[: len(terminal) - MAX_TERMINAL_JOBS]:
-            self._jobs.pop(job["id"], None)
+            jobs.pop(job["id"], None)
 
-    def _snapshot(self) -> None:
-        """Atomically persist the current job table (refuses when corrupt)."""
+    def _copy_jobs(self) -> Dict[str, Dict[str, Any]]:
+        """Return a shallow copy of the job table suitable for mutation."""
+        return {job_id: dict(job) for job_id, job in self._jobs.items()}
+
+    def _commit(self, jobs: Dict[str, Dict[str, Any]]) -> None:
+        """Persist ``jobs`` first, then publish it as the in-memory table.
+
+        Copy-on-write: a failed write leaves the previous in-memory snapshot
+        untouched, so a phantom accepted job is never visible to a later request
+        or to the worker.
+        """
         if self._corrupt:
             raise QueueCorruptError(self._corrupt_error)
-        self._prune_terminal()
-        os.makedirs(self.queue_dir, exist_ok=True)
-        tmp_path = f"{self.jobs_path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump({"jobs": self._jobs}, handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, self.jobs_path)
+        self._prune_terminal(jobs)
+        atomic_write_json(self.jobs_path, {"jobs": jobs})
+        self._jobs = jobs
 
     # -- lifecycle -------------------------------------------------------
 
@@ -280,16 +300,17 @@ class ShowNotesQueue:
         """Return any ``running`` job to ``pending`` (at-least-once after restart)."""
         with self._lock:
             self._check_not_corrupt()
+            jobs = self._copy_jobs()
             recovered = 0
             now = time.time()
-            for job in self._jobs.values():
+            for job in jobs.values():
                 if job.get("status") == "running":
                     job["status"] = "pending"
                     job["next_attempt_at"] = now
                     job["updated_at"] = now
                     recovered += 1
             if recovered:
-                self._snapshot()
+                self._commit(jobs)
             return recovered
 
     # -- mutations -------------------------------------------------------
@@ -298,12 +319,27 @@ class ShowNotesQueue:
     def _key(url: str) -> str:
         return (url or "").strip()
 
+    @staticmethod
+    def _is_duplicate(job: Dict[str, Any], key: str, kind: str) -> bool:
+        """True when ``job`` already covers this URL for ``kind``.
+
+        Ingest keeps the historical URL-wide dedup. Discovery is deduped only
+        against an existing discovery job, so submitting a URL that was already
+        ingested as a show-note child can still discover its outbound links.
+        """
+        if job.get("url_key") != key or job.get("status") not in _DEDUP_STATUSES:
+            return False
+        if kind == KIND_DISCOVER:
+            return job.get("kind") == KIND_DISCOVER
+        return True
+
     def enqueue(
         self,
         url: str,
         *,
         parent_video_id: str = "",
         kind: str = KIND_INGEST,
+        source: str = SOURCE_YOUTUBE,
     ) -> Optional[str]:
         """Add a job unless a pending/running/done job for ``url`` exists.
 
@@ -314,19 +350,23 @@ class ShowNotesQueue:
         key = self._key(url)
         if not key:
             return None
+        if source not in ALLOWED_SOURCES:
+            raise ValueError(f"Unsupported job source: {source!r}")
         with self._lock:
             self._check_not_corrupt()
-            for job in self._jobs.values():
-                if job.get("url_key") == key and job.get("status") in _DEDUP_STATUSES:
+            jobs = self._copy_jobs()
+            for job in jobs.values():
+                if self._is_duplicate(job, key, kind):
                     return None
             job_id = uuid.uuid4().hex
             now = time.time()
-            self._jobs[job_id] = {
+            jobs[job_id] = {
                 "id": job_id,
                 "url": url,
                 "url_key": key,
                 "parent_video_id": parent_video_id or "",
                 "kind": kind,
+                "source": source,
                 "status": "pending",
                 "attempts": 0,
                 "next_attempt_at": now,
@@ -334,7 +374,7 @@ class ShowNotesQueue:
                 "enqueued_at": now,
                 "updated_at": now,
             }
-            self._snapshot()
+            self._commit(jobs)
             return job_id
 
     def enqueue_many(
@@ -343,12 +383,16 @@ class ShowNotesQueue:
         *,
         parent_video_id: str = "",
         kind: str = KIND_INGEST,
+        source: str = SOURCE_YOUTUBE,
     ) -> Tuple[int, int]:
         """Batch-enqueue ``urls`` with a single snapshot. Returns (queued, skipped)."""
+        if source not in ALLOWED_SOURCES:
+            raise ValueError(f"Unsupported job source: {source!r}")
         queued = 0
         skipped = 0
         with self._lock:
             self._check_not_corrupt()
+            jobs = self._copy_jobs()
             now = time.time()
             for url in urls:
                 key = self._key(url)
@@ -356,18 +400,19 @@ class ShowNotesQueue:
                     skipped += 1
                     continue
                 if any(
-                    job.get("url_key") == key and job.get("status") in _DEDUP_STATUSES
-                    for job in self._jobs.values()
+                    self._is_duplicate(job, key, kind)
+                    for job in jobs.values()
                 ):
                     skipped += 1
                     continue
                 job_id = uuid.uuid4().hex
-                self._jobs[job_id] = {
+                jobs[job_id] = {
                     "id": job_id,
                     "url": url,
                     "url_key": key,
                     "parent_video_id": parent_video_id or "",
                     "kind": kind,
+                    "source": source,
                     "status": "pending",
                     "attempts": 0,
                     "next_attempt_at": now,
@@ -377,12 +422,43 @@ class ShowNotesQueue:
                 }
                 queued += 1
             if queued:
-                self._snapshot()
+                self._commit(jobs)
             return queued, skipped
 
-    def enqueue_discovery(self, video_url: str, video_id: str) -> Optional[str]:
-        """Enqueue a ``discover`` job for a submitted YouTube video."""
-        return self.enqueue(video_url, parent_video_id=video_id, kind=KIND_DISCOVER)
+    def enqueue_discovery(
+        self,
+        video_url: str,
+        video_id: str,
+        *,
+        source: str = SOURCE_YOUTUBE,
+    ) -> Optional[str]:
+        """Enqueue a ``discover`` job for a submitted YouTube/Reddit URL."""
+        return self.enqueue(
+            video_url,
+            parent_video_id=video_id,
+            kind=KIND_DISCOVER,
+            source=source,
+        )
+
+    def find_job(self, url: str, *, kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return the newest job for ``url`` (optionally filtered by kind)."""
+        key = self._key(url)
+        if not key:
+            return None
+        with self._lock:
+            self._load()
+            matches = [
+                job
+                for job in self._jobs.values()
+                if job.get("url_key") == key and (kind is None or job.get("kind") == kind)
+            ]
+            if not matches:
+                return None
+            matches.sort(
+                key=lambda job: (job.get("updated_at", 0.0), job.get("id", "")),
+                reverse=True,
+            )
+            return dict(matches[0])
 
     def next_pending(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """Atomically claim the next runnable job and mark it ``running``."""
@@ -398,31 +474,35 @@ class ShowNotesQueue:
             if not candidates:
                 return None
             candidates.sort(key=lambda job: (job.get("enqueued_at", 0.0), job.get("id", "")))
-            job = candidates[0]
-            job["status"] = "running"
-            job["attempts"] = int(job.get("attempts", 0)) + 1
-            job["updated_at"] = now
-            self._snapshot()
-            return dict(job)
+            claimed_id = candidates[0]["id"]
+            jobs = self._copy_jobs()
+            claimed = jobs[claimed_id]
+            claimed["status"] = "running"
+            claimed["attempts"] = int(claimed.get("attempts", 0)) + 1
+            claimed["updated_at"] = now
+            self._commit(jobs)
+            return dict(claimed)
 
     def mark_done(self, job_id: str) -> None:
         with self._lock:
             self._check_not_corrupt()
-            job = self._jobs.get(job_id)
-            if job is None:
+            if job_id not in self._jobs:
                 return
+            jobs = self._copy_jobs()
+            job = jobs[job_id]
             job["status"] = "done"
             job["last_error"] = ""
             job["updated_at"] = time.time()
-            self._snapshot()
+            self._commit(jobs)
 
     def mark_failed(self, job_id: str, error: str, *, retryable: bool = True) -> None:
         """Record a failure; retry with backoff up to ``MAX_ATTEMPTS``, else terminal."""
         with self._lock:
             self._check_not_corrupt()
-            job = self._jobs.get(job_id)
-            if job is None:
+            if job_id not in self._jobs:
                 return
+            jobs = self._copy_jobs()
+            job = jobs[job_id]
             now = time.time()
             attempts = int(job.get("attempts", 0))
             job["last_error"] = (error or "")[:2000]
@@ -437,7 +517,35 @@ class ShowNotesQueue:
                 job["status"] = "failed"
                 job["next_attempt_at"] = now
             job["updated_at"] = now
-            self._snapshot()
+            self._commit(jobs)
+
+    def rollback_blockers(self) -> List[Dict[str, Any]]:
+        """Reddit discovery jobs whose metadata an older API cannot preserve.
+
+        Older ref-api releases reconstruct jobs in ``_normalize_job`` without the
+        additive ``source`` field.  Two losses follow:
+
+        * A pending/running Reddit ``discover`` job is read as a non-video
+          YouTube job, consumed as a no-op and marked ``done``.
+        * On the older build's next snapshot write (for example ``recover()`` or
+          any enqueue), every job -- including a terminal ``failed`` one -- is
+          rewritten without ``source``, permanently losing its Reddit
+          provenance.
+
+        Downgrade is therefore blocked while any Reddit discovery job is
+        ``pending``, ``running`` or ``failed``.  A ``done`` job has no
+        outstanding work, so losing its source is harmless.  ``QueueCorruptError``
+        is raised when the queue cannot be read.
+        """
+        with self._lock:
+            self._check_not_corrupt()
+            return [
+                dict(job)
+                for job in self._jobs.values()
+                if job.get("kind") == KIND_DISCOVER
+                and job.get("source") == SOURCE_REDDIT
+                and job.get("status") in {"pending", "running", "failed"}
+            ]
 
     # -- introspection ---------------------------------------------------
 

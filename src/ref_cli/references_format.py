@@ -366,6 +366,24 @@ def iter_data_rows(path: str) -> Iterator[ReferenceRow]:
                 yield row
 
 
+def exact_url_rows(path: str, url: str) -> List[ReferenceRow]:
+    """Return rows whose stored URL is *exactly* ``url``.
+
+    This is deliberately not a substring or normalized match.  It is the
+    read-only primitive used by ``GET /urls/exists`` and by primary-capture
+    verification, so callers can distinguish a real archive row from a guessed
+    canonical form.  The read runs under the shared archive lock so it cannot
+    observe a partial append/rewrite.
+    """
+    target = (url or "").strip()
+    if not target:
+        return []
+    with archive_lock:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        return [row for row in iter_data_rows(path) if row.url == target]
+
+
 def needs_migration(path: str) -> bool:
     """True when the file is behind REFERENCES_FORMAT_VERSION."""
     if not os.path.isfile(path):

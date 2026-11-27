@@ -12,14 +12,19 @@ from fastapi.responses import FileResponse
 from fastapi.testclient import TestClient
 
 from ref_api.app import create_app
+from ref_cli.capture import record_primary
 
 
 SPECIAL_URL = "https://example.com/search?q=hello world&x=1#frag-üñîçødé"
 
 
 @pytest.fixture
-def client():
-    """TestClient with archive bootstrap mocked (no real filesystem writes)."""
+def client(tmp_path, monkeypatch):
+    """TestClient with an isolated archive and no real filesystem bootstrap."""
+    from ref_api import service
+
+    monkeypatch.setattr(service.ref_cli, "UNIFIED", str(tmp_path / "references.md"))
+    (tmp_path / "references.md").write_text("", encoding="utf-8")
     with patch("ref_api.app._bootstrap_archive"):
         application = create_app()
         with TestClient(application) as test_client:
@@ -41,9 +46,11 @@ def test_post_urls_single_preserves_special_characters(client: TestClient) -> No
         patch("ref_api.service.ref_cli.should_skip_url", return_value=False),
         patch("ref_api.service.ref_cli.is_youtube_video_id", return_value=False),
         patch("ref_api.service.ref_cli.process_url") as mock_process,
+        patch("ref_api.service._exact_archive_match", return_value=True),
     ):
 
-        def _fake_process(url: str, force: bool) -> None:
+        def _fake_process(url: str, force: bool, **_kwargs) -> None:
+            record_primary("added", url)
             print(f"recorded|{url}")
 
         mock_process.side_effect = _fake_process
@@ -54,7 +61,9 @@ def test_post_urls_single_preserves_special_characters(client: TestClient) -> No
         )
 
     assert response.status_code == 200
-    mock_process.assert_called_once_with(SPECIAL_URL, False)
+    mock_process.assert_called_once_with(
+        SPECIAL_URL, False, discover_reddit_links=False
+    )
     result = response.json()["results"][0]
     assert result["input"] == SPECIAL_URL
     assert result["url"] == SPECIAL_URL
@@ -71,9 +80,11 @@ def test_post_urls_list_payload(client: TestClient) -> None:
         patch("ref_api.service.ref_cli.should_skip_url", return_value=False),
         patch("ref_api.service.ref_cli.is_youtube_video_id", return_value=False),
         patch("ref_api.service.ref_cli.process_url") as mock_process,
+        patch("ref_api.service._exact_archive_match", return_value=True),
     ):
 
-        def _fake_process(url: str, force: bool) -> None:
+        def _fake_process(url: str, force: bool, **_kwargs) -> None:
+            record_primary("added", url)
             print(f"recorded|{url}")
 
         mock_process.side_effect = _fake_process
@@ -82,8 +93,8 @@ def test_post_urls_list_payload(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert mock_process.call_count == 2
-    mock_process.assert_any_call(urls[0], True)
-    mock_process.assert_any_call(urls[1], True)
+    mock_process.assert_any_call(urls[0], True, discover_reddit_links=False)
+    mock_process.assert_any_call(urls[1], True, discover_reddit_links=False)
     results = response.json()["results"]
     assert len(results) == 2
     assert [r["input"] for r in results] == urls

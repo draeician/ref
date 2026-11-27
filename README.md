@@ -132,7 +132,115 @@ curl -sS -X POST http://127.0.0.1:8000/urls \
 curl -sS "http://127.0.0.1:8000/urls?domain=example.com"
 ```
 
-Response shape: `{"results":[{"input":"…","url":"…","status":"added|exists|skipped|error","message":"…","output":"…"}]}`.
+Response shape: `{"results":[{"input":"…","url":"…","status":"added|exists|skipped|error","message":"…","output":"…","primary":{…}|null,"discovery":{…}|null,"error":null|"…"}]}`.
+
+`url` is the URL **actually stored in the archive** after redirect/tracking
+normalization (not necessarily the submitted string). `input` always preserves
+the request identity. `output` is retained only for human-readable CLI
+diagnostics and is never used to decide status.
+
+#### Structured primary capture
+
+`primary` is produced by the archive write / exact existing-row check, never by
+parsing stdout:
+
+```json
+{
+  "status": "added",
+  "canonical_url": "https://example.com/article?id=1",
+  "archive_confirmed": true,
+  "source": "General",
+  "identity_recorded": true
+}
+```
+
+- `added` / `exists` are returned only when `archive_confirmed` is true and an
+  exact parsed archive row stores `canonical_url`.
+- An already-recorded PDF or playlist reports `exists` even when its processing
+  path prints no primary stdout line.
+- A child URL can never overwrite the primary status. Discovery is reported in
+  the separate `discovery` object (`queued`, `already_queued`,
+  `already_completed`, or `failed`) and `queued` is returned only after the
+  durable queue snapshot was written.
+- `status=error` carries a sanitized, actionable `error`; `output` is not
+  authoritative.
+
+#### Capability contract and exact lookup
+
+`GET /capabilities` advertises `api_contract_version: "2"`, queue format, and
+feature flags, so clients can detect this contract without guessing from package
+version strings. `GET /health` also includes `api_contract_version`.
+
+`GET /urls/exists?url=URL` is read-only. It never ingests, queues, rewrites or
+guesses a normalization:
+
+| `status` | Meaning |
+| --- | --- |
+| `exists` | Exact parsed archive row matches the input. |
+| `canonical` | A persisted identity from an earlier confirmed capture maps the input to a stored URL that exactly exists. |
+| `absent` | No exact row and no recorded identity match. |
+| `unknown` | Identity is invalid, or a recorded canonical URL is missing from the archive. |
+| `error` | Archive/ledger lookup failed; sanitized details in `error`. |
+
+The response also includes `deletion_safe`. It is `true` **only** for a proven
+presence (`exists` exact row, or `canonical` persisted identity that resolves to
+an exact row). `absent`, `unknown`, and `error` are not proof that a reference
+was never captured under another canonical form; deletion workflows must treat
+`deletion_safe: false` as fail-closed.
+
+```bash
+curl -sS "http://127.0.0.1:8000/urls/exists?url=https://redd.it/abc123"
+```
+
+Identity is persisted beside the archive at
+`<references>/ref_api_state/url_identities.json`, so reconciliation survives
+server restarts.
+
+#### Idempotent submissions
+
+`POST /urls` accepts an optional `Idempotency-Key` header:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/urls \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: discord-message-12345' \
+  -d '{"url":"https://example.com/a","force":false}'
+```
+
+- Same key + same ordered inputs + same `force` value replays the stored results
+  with `Idempotent-Replayed: true`; it does not append rows or enqueue duplicate
+  discovery jobs.
+- Reusing a key with a different payload returns `409`.
+- Concurrent requests with the same key are serialized in-process.
+- Request state is durable at `<references>/ref_api_state/idempotency.json`.
+  Completed entries are retained for **30 days** and bounded to the newest
+  **1000**; in-progress and ambiguous entries are never pruned. Pruning an old
+  key makes it a new request again.
+- `GET /requests/{key}` is a read-only reconciliation view (state, inputs,
+  results). Results stay **positionally aligned** with inputs; `null` marks an
+  input with no durable confirmed result yet. Use it after an ambiguous client
+  timeout.
+- Interruption is recoverable: archive writes are re-checked exactly and
+  discovery jobs deduplicate, so a non-forced retry cannot create a second
+  reference or job. This is **at-least-once with idempotent effects**, not a
+  claim of exactly-once execution.
+- For `force: true`, the pre-work archive fingerprint for each input is
+  persisted before the write. If an interrupted forced attempt left no result
+  and the archive changed, the key is marked `ambiguous` and later retries fail
+  closed with `409` instead of repeating a write that may already have
+  committed. A forced retry that can prove the archive did not change is safe
+  to resume. `GET /requests/{key}` shows the `ambiguous` state and diagnostics;
+  use a new key only when another forced capture is intentionally required.
+- `force: true` still forces an intentional new write for a **new** key or a
+  safe resumable retry. Replaying a completed key never re-runs the force
+  operation, and a key is bound to its `force` value (changing it is a payload
+  conflict).
+
+The idempotency/identity stores use the same single-process, atomic-JSON model as
+the show-notes queue: copy-on-write mutation, write + file `fsync`, then atomic
+`os.replace`, then publish the new in-memory table. A failed write at any of
+those boundaries leaves no phantom accepted job/identity/request in memory and
+the previous file intact. They are additive files; `jobs.json` is not migrated.
 
 `GET /urls?domain=DOMAIN` is read-only (the archive is only parsed, never written). Matching uses the parsed hostname case-insensitively — `example.com`, `www.example.com`, and `docs.example.com` match; `notexample.com` or `example.com.evil.net` do not. URLs come back exactly as stored (paths, query strings, fragments intact), newest first. Pass a bare domain, not a URL: blank or malformed values return `400`.
 
@@ -496,6 +604,63 @@ for larger lists. Metadata failures and individual link errors are logged, while
 successful parent video recording remains intact. A video already in the archive
 whose show notes were already discovered is not rediscovered or re-ingested on a
 repeat submission; only failed children are retried.
+
+### Automatic Reddit discovery on ref-api
+
+Reddit outbound-link discovery is **asynchronous**. A confirmed Reddit capture
+first records the primary reference, then durably enqueues a `discover` job on
+the same worker/queue. It never fetches Reddit or ingests children on the
+`POST /urls` request path, and it never claims `queued` if the durable enqueue
+failed.
+
+Discovery preserves the existing coverage: the submission destination URL, post
+body links, archived comment links, and Reddit short links (`redd.it`) resolved
+to their canonical stored URL. Discovered URLs become individual `ingest` jobs,
+so each child succeeds or fails independently with the normal bounded retry and
+backoff. Reddit→Reddit links are filtered and worker-spawned child ingests do not
+start further discovery, which prevents recursive loops. Fan-out is capped at
+`MAX_REDDIT_DISCOVERY_LINKS` (50) per submission. Discovered YouTube playlists
+remain link-only; directly submitted playlists keep full expansion.
+
+Queue compatibility: new jobs use the existing `discover`/`ingest` kinds and add
+an optional `source` field (`youtube` default, or `reddit`). Existing snapshots
+without `source` load as YouTube jobs. However, the pre-change reader
+(`_normalize_job` at base `57abe0f`) reconstructs each job without `source`. Two
+losses follow on downgrade:
+
+- A pending/running Reddit `discover` job is seen as a non-video YouTube job,
+  consumed as a no-op and marked `done`, losing the discovery.
+- **Even a terminal failed Reddit discovery job loses its `source`** on the
+  older build's next snapshot write (for example `recover()` at startup or any
+  enqueue), because the old build rewrites the table from its normalized records.
+
+**Downgrade is therefore blocked while any Reddit discovery job is pending,
+running or failed.** A `done` job has no outstanding work and does not block. The
+queue is never rewritten, deleted, or migrated to prepare a downgrade.
+
+Check safety without mutating anything, and only against a queue that can no
+longer change:
+
+```bash
+# 1. Stop incoming submissions (clients / schedulers) and let in-flight work finish.
+# 2. Stop ref-api so the queue file is final:
+systemctl --user stop ref-api.service
+# 3. Offline check against the final persisted queue:
+ref-api --rollback-check        # exit 0 = safe, 2 = blocked/corrupt
+# Optional live/read-only inspection while the service is running:
+curl -sS http://127.0.0.1:8000/queue/rollback-safety
+```
+
+Running the check before the service is stopped is advisory only: a submission
+or worker state change can land after the check and before the downgrade. The
+authoritative check is the offline one after `ref-api` has stopped. If it exits
+`0`, back up `show_notes_queue/jobs.json` before changing the installed version.
+
+`GET /queue/rollback-safety` reports `safe`, `blocked`, `blockers` (pending,
+running or failed Reddit discovery jobs with ids/status/attempts), and
+`failed_preserved` (failed jobs that block because the older build would strip
+their `source`). A corrupt/unreadable queue also blocks (fail-closed). Drain or
+resolve these jobs on the current build before downgrading.
 
 All writes to `references.md` — appends, transcript updates, and the whole-file
 rewrites driven by enrichment (`@meta` stamping / unavailable-video cleanup) —

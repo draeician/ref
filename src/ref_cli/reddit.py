@@ -419,15 +419,29 @@ def fetch_reddit_content(
     return provider.fetch_submission(ref.submission_id)
 
 
-def discover_outbound_urls(
+@dataclass
+class RedditDiscoveryResult:
+    """Outbound-link discovery result with a provider status for the queue.
+
+    ``status`` mirrors :class:`RedditContent.status` (``found``, ``not_found``,
+    ``unavailable`` or ``error``) so the background worker can decide whether a
+    failure is retryable.  ``urls`` is always safe to iterate.
+    """
+
+    urls: List[str] = field(default_factory=list)
+    status: str = "error"
+    detail: str = ""
+
+
+def discover_outbound_urls_detailed(
     url: str,
     provider: Optional[RedditProvider] = None,
-) -> List[str]:
-    """Fetch Reddit content and return outbound (non-Reddit) URLs found in it.
+) -> RedditDiscoveryResult:
+    """Discover outbound links and retain the provider status.
 
-    Never raises: provider/network failures log and return an empty list so the
-    surrounding archive operation continues. A miss is reported as *not found*,
-    never as deletion.
+    Never raises: provider/network failures are reported through ``status`` so
+    the caller can retry a transient failure rather than silently recording an
+    empty successful discovery.
     """
     provider = provider or ArcticShiftProvider()
     result = fetch_reddit_content(url, provider=provider)
@@ -437,7 +451,10 @@ def discover_outbound_urls(
             result.status,
             result.detail or "no detail",
         )
-        return []
+        return RedditDiscoveryResult(
+            status=result.status,
+            detail=result.detail or result.status,
+        )
 
     outbound: List[str] = []
     seen = set()
@@ -462,4 +479,18 @@ def discover_outbound_urls(
                 seen.add(candidate)
                 outbound.append(candidate)
 
-    return outbound
+    return RedditDiscoveryResult(urls=outbound, status="found", detail="")
+
+
+def discover_outbound_urls(
+    url: str,
+    provider: Optional[RedditProvider] = None,
+) -> List[str]:
+    """Fetch Reddit content and return outbound (non-Reddit) URLs found in it.
+
+    Never raises: provider/network failures log and return an empty list so the
+    surrounding archive operation continues. A miss is reported as *not found*,
+    never as deletion. Callers that need retry semantics should use
+    :func:`discover_outbound_urls_detailed`.
+    """
+    return discover_outbound_urls_detailed(url, provider=provider).urls

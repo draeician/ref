@@ -1,5 +1,58 @@
 # HANDOFF — 7d2c9e41 production deployment (ref + queue producer)
 
+## APPROVED FOR MERGE — authoritative capture + async Reddit discovery (3b614093)
+
+- **Task:** [3b614093](../tasks/done/3b614093-authoritative-capture-reddit-discovery.md)
+  — `.codex/tasks/done/3b614093-authoritative-capture-reddit-discovery.md`.
+- **Approval:** ChatGPT approved the implementation for repository merge on
+  2026-11-27 at HEAD `69af2d6ab193ceec0092d8e3a37f07360811edbe`, authorized by
+  Drae. Scope is repository merge only: no tag, release, deployment, service
+  restart, production archive/queue change, NFS change or refwatch change.
+- **Branch:** `fix/api-primary-capture-and-reddit-discovery`, based on
+  `origin/main` `57abe0f276caa96990d35f46e21d514a73ed7748` (confirmed unchanged
+  at approval).
+- **PR:** [#43](https://github.com/draeician/ref/pull/43) — approved; this
+  closure step marks it ready and merges with a normal merge commit, then deletes
+  the merged branch.
+- **State:** DONE — task record moved from `review/` to `done/`. Repository merge
+  is the only remaining action; nothing is deployed or restarted.
+- **Delivered:** authoritative primary capture from the archive write/exact row
+  check (never stdout); stored `canonical_url`; separate `discovery` status;
+  read-only exact/canonical `GET /urls/exists` with `deletion_safe`; durable
+  optional `Idempotency-Key` with replay/409/reconciliation plus per-input forced
+  fingerprints and fail-closed `ambiguous` state; API contract version `2`;
+  asynchronous Reddit discovery on the existing durable queue with bounded
+  fan-out, loop prevention, independent child retries, and link-only discovered
+  playlists; read-only downgrade guard; copy-on-write transactional queue/state
+  persistence; primary isolation from post-capture failures; lynx argv/no-shell
+  timeout cleanup; credential-redacted actionable errors.
+- **Verification:** 690 passed / 1 warning (`pytest -q`), compileall OK,
+  `uv build` sdist+wheel, `git diff --check` clean. Approved head
+  `69af2d6ab193ceec0092d8e3a37f07360811edbe` passed exact-head CI run
+  `46028919395` (`690 passed`). Fresh isolated pipx `[api]` install on a fresh
+  HOME/loopback port verified over real HTTP:
+  health/capabilities (`contract 2` + new flags), structured capture,
+  `exists`/`absent` with `deletion_safe`, idempotent replay + `409`,
+  `/requests/{key}` positional results. Offline `ref-api --rollback-check`
+  blocked (exit 2) on a persisted failed Reddit discovery job with `jobs.json`
+  byte-unchanged, then exited 0 after that job was resolved to `done`.
+  `ruff`/`mypy` are not repository dependencies; no installation was performed.
+- **Safety:** no refwatch change, no PR #29 action, no production service
+  restart, no production archive/queue write, no NFS/local-transcribe change,
+  no queue migration, no tag or release.
+- **Rollback:** additive API/state files only; existing queue snapshots load as
+  YouTube. **Downgrade is blocked while any Reddit discovery job is pending,
+  running or failed** (or the queue is corrupt). Pending/running jobs would be
+  consumed as no-op YouTube discoveries; failed jobs would lose their `source`
+  field because the base reader (`_normalize_job` at `57abe0f`) reconstructs
+  without it on its next snapshot. `done` jobs do not block. The authoritative
+  procedure is offline: stop submissions, stop `ref-api`, run
+  `ref-api --rollback-check` against the final persisted queue, then back up
+  `jobs.json`. `GET /queue/rollback-safety` is read-only advisory.
+- **Next SemVer:** 1.7.0, documented only.
+
+## Historical — 7d2c9e41 production deployment (ref + queue producer)
+
 **Date:** 2026-11-09/10 (UTC)
 **Task ID:** `7d2c9e41`
 **Owner:** OpenCode
