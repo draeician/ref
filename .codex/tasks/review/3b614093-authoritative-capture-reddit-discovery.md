@@ -99,9 +99,8 @@ also synchronous and recursive on the API request path.
 Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
 `uv pip install -e '.[api,test]'`).
 
-- Exact PR CI: run
-  [45946137644](https://github.com/draeician/ref/actions/runs/45946137644),
-  pytest **pass** on the pushed PR head.
+- PR CI (`pytest`) passed on every pushed head; see the checks on
+  [#43](https://github.com/draeician/ref/pull/43/checks).
 - `python -m pytest -q` → **623 passed, 1 warning** (Starlette TestClient
   deprecation only).
 - `python -m compileall -q src` → OK.
