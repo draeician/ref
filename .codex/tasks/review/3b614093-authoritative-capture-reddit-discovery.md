@@ -156,9 +156,12 @@ Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
 
 - PR CI (`pytest`) passed on the original head; correction-head CI is recorded on
   [#43](https://github.com/draeician/ref/pull/43/checks) after push.
-- Correction implementation commit
+- First correction commit
   `08b95b80e4cfc46a8ea997206cb78ceca679f2da`; exact-head CI run
-  `45952664641` passed (`pytest`: `689 passed, 1 warning in 18.36s`). A
+  `45952664641` passed (`pytest`: `689 passed`).
+- Second rollback-correction commit
+  `1e1fb4b2c2fd0f2eca7320c25f01d7d7c2db9e22`; exact-head CI run
+  `46028605496` passed (`pytest`: `690 passed, 1 warning in 20.23s`). A
   docs-only follow-up records this evidence.
 - `python -m pytest -q` → **690 passed, 1 warning** (Starlette TestClient
   deprecation only). New coverage: transactional write/fsync/replace failures
