@@ -6,6 +6,8 @@
   — `.codex/tasks/review/3b614093-authoritative-capture-reddit-discovery.md`.
 - **Branch:** `fix/api-primary-capture-and-reddit-discovery`, based on
   `origin/main` `57abe0f276caa96990d35f46e21d514a73ed7748`.
+- **PR:** [#43](https://github.com/draeician/ref/pull/43) (draft, open, not
+  merged).
 - **State:** REVIEW. PR is open for ChatGPT/Drae review and **must not be
   merged, deployed, or used to restart services** without explicit authorization.
 - **Delivered:** authoritative primary capture from the archive write/exact row

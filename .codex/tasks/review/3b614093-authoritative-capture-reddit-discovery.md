@@ -5,6 +5,7 @@
 - **State:** REVIEW
 - **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/review/`.
 - **Branch:** `fix/api-primary-capture-and-reddit-discovery`
+- **PR:** [#43](https://github.com/draeician/ref/pull/43) (draft, open, **not merged**)
 - **Base:** `origin/main` = `57abe0f276caa96990d35f46e21d514a73ed7748`
 - **Repositories:** `draeician/ref` only. `draeician/refwatch` is read-only context.
 - **Authorization:** Backend implementation, tests, docs, commit and push only. No refwatch change, merge, release, deployment, service restart, production archive/queue change, or PR #29 action.
@@ -98,6 +99,9 @@ also synchronous and recursive on the API request path.
 Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
 `uv pip install -e '.[api,test]'`).
 
+- Exact PR CI: run
+  [45946137644](https://github.com/draeician/ref/actions/runs/45946137644),
+  pytest **pass** on the pushed PR head.
 - `python -m pytest -q` → **623 passed, 1 warning** (Starlette TestClient
   deprecation only).
 - `python -m compileall -q src` → OK.

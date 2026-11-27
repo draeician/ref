@@ -5,9 +5,8 @@
 - **Task record:** [3b614093 — authoritative capture + async Reddit discovery](../tasks/review/3b614093-authoritative-capture-reddit-discovery.md).
 - **Branch:** `fix/api-primary-capture-and-reddit-discovery` (base
   `origin/main` `57abe0f276caa96990d35f46e21d514a73ed7748`).
-- **PR:** opened after the verification gate; see the task record for the
-  final link. Draft/open only — do **not** merge or deploy without Drae's review
-  and explicit authorization.
+- **PR:** [#43](https://github.com/draeician/ref/pull/43) (draft, open; not
+  merged or deployed). Exact-head CI passed.
 - **Scope:** backend/code/tests/docs in `draeician/ref` only. refwatch, PR #29,
   production services, the production archive/queue, NFS/local-transcribe,
   and release tagging are untouched.
