@@ -1,15 +1,21 @@
 # HANDOFF — 7d2c9e41 production deployment (ref + queue producer)
 
-## ACTIVE — REVIEW: authoritative capture + async Reddit discovery (3b614093)
+## APPROVED FOR MERGE — authoritative capture + async Reddit discovery (3b614093)
 
-- **Task:** [3b614093](../tasks/review/3b614093-authoritative-capture-reddit-discovery.md)
-  — `.codex/tasks/review/3b614093-authoritative-capture-reddit-discovery.md`.
+- **Task:** [3b614093](../tasks/done/3b614093-authoritative-capture-reddit-discovery.md)
+  — `.codex/tasks/done/3b614093-authoritative-capture-reddit-discovery.md`.
+- **Approval:** ChatGPT approved the implementation for repository merge on
+  2026-11-27 at HEAD `69af2d6ab193ceec0092d8e3a37f07360811edbe`, authorized by
+  Drae. Scope is repository merge only: no tag, release, deployment, service
+  restart, production archive/queue change, NFS change or refwatch change.
 - **Branch:** `fix/api-primary-capture-and-reddit-discovery`, based on
-  `origin/main` `57abe0f276caa96990d35f46e21d514a73ed7748`.
-- **PR:** [#43](https://github.com/draeician/ref/pull/43) (draft, open, not
-  merged).
-- **State:** REVIEW. PR is open for ChatGPT/Drae review and **must not be
-  merged, deployed, or used to restart services** without explicit authorization.
+  `origin/main` `57abe0f276caa96990d35f46e21d514a73ed7748` (confirmed unchanged
+  at approval).
+- **PR:** [#43](https://github.com/draeician/ref/pull/43) — approved; this
+  closure step marks it ready and merges with a normal merge commit, then deletes
+  the merged branch.
+- **State:** DONE — task record moved from `review/` to `done/`. Repository merge
+  is the only remaining action; nothing is deployed or restarted.
 - **Delivered:** authoritative primary capture from the archive write/exact row
   check (never stdout); stored `canonical_url`; separate `discovery` status;
   read-only exact/canonical `GET /urls/exists` with `deletion_safe`; durable
@@ -21,11 +27,10 @@
   persistence; primary isolation from post-capture failures; lynx argv/no-shell
   timeout cleanup; credential-redacted actionable errors.
 - **Verification:** 690 passed / 1 warning (`pytest -q`), compileall OK,
-  `uv build` sdist+wheel, `git diff --check` clean. Rollback-correction head
-  `1e1fb4b2c2fd0f2eca7320c25f01d7d7c2db9e22` passed exact-head CI run
-  `46028605496` (`690 passed`); a docs-only follow-up records this. Fresh
-  isolated pipx `[api]`
-  install on a fresh HOME/loopback port verified over real HTTP:
+  `uv build` sdist+wheel, `git diff --check` clean. Approved head
+  `69af2d6ab193ceec0092d8e3a37f07360811edbe` passed exact-head CI run
+  `46028919395` (`690 passed`). Fresh isolated pipx `[api]` install on a fresh
+  HOME/loopback port verified over real HTTP:
   health/capabilities (`contract 2` + new flags), structured capture,
   `exists`/`absent` with `deletion_safe`, idempotent replay + `409`,
   `/requests/{key}` positional results. Offline `ref-api --rollback-check`

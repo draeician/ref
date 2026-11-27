@@ -2,13 +2,25 @@
 
 - **Task ID:** 3b614093
 - **Owner:** OpenCode
-- **State:** REVIEW
-- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/review/`.
+- **State:** DONE — approved for repository merge
+- **Lifecycle:** `.codex/tasks/wip/` → `.codex/tasks/review/` → `.codex/tasks/done/`; this record is in `.codex/tasks/done/`.
 - **Branch:** `fix/api-primary-capture-and-reddit-discovery`
-- **PR:** [#43](https://github.com/draeician/ref/pull/43) (draft, open, **not merged**)
-- **Base:** `origin/main` = `57abe0f276caa96990d35f46e21d514a73ed7748`
+- **PR:** [#43](https://github.com/draeician/ref/pull/43) — approved for repository merge at `69af2d6ab193ceec0092d8e3a37f07360811edbe`; closure step marks it ready and merges with a normal merge commit.
+- **Base:** `origin/main` = `57abe0f276caa96990d35f46e21d514a73ed7748` (confirmed unchanged at approval).
 - **Repositories:** `draeician/ref` only. `draeician/refwatch` is read-only context.
-- **Authorization:** Backend implementation, tests, docs, commit and push only. No refwatch change, merge, release, deployment, service restart, production archive/queue change, or PR #29 action.
+- **Authorization:** Backend implementation, tests, docs, commit/push, repository merge and feature-branch cleanup. No tag, release, deployment, service restart, production archive/queue change, refwatch change, or PR #29 action.
+
+## Approval
+
+- **Approved by:** ChatGPT (implementation review), authorized by Drae.
+- **Approved HEAD:** `69af2d6ab193ceec0092d8e3a37f07360811edbe`.
+- **Approval date:** 2026-11-27.
+- **Scope:** repository merge only. No tag, release, deployment, service
+  restart, production archive/queue change, NFS change or refwatch change.
+- **Pre-merge checks:** clean working tree; approved HEAD equals
+  `origin/fix/api-primary-capture-and-reddit-discovery`; `origin/main` and local
+  `main` both `57abe0f276caa96990d35f46e21d514a73ed7748`; exact-head CI green
+  (run `46028919395`, 690 passed).
 
 ## Claim
 
@@ -154,15 +166,12 @@ also synchronous and recursive on the API request path.
 Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
 `uv pip install -e '.[api,test]'`).
 
-- PR CI (`pytest`) passed on the original head; correction-head CI is recorded on
-  [#43](https://github.com/draeician/ref/pull/43/checks) after push.
-- First correction commit
-  `08b95b80e4cfc46a8ea997206cb78ceca679f2da`; exact-head CI run
-  `45952664641` passed (`pytest`: `689 passed`).
-- Second rollback-correction commit
-  `1e1fb4b2c2fd0f2eca7320c25f01d7d7c2db9e22`; exact-head CI run
-  `46028605496` passed (`pytest`: `690 passed, 1 warning in 20.23s`). A
-  docs-only follow-up records this evidence.
+- Approved head `69af2d6ab193ceec0092d8e3a37f07360811edbe` passed exact-head
+  CI run `46028919395` (`pytest`: `690 passed, 1 warning in 19.98s`).
+- Earlier correction commits `08b95b80e4cfc46a8ea997206cb78ceca679f2da`
+  (run `45952664641`, 689 passed) and
+  `1e1fb4b2c2fd0f2eca7320c25f01d7d7c2db9e22` (run `46028605496`, 690 passed)
+  also passed exact-head CI.
 - `python -m pytest -q` → **690 passed, 1 warning** (Starlette TestClient
   deprecation only). New coverage: transactional write/fsync/replace failures
   (queue enqueue/batch/claim/terminal transitions, identity and idempotency
