@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Structured primary capture** in `POST /urls`: `primary.status`, authoritative stored `canonical_url`, `archive_confirmed`, plus a separate `discovery` status. Status is recorded at the archive write/exact existing-row check, never inferred from stdout; existing PDFs and playlists now report `exists` even with no primary stdout.
+- **`GET /urls/exists?url=URL`** read-only exact archive lookup (`exists`, `canonical`, `absent`, `unknown`, `error`) using the existing parser and archive lock. Original→stored identity is persisted at `<references>/ref_api_state/url_identities.json`.
+- **`GET /capabilities`** with explicit `api_contract_version: "2"` and feature flags; `/health` also reports the contract version.
+- **Optional `Idempotency-Key`** on `POST /urls` with durable request state, 409 on payload reuse, `Idempotent-Replayed`, concurrent per-key serialization, and read-only `GET /requests/{key}` reconciliation.
+- **Asynchronous Reddit discovery** through the durable show-notes queue: submission destinations, body links, comment links and short-link canonical URLs are discovered by the worker, with bounded fan-out, independent child retries, loop prevention, and discovered playlists kept link-only.
+- Regression coverage for capture paths, exact lookup, idempotency/concurrency/restart recovery, slow/failing discovery, queue enqueue failure, legacy queue snapshots, and a real-route/archive/fixture-HTTP integration test.
+
+### Changed
+- `POST /urls` `url` is now the URL actually stored in the archive (after redirect/tracking normalization); `input` remains the original request identity. Existing response fields and CLI rendering are unchanged.
+- Reddit discovery no longer runs synchronously or recursively inside the API capture request.
+
+### Fixed
+- `lynx` title fetch now uses an argv list instead of a shell wrapper, so a timeout cannot leave an orphaned shell/lynx process.
+- The generic `Error: An unexpected error occurred.` path preserves a sanitized actionable reason (credential-redacted, bounded) for API errors and background job records instead of discarding it.
+
+### Infrastructure
+- New durable state files beside the archive (`ref_api_state/url_identities.json`, `ref_api_state/idempotency.json`) with atomic writes and fail-closed loading. No show-notes queue migration.
+- Next release target: **1.7.0** (new backward-compatible API capabilities). Release publishing and tagging are not part of this change.
+
 - **`ref-api`** optional HTTP server (`pip install 'ref-cli[api]'`): `POST /urls`, `GET /search`, `POST /backup`, `POST /transcript`, `GET /health`
 - **`ref --install-server`** / **`--uninstall-server`** / **`--server-status`**: user systemd unit, pipx `[api]` inject, documented `~/.config/ref/config.yaml` template bootstrap
 - **Client mode**: `api_url` in config (or `REF_API_URL`) routes `ref <url>`, search, `--file`, `--backup`, and `--transcript` through ref-api

@@ -1,5 +1,35 @@
 # HANDOFF — 7d2c9e41 production deployment (ref + queue producer)
 
+## ACTIVE — REVIEW: authoritative capture + async Reddit discovery (3b614093)
+
+- **Task:** [3b614093](../tasks/review/3b614093-authoritative-capture-reddit-discovery.md)
+  — `.codex/tasks/review/3b614093-authoritative-capture-reddit-discovery.md`.
+- **Branch:** `fix/api-primary-capture-and-reddit-discovery`, based on
+  `origin/main` `57abe0f276caa96990d35f46e21d514a73ed7748`.
+- **State:** REVIEW. PR is open for ChatGPT/Drae review and **must not be
+  merged, deployed, or used to restart services** without explicit authorization.
+- **Delivered:** authoritative primary capture from the archive write/exact row
+  check (never stdout); stored `canonical_url`; separate `discovery` status;
+  read-only exact/canonical `GET /urls/exists`; durable optional
+  `Idempotency-Key` with replay/409/reconciliation; API contract version `2`;
+  asynchronous Reddit discovery on the existing durable queue with bounded
+  fan-out, loop prevention, independent child retries, and link-only discovered
+  playlists; lynx argv/no-shell timeout cleanup; sanitized actionable errors.
+- **Verification:** 623 passed / 1 warning (`pytest -q`), compileall OK,
+  `uv build` sdist+wheel, `git diff --check` clean, and an isolated pipx `[api]`
+  install on a fresh HOME/archive/loopback port passed health/capabilities,
+  capture, exact lookup, idempotency replay and 409 conflict checks. `ruff` and
+  `mypy` are not repository dependencies; no installation was performed.
+- **Safety:** no refwatch change, no PR #29 action, no production service
+  restart, no production archive/queue write, no NFS/local-transcribe change,
+  no queue migration, no tag or release.
+- **Rollback:** additive API/state files only; existing queue snapshots load as
+  YouTube. Rolling ref-api back loses pending Reddit discovery (new jobs become
+  no-op YouTube discovery) but preserves queue rows and archive data.
+- **Next SemVer:** 1.7.0, documented only.
+
+## Historical — 7d2c9e41 production deployment (ref + queue producer)
+
 **Date:** 2026-11-09/10 (UTC)
 **Task ID:** `7d2c9e41`
 **Owner:** OpenCode
