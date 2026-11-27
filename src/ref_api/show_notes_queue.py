@@ -52,6 +52,14 @@ JOBS_FILENAME = "jobs.json"
 KIND_DISCOVER = "discover"
 KIND_INGEST = "ingest"
 
+# Discovery source. ``source`` is an additive, optional field: existing snapshots
+# have no value and therefore load as YouTube, while new Reddit discovery jobs
+# use the same ``discover`` kind so an older ref-api can still read the table
+# (it degrades to a no-op YouTube discovery instead of corrupting the queue).
+SOURCE_YOUTUBE = "youtube"
+SOURCE_REDDIT = "reddit"
+ALLOWED_SOURCES = frozenset({SOURCE_YOUTUBE, SOURCE_REDDIT})
+
 # Non-terminal states are never re-claimed by the worker.
 TERMINAL_STATES = frozenset({"done", "failed"})
 # A URL with any of these statuses is treated as already-handled (dedup).
@@ -187,6 +195,12 @@ class ShowNotesQueue:
         if kind not in (KIND_DISCOVER, KIND_INGEST):
             raise ValueError(f"job {job_id!r} has invalid kind {kind!r}")
 
+        source = job.get("source")
+        if source is None:
+            source = SOURCE_YOUTUBE
+        elif source not in ALLOWED_SOURCES:
+            raise ValueError(f"job {job_id!r} has invalid source {source!r}")
+
         attempts = job.get("attempts")
         if attempts is None:
             attempts = 0
@@ -234,6 +248,7 @@ class ShowNotesQueue:
             "url_key": url_key,
             "parent_video_id": parent_video_id,
             "kind": kind,
+            "source": source,
             "status": status,
             "attempts": attempts,
             "next_attempt_at": _ts(job.get("next_attempt_at"), "next_attempt_at"),
@@ -298,12 +313,27 @@ class ShowNotesQueue:
     def _key(url: str) -> str:
         return (url or "").strip()
 
+    @staticmethod
+    def _is_duplicate(job: Dict[str, Any], key: str, kind: str) -> bool:
+        """True when ``job`` already covers this URL for ``kind``.
+
+        Ingest keeps the historical URL-wide dedup. Discovery is deduped only
+        against an existing discovery job, so submitting a URL that was already
+        ingested as a show-note child can still discover its outbound links.
+        """
+        if job.get("url_key") != key or job.get("status") not in _DEDUP_STATUSES:
+            return False
+        if kind == KIND_DISCOVER:
+            return job.get("kind") == KIND_DISCOVER
+        return True
+
     def enqueue(
         self,
         url: str,
         *,
         parent_video_id: str = "",
         kind: str = KIND_INGEST,
+        source: str = SOURCE_YOUTUBE,
     ) -> Optional[str]:
         """Add a job unless a pending/running/done job for ``url`` exists.
 
@@ -314,10 +344,12 @@ class ShowNotesQueue:
         key = self._key(url)
         if not key:
             return None
+        if source not in ALLOWED_SOURCES:
+            raise ValueError(f"Unsupported job source: {source!r}")
         with self._lock:
             self._check_not_corrupt()
             for job in self._jobs.values():
-                if job.get("url_key") == key and job.get("status") in _DEDUP_STATUSES:
+                if self._is_duplicate(job, key, kind):
                     return None
             job_id = uuid.uuid4().hex
             now = time.time()
@@ -327,6 +359,7 @@ class ShowNotesQueue:
                 "url_key": key,
                 "parent_video_id": parent_video_id or "",
                 "kind": kind,
+                "source": source,
                 "status": "pending",
                 "attempts": 0,
                 "next_attempt_at": now,
@@ -343,8 +376,11 @@ class ShowNotesQueue:
         *,
         parent_video_id: str = "",
         kind: str = KIND_INGEST,
+        source: str = SOURCE_YOUTUBE,
     ) -> Tuple[int, int]:
         """Batch-enqueue ``urls`` with a single snapshot. Returns (queued, skipped)."""
+        if source not in ALLOWED_SOURCES:
+            raise ValueError(f"Unsupported job source: {source!r}")
         queued = 0
         skipped = 0
         with self._lock:
@@ -356,7 +392,7 @@ class ShowNotesQueue:
                     skipped += 1
                     continue
                 if any(
-                    job.get("url_key") == key and job.get("status") in _DEDUP_STATUSES
+                    self._is_duplicate(job, key, kind)
                     for job in self._jobs.values()
                 ):
                     skipped += 1
@@ -368,6 +404,7 @@ class ShowNotesQueue:
                     "url_key": key,
                     "parent_video_id": parent_video_id or "",
                     "kind": kind,
+                    "source": source,
                     "status": "pending",
                     "attempts": 0,
                     "next_attempt_at": now,
@@ -380,9 +417,40 @@ class ShowNotesQueue:
                 self._snapshot()
             return queued, skipped
 
-    def enqueue_discovery(self, video_url: str, video_id: str) -> Optional[str]:
-        """Enqueue a ``discover`` job for a submitted YouTube video."""
-        return self.enqueue(video_url, parent_video_id=video_id, kind=KIND_DISCOVER)
+    def enqueue_discovery(
+        self,
+        video_url: str,
+        video_id: str,
+        *,
+        source: str = SOURCE_YOUTUBE,
+    ) -> Optional[str]:
+        """Enqueue a ``discover`` job for a submitted YouTube/Reddit URL."""
+        return self.enqueue(
+            video_url,
+            parent_video_id=video_id,
+            kind=KIND_DISCOVER,
+            source=source,
+        )
+
+    def find_job(self, url: str, *, kind: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return the newest job for ``url`` (optionally filtered by kind)."""
+        key = self._key(url)
+        if not key:
+            return None
+        with self._lock:
+            self._load()
+            matches = [
+                job
+                for job in self._jobs.values()
+                if job.get("url_key") == key and (kind is None or job.get("kind") == kind)
+            ]
+            if not matches:
+                return None
+            matches.sort(
+                key=lambda job: (job.get("updated_at", 0.0), job.get("id", "")),
+                reverse=True,
+            )
+            return dict(matches[0])
 
     def next_pending(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """Atomically claim the next runnable job and mark it ``running``."""

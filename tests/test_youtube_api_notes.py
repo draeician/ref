@@ -13,6 +13,7 @@ import pytest
 
 from ref_api import service
 from ref_cli import youtube_extract
+from ref_cli.capture import record_primary
 
 VIDEO_ID = "zmrPY6S1FwY"
 VIDEO_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
@@ -23,11 +24,16 @@ def capture(monkeypatch, tmp_path):
     """Capture parent process_url calls without touching the live archive."""
     seen = []
     monkeypatch.setattr(service.ref_cli, "UNIFIED", str(tmp_path / "references.md"))
+    (tmp_path / "references.md").write_text("", encoding="utf-8")
     monkeypatch.setattr(service.ref_cli, "load_config", lambda: {})
     monkeypatch.setattr(service.ref_cli, "should_skip_url", lambda url, config: False)
+    monkeypatch.setattr(service, "_exact_archive_match", lambda url: True)
+    monkeypatch.setattr(service, "_identity_store", None)
+    monkeypatch.setattr(service, "_identity_dir", None)
 
-    def record(url, force):
+    def record(url, force, **_kwargs):
         seen.append(url)
+        record_primary("added", url)
         print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", record)
@@ -81,8 +87,9 @@ def test_normal_api_ingest_discovers_links_but_ignores_chapters(
 
 
 def test_existing_video_still_checks_links(capture, monkeypatch):
-    def exists(url, force):
+    def exists(url, force, **_kwargs):
         capture.append(url)
+        record_primary("exists", url)
         print(f"URL {url} already recorded.")
 
     monkeypatch.setattr(service.ref_cli, "process_url", exists)

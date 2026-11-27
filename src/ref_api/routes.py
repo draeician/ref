@@ -2,12 +2,16 @@
 
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from fastapi.responses import FileResponse
 
 from typing import Optional
 
 from ref_api.schemas import (
+    API_CONTRACT_VERSION,
+    ArchiveLookupResponse,
+    CapabilitiesResponse,
+    IdempotencyReconciliationResponse,
     ListResponse,
     QueueStatusResponse,
     SearchField,
@@ -16,8 +20,10 @@ from ref_api.schemas import (
     TranscriptResponse,
     UrlIngestRequest,
     UrlIngestResponse,
+    UrlResult,
 )
 from ref_api import service
+from ref_api.state_store import IdempotencyConflict, StateStoreError
 
 
 async def require_auth() -> None:
@@ -40,11 +46,22 @@ router = APIRouter()
     description=(
         "Accepts JSON with `url` and/or `urls`. Pass the full URL in the body "
         "so query chars (?, &, #) and unicode are preserved. Ingest is "
-        "synchronous and serialized against references.md."
+        "synchronous for the primary archive write; supported discovery "
+        "(YouTube/Reddit) is durably queued for the background worker. "
+        "Send an optional `Idempotency-Key` header to make retries safe."
     ),
 )
 def ingest_urls(
     body: UrlIngestRequest,
+    response: Response,
+    idempotency_key: Optional[str] = Header(
+        default=None,
+        alias="Idempotency-Key",
+        description=(
+            "Optional client-generated key. Same key + same payload is replayed "
+            "from durable server state; a different payload returns 409."
+        ),
+    ),
     _auth: None = Depends(require_auth),
 ) -> UrlIngestResponse:
     inputs = body.iter_inputs()
@@ -53,8 +70,140 @@ def ingest_urls(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide a non-empty 'url' or at least one entry in 'urls'",
         )
-    results = service.process_many(inputs, force=body.force)
+    key = (idempotency_key or "").strip()
+    if idempotency_key is not None and not key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Idempotency-Key must be non-empty when supplied",
+        )
+    if len(key) > 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Idempotency-Key must be at most 200 characters",
+        )
+    if not key:
+        results = service.process_many(inputs, force=body.force)
+        return UrlIngestResponse(results=results)
+
+    try:
+        results, replayed = service.process_many_idempotent(
+            inputs,
+            idempotency_key=key,
+            force=body.force,
+        )
+    except IdempotencyConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except StateStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Idempotency state is unavailable: {exc}",
+        ) from exc
+    if replayed:
+        response.headers["Idempotent-Replayed"] = "true"
     return UrlIngestResponse(results=results)
+
+
+@router.get(
+    "/urls/exists",
+    response_model=ArchiveLookupResponse,
+    summary="Exact read-only archive lookup",
+    description=(
+        "Return whether a URL is already recorded. `exists` means an exact "
+        "parsed archive row matches the input. `canonical` means a persisted "
+        "identity from an earlier confirmed capture maps the input to a stored "
+        "URL that exactly exists. `absent`, `unknown` and `error` are distinct. "
+        "This endpoint never ingests, enqueues, rewrites or normalizes/guesses."
+    ),
+)
+def url_exists(
+    url: str,
+    _auth: None = Depends(require_auth),
+) -> ArchiveLookupResponse:
+    if not (url or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Query parameter 'url' must be non-empty",
+        )
+    return service.lookup_url(url)
+
+
+@router.get(
+    "/requests/{idempotency_key}",
+    response_model=IdempotencyReconciliationResponse,
+    summary="Read-only idempotency request reconciliation",
+    description=(
+        "Return durable state for an `Idempotency-Key` without re-running work. "
+        "Use this to reconcile an ambiguous POST timeout."
+    ),
+)
+def idempotency_request_status(
+    idempotency_key: str,
+    _auth: None = Depends(require_auth),
+) -> IdempotencyReconciliationResponse:
+    key = (idempotency_key or "").strip()
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Idempotency key must be non-empty",
+        )
+    try:
+        entry = service.get_idempotency_request(key)
+    except StateStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Idempotency state is unavailable: {exc}",
+        ) from exc
+    if entry is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown idempotency key",
+        )
+    results = []
+    for raw in entry.get("results", []):
+        try:
+            results.append(UrlResult(**raw))
+        except Exception:  # noqa: BLE001 - never hide accepted state behind one bad row
+            continue
+    return IdempotencyReconciliationResponse(
+        key=key,
+        state=entry["state"],
+        request_hash=entry["request_hash"],
+        inputs=entry["inputs"],
+        force=bool(entry.get("force", False)),
+        results=results,
+        error=entry.get("error") or None,
+        created_at=float(entry["created_at"]),
+        updated_at=float(entry["updated_at"]),
+    )
+
+
+@router.get(
+    "/capabilities",
+    response_model=CapabilitiesResponse,
+    summary="Explicit API capability contract",
+    description=(
+        "Advertise the structured ingest contract so clients can detect support "
+        "without guessing from package version strings."
+    ),
+)
+def capabilities(
+    _auth: None = Depends(require_auth),
+) -> CapabilitiesResponse:
+    return CapabilitiesResponse(
+        api_contract_version=API_CONTRACT_VERSION,
+        queue_format_version=1,
+        features={
+            "structured_primary": True,
+            "exact_url_lookup": True,
+            "idempotency_key": True,
+            "async_youtube_discovery": True,
+            "async_reddit_discovery": True,
+            "discovery_status": True,
+        },
+    )
 
 
 @router.get(

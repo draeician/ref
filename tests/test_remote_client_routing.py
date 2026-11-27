@@ -326,14 +326,16 @@ def test_process_url_reports_missing_youtube_credentials_without_traceback(
     assert "Traceback" not in output
 
 
-def test_server_side_process_one_still_calls_process_url(monkeypatch):
+def test_server_side_process_one_still_calls_process_url(monkeypatch, tmp_path):
     pytest.importorskip("fastapi")
     from ref_api import service
+    from ref_cli.capture import record_primary
 
     calls = []
 
-    def fake_process(url, force):
+    def fake_process(url, force, **_kwargs):
         calls.append((url, force))
+        record_primary("added", url)
         print("2026-11-09T00:00:00|[url]|(title)|uploader|YouTube|None")
 
     monkeypatch.setattr(
@@ -344,6 +346,10 @@ def test_server_side_process_one_still_calls_process_url(monkeypatch):
     monkeypatch.setattr(service.ref_cli, "should_skip_url", lambda url, cfg: False)
     monkeypatch.setattr(service.ref_cli, "is_youtube_video_id", lambda value: False)
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
+    monkeypatch.setattr(service.ref_cli, "UNIFIED", str(tmp_path / "references.md"))
+    monkeypatch.setattr(service, "_exact_archive_match", lambda url: True)
+    monkeypatch.setattr(service, "_identity_store", None)
+    monkeypatch.setattr(service, "_identity_dir", None)
 
     result = service.process_one(
         "https://example.com/a", _discover_youtube_links=False

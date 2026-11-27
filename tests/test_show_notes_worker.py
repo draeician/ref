@@ -16,6 +16,7 @@ import pytest
 
 from ref_api import service
 from ref_cli import youtube_extract
+from ref_cli.capture import record_primary
 
 VIDEO_ID = "zmrPY6S1FwY"
 VIDEO_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
@@ -26,8 +27,14 @@ PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLabcdefghij"
 def isolated(monkeypatch, tmp_path):
     """Point the service at an isolated archive path (no live references.md)."""
     monkeypatch.setattr(service.ref_cli, "UNIFIED", str(tmp_path / "references.md"))
+    (tmp_path / "references.md").write_text("", encoding="utf-8")
     monkeypatch.setattr(service.ref_cli, "load_config", lambda: {})
     monkeypatch.setattr(service.ref_cli, "should_skip_url", lambda url, config: False)
+    monkeypatch.setattr(service, "_exact_archive_match", lambda url: True)
+    monkeypatch.setattr(service, "_identity_store", None)
+    monkeypatch.setattr(service, "_identity_dir", None)
+    monkeypatch.setattr(service, "_idempotency_store", None)
+    monkeypatch.setattr(service, "_idempotency_dir", None)
     return tmp_path
 
 
@@ -50,10 +57,12 @@ def test_parent_returns_before_slow_discovery(isolated, monkeypatch):
         return {"description": "https://example.org/slow", "source": "cache"}
 
     monkeypatch.setattr(youtube_extract, "read_video_card", slow_card)
-    monkeypatch.setattr(
-        service.ref_cli, "process_url",
-        lambda url, force: print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General"),
-    )
+
+    def fake_process(url, force, **_kwargs):
+        record_primary("added", url)
+        print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
+
+    monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
 
     try:
         with patch("ref_api.app._bootstrap_archive"):
@@ -85,10 +94,11 @@ def test_worker_slow_child_does_not_block_new_ingest(isolated, monkeypatch):
     release = threading.Event()
     slow_started = threading.Event()
 
-    def fake_process(url, force):
+    def fake_process(url, force, **_kwargs):
         if url == slow_url:
             slow_started.set()
             release.wait(timeout=20)
+        record_primary("added", url)
         print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
@@ -116,12 +126,13 @@ def test_discovered_playlist_child_is_not_expanded(isolated, monkeypatch):
 
     def fake_record_link(url, force):
         calls.append(("record_link", url))
+        record_primary("added", url)
         print(f"2026-10-10T12:00:00|[{url}]|(Playlist)|Channel|YouTube")
 
     monkeypatch.setattr(service.ref_cli, "record_youtube_playlist_link", fake_record_link)
     monkeypatch.setattr(
         service.ref_cli, "process_url",
-        lambda url, force: calls.append(("process_url", url)),
+        lambda url, force, **_kwargs: calls.append(("process_url", url)),
     )
 
     result = service.process_one(
@@ -138,7 +149,10 @@ def test_direct_playlist_still_uses_full_processing(isolated, monkeypatch):
     calls = []
     monkeypatch.setattr(
         service.ref_cli, "process_url",
-        lambda url, force: calls.append(("process_url", url)),
+        lambda url, force, **_kwargs: (
+            calls.append(("process_url", url)),
+            record_primary("added", url),
+        ),
     )
     monkeypatch.setattr(
         service.ref_cli, "record_youtube_playlist_link",
@@ -162,11 +176,13 @@ def test_repeated_parent_submission_no_double_fanout(isolated, monkeypatch):
 
     seen = set()
 
-    def fake_process(url, force):
+    def fake_process(url, force, **_kwargs):
         if url in seen:
+            record_primary("exists", url)
             print(f"URL {url} already recorded.")
         else:
             seen.add(url)
+            record_primary("added", url)
             print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
@@ -186,8 +202,9 @@ def test_repeated_parent_submission_no_double_fanout(isolated, monkeypatch):
 def test_worker_drains_child_and_marks_done(isolated, monkeypatch):
     processed = []
 
-    def fake_process(url, force):
+    def fake_process(url, force, **_kwargs):
         processed.append(url)
+        record_primary("added", url)
         print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
@@ -203,7 +220,7 @@ def test_worker_drains_child_and_marks_done(isolated, monkeypatch):
 def test_worker_retries_failed_child_then_terminal(isolated, monkeypatch):
     import ref_api.show_notes_queue as sq
 
-    def failing(url, force):
+    def failing(url, force, **_kwargs):
         print("Error: denied")
 
     monkeypatch.setattr(service.ref_cli, "process_url", failing)
@@ -220,8 +237,9 @@ def test_worker_retries_failed_child_then_terminal(isolated, monkeypatch):
 def test_restart_recovery_then_worker_drains(isolated, monkeypatch):
     processed = []
 
-    def fake_process(url, force):
+    def fake_process(url, force, **_kwargs):
         processed.append(url)
+        record_primary("added", url)
         print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
@@ -256,10 +274,11 @@ def test_queue_status_endpoint(isolated, monkeypatch):
         youtube_extract, "read_video_card",
         lambda *a, **k: {"description": "https://example.org/a", "source": "cache"},
     )
-    monkeypatch.setattr(
-        service.ref_cli, "process_url",
-        lambda url, force: print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General"),
-    )
+    def fake_process(url, force, **_kwargs):
+        record_primary("added", url)
+        print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
+
+    monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
 
     with patch("ref_api.app._bootstrap_archive"):
         with TestClient(create_app()) as client:
@@ -281,11 +300,12 @@ def test_worker_resumes_after_timed_out_stop_and_restart(isolated, monkeypatch):
     slow_started = threading.Event()
     processed = []
 
-    def fake_process(url, force):
+    def fake_process(url, force, **_kwargs):
         if url == slow_url:
             slow_started.set()
             release.wait(timeout=20)
         processed.append(url)
+        record_primary("added", url)
         print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
@@ -366,11 +386,12 @@ def test_second_stop_cancels_pending_restart(isolated, monkeypatch):
     slow_started = threading.Event()
     processed = []
 
-    def fake_process(url, force):
+    def fake_process(url, force, **_kwargs):
         if url == slow_url:
             slow_started.set()
             release.wait(timeout=20)
         processed.append(url)
+        record_primary("added", url)
         print(f"2026-10-10T12:00:00|[{url}]|(Example)|General|General")
 
     monkeypatch.setattr(service.ref_cli, "process_url", fake_process)
