@@ -20,27 +20,27 @@
   playlists; read-only downgrade guard; copy-on-write transactional queue/state
   persistence; primary isolation from post-capture failures; lynx argv/no-shell
   timeout cleanup; credential-redacted actionable errors.
-- **Verification:** 689 passed / 1 warning (`pytest -q`), compileall OK,
-  `uv build` sdist+wheel, `git diff --check` clean. Correction head
-  `08b95b80e4cfc46a8ea997206cb78ceca679f2da` passed exact-head CI run
-  `45952664641` (`689 passed`); a docs-only follow-up records this. Fresh
-  isolated pipx `[api]`
+- **Verification:** 690 passed / 1 warning (`pytest -q`), compileall OK,
+  `uv build` sdist+wheel, `git diff --check` clean. Fresh isolated pipx `[api]`
   install on a fresh HOME/loopback port verified over real HTTP:
   health/capabilities (`contract 2` + new flags), structured capture,
   `exists`/`absent` with `deletion_safe`, idempotent replay + `409`,
-  `/requests/{key}` positional results, and `/queue/rollback-safety` both safe
-  (CLI exit 0) and blocked by a pending Reddit discovery job (CLI exit 2), with
-  the queue `jobs.json` byte-unchanged. `ruff`/`mypy` are not repository
-  dependencies; no installation was performed.
+  `/requests/{key}` positional results. Offline `ref-api --rollback-check`
+  blocked (exit 2) on a persisted failed Reddit discovery job with `jobs.json`
+  byte-unchanged, then exited 0 after that job was resolved to `done`.
+  `ruff`/`mypy` are not repository dependencies; no installation was performed.
 - **Safety:** no refwatch change, no PR #29 action, no production service
   restart, no production archive/queue write, no NFS/local-transcribe change,
   no queue migration, no tag or release.
 - **Rollback:** additive API/state files only; existing queue snapshots load as
-  YouTube. **Downgrade is blocked while pending/running Reddit discovery exists**
-  (or the queue is corrupt), because an older build would consume those jobs as
-  no-op YouTube discoveries. Check with `GET /queue/rollback-safety` or
-  `ref-api --rollback-check`; the check is read-only and drains nothing. Terminal
-  failed jobs are preserved and do not block.
+  YouTube. **Downgrade is blocked while any Reddit discovery job is pending,
+  running or failed** (or the queue is corrupt). Pending/running jobs would be
+  consumed as no-op YouTube discoveries; failed jobs would lose their `source`
+  field because the base reader (`_normalize_job` at `57abe0f`) reconstructs
+  without it on its next snapshot. `done` jobs do not block. The authoritative
+  procedure is offline: stop submissions, stop `ref-api`, run
+  `ref-api --rollback-check` against the final persisted queue, then back up
+  `jobs.json`. `GET /queue/rollback-safety` is read-only advisory.
 - **Next SemVer:** 1.7.0, documented only.
 
 ## Historical — 7d2c9e41 production deployment (ref + queue producer)

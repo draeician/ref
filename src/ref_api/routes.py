@@ -391,10 +391,12 @@ def queue_status(
     response_model=RollbackSafetyResponse,
     summary="Read-only downgrade safety check",
     description=(
-        "Report whether an older ref-api could be started without consuming "
-        "incompatible outstanding jobs. Pending/running Reddit discovery jobs "
-        "block downgrade because an older build would mark them done as no-op "
-        "YouTube jobs. This endpoint never mutates the queue."
+        "Report whether an older ref-api could be started without losing Reddit "
+        "discovery metadata. Pending/running Reddit discovery jobs block because "
+        "an older build consumes them as no-op YouTube jobs; failed ones also "
+        "block because an older snapshot drops their 'source' field. Run this "
+        "offline after stopping the service. This endpoint never mutates the "
+        "queue."
     ),
 )
 def queue_rollback_safety(

@@ -520,13 +520,22 @@ class ShowNotesQueue:
             self._commit(jobs)
 
     def rollback_blockers(self) -> List[Dict[str, Any]]:
-        """Pending/running Reddit discovery jobs an older API would consume.
+        """Reddit discovery jobs whose metadata an older API cannot preserve.
 
-        Older ref-api releases treat a ``discover`` job without a YouTube video
-        id as a no-op and mark it ``done``, losing the discovery.  A downgrade
-        is therefore blocked while any such job is unfinished.  Failed jobs are
-        terminal and are preserved unchanged by an older build, so they are not
-        blockers.  ``QueueCorruptError`` is raised when the queue cannot be read.
+        Older ref-api releases reconstruct jobs in ``_normalize_job`` without the
+        additive ``source`` field.  Two losses follow:
+
+        * A pending/running Reddit ``discover`` job is read as a non-video
+          YouTube job, consumed as a no-op and marked ``done``.
+        * On the older build's next snapshot write (for example ``recover()`` or
+          any enqueue), every job -- including a terminal ``failed`` one -- is
+          rewritten without ``source``, permanently losing its Reddit
+          provenance.
+
+        Downgrade is therefore blocked while any Reddit discovery job is
+        ``pending``, ``running`` or ``failed``.  A ``done`` job has no
+        outstanding work, so losing its source is harmless.  ``QueueCorruptError``
+        is raised when the queue cannot be read.
         """
         with self._lock:
             self._check_not_corrupt()
@@ -535,7 +544,7 @@ class ShowNotesQueue:
                 for job in self._jobs.values()
                 if job.get("kind") == KIND_DISCOVER
                 and job.get("source") == SOURCE_REDDIT
-                and job.get("status") in {"pending", "running"}
+                and job.get("status") in {"pending", "running", "failed"}
             ]
 
     # -- introspection ---------------------------------------------------

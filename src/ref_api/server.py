@@ -33,8 +33,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Read-only check: exit 0 when an older ref-api can be started safely, "
-            "or 2 when pending/running Reddit discovery jobs or a corrupt queue "
-            "block downgrade. Does not start the server."
+            "or 2 when pending/running/failed Reddit discovery jobs or a corrupt "
+            "queue block downgrade. Run offline after stopping the service. Does "
+            "not start the server."
         ),
     )
     return parser.parse_args(argv)

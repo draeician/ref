@@ -157,3 +157,40 @@ fragment tokens, error-log files, and a failing captured URL.
   an ambiguous result can be conservative but never duplicates a forced write.
 - Transactional tests inject failures at `json.dump`, file `os.fsync`, and
   `os.replace`, not only at high-level methods.
+
+## 2026-11-27 — Second correction: old queue reader strips `source` from failed jobs
+
+**Context.** Final review of PR #43 found that the base queue reader at
+`57abe0f` reconstructs records in `_normalize_job()` without the additive
+`source` field. The previous guard treated terminal `failed` Reddit discovery
+jobs as safe to downgrade, but the older build rewrites the entire table from its
+normalized records on the next snapshot (startup `recover()`, enqueue, retry),
+permanently stripping `source` even from a failed job. That is metadata loss, not
+preservation.
+
+**Decision 14 — pending, running *and* failed Reddit discovery block downgrade.**
+`ShowNotesQueue.rollback_blockers()` now returns Reddit discovery jobs in
+`pending`, `running`, and `failed`. A `done` job has no outstanding work, so
+losing its source is harmless and it does not block. `failed_preserved` counts
+failed jobs that block because this build preserves them and the older build
+would not. The reason text states both mechanisms: pending/running are consumed
+as no-op YouTube jobs; failed jobs lose `source` on the older snapshot.
+
+This supersedes the "failed jobs do not block" clause in Decision 10 and the
+"terminal failed jobs are preserved unchanged" claim in the first correction.
+The guard remains strictly read-only.
+
+**Decision 15 — the authoritative rollback check is offline.**
+A live check is advisory because a submission or worker transition can land
+between the check and the downgrade. The documented procedure is: stop incoming
+submissions, stop `ref-api` so the persisted queue is final, run
+`ref-api --rollback-check` (exit 0 safe / 2 blocked) against that final file, and
+back up `jobs.json` before changing versions. `GET /queue/rollback-safety`
+remains available for read-only inspection but is not the deciding check.
+Production queue files are never modified by the check or by this change.
+
+**Regression coverage.** A compatibility test reproduces the base reader/writer:
+it loads a current queue, normalizes away `source`, performs an old-style
+`recover()` snapshot, and asserts that the failed Reddit job survives only as a
+YouTube-default job. The same test asserts the current guard blocks before that
+loss can occur.

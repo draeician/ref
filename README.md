@@ -624,25 +624,43 @@ remain link-only; directly submitted playlists keep full expansion.
 
 Queue compatibility: new jobs use the existing `discover`/`ingest` kinds and add
 an optional `source` field (`youtube` default, or `reddit`). Existing snapshots
-without `source` load as YouTube jobs. An older ref-api reading a newer queue
-ignores the extra field; it would treat a Reddit discovery job as a non-video
-YouTube job and mark it done, losing the discovery. **Downgrade is therefore
-blocked while incompatible work is outstanding**; the queue is never rewritten,
-deleted, or migrated to prepare a downgrade.
+without `source` load as YouTube jobs. However, the pre-change reader
+(`_normalize_job` at base `57abe0f`) reconstructs each job without `source`. Two
+losses follow on downgrade:
 
-Check safety without mutating anything:
+- A pending/running Reddit `discover` job is seen as a non-video YouTube job,
+  consumed as a no-op and marked `done`, losing the discovery.
+- **Even a terminal failed Reddit discovery job loses its `source`** on the
+  older build's next snapshot write (for example `recover()` at startup or any
+  enqueue), because the old build rewrites the table from its normalized records.
+
+**Downgrade is therefore blocked while any Reddit discovery job is pending,
+running or failed.** A `done` job has no outstanding work and does not block. The
+queue is never rewritten, deleted, or migrated to prepare a downgrade.
+
+Check safety without mutating anything, and only against a queue that can no
+longer change:
 
 ```bash
+# 1. Stop incoming submissions (clients / schedulers) and let in-flight work finish.
+# 2. Stop ref-api so the queue file is final:
+systemctl --user stop ref-api.service
+# 3. Offline check against the final persisted queue:
 ref-api --rollback-check        # exit 0 = safe, 2 = blocked/corrupt
+# Optional live/read-only inspection while the service is running:
 curl -sS http://127.0.0.1:8000/queue/rollback-safety
 ```
 
-`GET /queue/rollback-safety` reports `safe`, `blocked`, `blockers` (pending or
-running Reddit discovery jobs with their ids/status/attempts), and
-`failed_preserved`. Pending/running Reddit discovery blocks downgrade; `done`
-jobs do not, and terminal `failed` jobs are preserved unchanged by an older build.
-A corrupt/unreadable queue also blocks (fail-closed). Drain the queue on the
-current build before downgrading.
+Running the check before the service is stopped is advisory only: a submission
+or worker state change can land after the check and before the downgrade. The
+authoritative check is the offline one after `ref-api` has stopped. If it exits
+`0`, back up `show_notes_queue/jobs.json` before changing the installed version.
+
+`GET /queue/rollback-safety` reports `safe`, `blocked`, `blockers` (pending,
+running or failed Reddit discovery jobs with ids/status/attempts), and
+`failed_preserved` (failed jobs that block because the older build would strip
+their `source`). A corrupt/unreadable queue also blocks (fail-closed). Drain or
+resolve these jobs on the current build before downgrading.
 
 All writes to `references.md` — appends, transcript updates, and the whole-file
 rewrites driven by enrichment (`@meta` stamping / unavailable-video cleanup) —

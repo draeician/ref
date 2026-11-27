@@ -235,23 +235,22 @@ def queue_status() -> Dict[str, int]:
 
 
 def rollback_safety() -> Dict[str, Any]:
-    """Read-only downgrade check for incompatible outstanding queue work.
+    """Read-only downgrade check for Reddit discovery metadata.
 
-    An older ref-api treats a Reddit ``discover`` job as a no-op YouTube job and
-    marks it done, losing the discovery.  Downgrade is blocked while any such
-    job is pending/running.  Terminal failed jobs are preserved unchanged by an
-    older build and do not block.  A corrupt/unreadable queue also blocks.
+    An older ref-api reconstructs jobs without the additive ``source`` field.
+    A pending/running Reddit ``discover`` job is then consumed as a no-op
+    YouTube job, and any older snapshot write strips ``source`` from every job,
+    including terminal ``failed`` ones.  Downgrade is therefore blocked while
+    any Reddit discovery job is pending, running or failed.  A ``done`` job has
+    no outstanding work and does not block.  A corrupt/unreadable queue blocks.
+
+    This function is strictly read-only.  Run it offline after the service has
+    stopped and no further submissions can reach the queue; the persisted file
+    is then the final state the older build would read.
     """
     queue = _get_queue()
     try:
         blockers = queue.rollback_blockers()
-        failed_preserved = [
-            job
-            for job in queue.jobs()
-            if job.get("kind") == KIND_DISCOVER
-            and job.get("source") == SOURCE_REDDIT
-            and job.get("status") == "failed"
-        ]
     except QueueCorruptError as exc:
         detail = sanitize_error_detail(f"queue corrupt: {exc}")
         return {
@@ -273,20 +272,25 @@ def rollback_safety() -> Dict[str, Any]:
         }
         for job in blockers
     ]
+    failed_blocking = sum(1 for job in blockers if job.get("status") == "failed")
     if summaries:
         reason = (
-            "Downgrade blocked: pending/running Reddit discovery jobs would be "
-            "consumed as no-op YouTube jobs by an older ref-api. Drain the queue "
-            "or keep the current ref-api until these jobs reach a terminal state."
+            "Downgrade blocked: Reddit discovery jobs exist that an older "
+            "ref-api cannot preserve. Pending/running jobs would be consumed as "
+            "no-op YouTube jobs, and a terminal failed job would lose its "
+            "'source' metadata on the older build's next snapshot write. Drain "
+            "or resolve these jobs on the current build before downgrading."
         )
     else:
-        reason = "No pending/running Reddit discovery jobs; downgrade is safe."
+        reason = (
+            "No pending/running/failed Reddit discovery jobs; downgrade is safe."
+        )
     return {
         "safe": not summaries,
         "blocked": bool(summaries),
         "corrupt": False,
         "blockers": summaries,
-        "failed_preserved": len(failed_preserved),
+        "failed_preserved": failed_blocking,
         "reason": reason,
     }
 

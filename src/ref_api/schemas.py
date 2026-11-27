@@ -220,7 +220,12 @@ class QueueStatusResponse(BaseModel):
 
 
 class RollbackSafetyResponse(BaseModel):
-    """Read-only downgrade safety check for outstanding Reddit discovery work."""
+    """Read-only downgrade safety check for Reddit discovery metadata.
+
+    ``failed_preserved`` counts failed Reddit discovery jobs that block the
+    downgrade: this build preserves them, but an older build would strip their
+    ``source`` field on its next snapshot write.
+    """
 
     safe: bool
     blocked: bool

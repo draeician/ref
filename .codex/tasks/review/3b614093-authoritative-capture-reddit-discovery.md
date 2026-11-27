@@ -111,8 +111,13 @@ also synchronous and recursive on the API request path.
   corrupt file.
 - **Rollback safety.** `ShowNotesQueue.rollback_blockers()`,
   `GET /queue/rollback-safety`, and `ref-api --rollback-check` block downgrade
-  while pending/running Reddit discovery (or a corrupt queue) exists. The check is
-  read-only; no snapshot is deleted, rewritten, or migrated.
+  while any Reddit discovery job is **pending, running or failed** (or the queue
+  is corrupt). Pending/running jobs would be consumed as no-op YouTube jobs;
+  failed jobs would lose their `source` metadata because the base reader
+  (`_normalize_job` at `57abe0f`) drops unknown fields on its next snapshot
+  write. `done` jobs do not block. The check is read-only and the documented
+  authoritative procedure is offline after the service stops; no snapshot is
+  deleted, rewritten, or migrated.
 - **Primary isolation.** `process_one` recovers the recorded primary capture even
   when `process_url` raises after the archive commit (playlist child/formatting),
   re-verifies the exact row, and reports the auxiliary failure without changing
@@ -123,6 +128,26 @@ also synchronous and recursive on the API request path.
 - **Diagnostics.** `redact_credentials` + `sanitize_error_detail` redact URL
   userinfo and token-bearing query/fragment values at the API, file-log, and lynx
   diagnostic boundaries; regression tests cover credential-bearing inputs.
+
+### Second corrective review pass
+
+- **Old-reader metadata loss.** Confirmed at base `57abe0f`:
+  `_normalize_job()` returns a fixed dict with no `source` field, and `_snapshot`
+  rewrites the whole table from those records. A downgrade therefore strips
+  `source` from every job on the older build's next mutation, including a
+  terminal failed Reddit discovery job. The previous "failed jobs do not block"
+  rule was wrong.
+- **Guard corrected.** `rollback_blockers()` now includes `failed` Reddit
+  discovery jobs alongside `pending`/`running`. `failed_preserved` counts the
+  failed jobs that block. `done` jobs still do not block.
+- **Compatibility regression.** `test_legacy_queue_snapshot_strips_source_from_failed_jobs`
+  reproduces the base reader/writer: load → normalize away `source` → old-style
+  `recover()` snapshot → assert the failed Reddit job survives only as a
+  YouTube-default job. It also asserts the current guard blocks first.
+- **Race-free procedure.** README/task/HANDOFF now require: stop incoming
+  submissions, stop `ref-api`, run `ref-api --rollback-check` against the final
+  persisted queue, and back up `jobs.json` before downgrading. The live endpoint
+  is advisory, not the deciding check.
 
 ## Verification evidence
 
@@ -135,30 +160,35 @@ Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
   `08b95b80e4cfc46a8ea997206cb78ceca679f2da`; exact-head CI run
   `45952664641` passed (`pytest`: `689 passed, 1 warning in 18.36s`). A
   docs-only follow-up records this evidence.
-- `python -m pytest -q` → **689 passed, 1 warning** (Starlette TestClient
+- `python -m pytest -q` → **690 passed, 1 warning** (Starlette TestClient
   deprecation only). New coverage: transactional write/fsync/replace failures
   (queue enqueue/batch/claim/terminal transitions, identity and idempotency
   begin/update, corrupt-file byte preservation), six interruption points ×
-  `force=false`/`true`, downgrade safety (pending/running/failed/corrupt and
-  read-only route/CLI), primary isolation from discovery and playlist-child
-  failures, deletion-safety semantics, and credential redaction.
+  `force=false`/`true`, downgrade safety (pending/running/**failed**/corrupt,
+  read-only route/CLI, and a base-`57abe0f` reader/snapshot compatibility
+  regression proving failed Reddit jobs lose `source`), primary isolation from
+  discovery and playlist-child failures, deletion-safety semantics, and
+  credential redaction.
 - `python -m compileall -q src` → OK.
 - `uv build` (equivalent package build; the local `build/` directory shadows the
   `build` module when invoked as `python -m build`) → sdist and wheel built
   successfully.
 - `git diff --check` → clean.
 - Isolated pipx install from the working tree with `[api]` into a fresh
-  `HOME`/`PIPX_HOME` and an ephemeral loopback port. Verified over real HTTP:
+  `HOME`/`PIPX_HOME`. Verified over real HTTP in the previous pass:
   `/health` and `/capabilities` reported `api_contract_version: "2"` plus the new
   feature flags; PDF ingest returned structured `added` with an exact confirmed
   canonical URL; exact lookup returned `exists`/`deletion_safe: true`; an absent
   URL returned `absent`/`deletion_safe: false`; idempotent replay returned
   `Idempotent-Replayed: true`; a changed payload returned `409`;
-  `/requests/{key}` returned `completed` with positional results. With a pending
-  Reddit discovery job present, `/queue/rollback-safety` and
-  `ref-api --rollback-check` reported `blocked` (CLI exit `2`), while the queue
-  `jobs.json` bytes were unchanged after the HTTP check. With no such job the CLI
-  exited `0`.
+  `/requests/{key}` returned `completed` with positional results.
+- **Offline rollback check (final pass):** with a failed Reddit discovery job in
+  the persisted queue, `ref-api --rollback-check` reported `blocked`
+  (`failed_preserved: 1`, status `failed`, reason cites `source`) and exited `2`;
+  the `jobs.json` SHA-256 was unchanged. After resolving that job to `done`, the
+  same offline check reported `safe` and exited `0`. A `done` Reddit job and an
+  unrelated YouTube discovery did not block. This exercises the exact procedure
+  documented for operators (service stopped, final queue file).
 - Lint/type tools (`ruff`, `mypy`) are not repository dependencies and are not
   installed in the isolated environment; per repository policy no installation
   was performed. CI's configured gate is `python -m pytest -q`.
@@ -182,11 +212,16 @@ Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
   `deletion_safe_lookup`, `idempotency_ambiguous_state`, and
   `rollback_safety_check`.
 - `jobs.json` is not migrated. Existing snapshots without `source` load as
-  YouTube. **Downgrade is blocked while pending/running Reddit discovery jobs
-  exist** (or the queue is corrupt): an older build would consume them as no-op
-  YouTube jobs. Use `GET /queue/rollback-safety` or `ref-api --rollback-check`
-  (exit 0 safe / 2 blocked); drain the queue first. Terminal `failed` jobs are
-  preserved unchanged and do not block. No snapshot is deleted or rewritten.
+  YouTube. **Downgrade is blocked while any Reddit discovery job is pending,
+  running or failed** (or the queue is corrupt):
+  - pending/running jobs would be consumed as no-op YouTube jobs;
+  - failed jobs would lose their `source` field on the older build's next
+    snapshot write (base `_normalize_job` reconstructs without it).
+
+  Use the offline procedure: stop submissions, stop `ref-api`, then run
+  `ref-api --rollback-check` (exit 0 safe / 2 blocked) against the final queue
+  and back up `jobs.json`. `GET /queue/rollback-safety` is read-only advisory.
+  `done` jobs do not block. No snapshot is deleted or rewritten.
 - Identity/idempotency files are additive under `ref_api_state/`; deleting them
   only loses reconciliation history, not archive rows. Ambiguous idempotency
   entries are retained until resolved with a new key.
