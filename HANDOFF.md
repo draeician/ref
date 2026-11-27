@@ -21,7 +21,10 @@
   persistence; primary isolation from post-capture failures; lynx argv/no-shell
   timeout cleanup; credential-redacted actionable errors.
 - **Verification:** 689 passed / 1 warning (`pytest -q`), compileall OK,
-  `uv build` sdist+wheel, `git diff --check` clean. Fresh isolated pipx `[api]`
+  `uv build` sdist+wheel, `git diff --check` clean. Correction head
+  `08b95b80e4cfc46a8ea997206cb78ceca679f2da` passed exact-head CI run
+  `45952664641` (`689 passed`); a docs-only follow-up records this. Fresh
+  isolated pipx `[api]`
   install on a fresh HOME/loopback port verified over real HTTP:
   health/capabilities (`contract 2` + new flags), structured capture,
   `exists`/`absent` with `deletion_safe`, idempotent replay + `409`,

@@ -131,6 +131,10 @@ Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
 
 - PR CI (`pytest`) passed on the original head; correction-head CI is recorded on
   [#43](https://github.com/draeician/ref/pull/43/checks) after push.
+- Correction implementation commit
+  `08b95b80e4cfc46a8ea997206cb78ceca679f2da`; exact-head CI run
+  `45952664641` passed (`pytest`: `689 passed, 1 warning in 18.36s`). A
+  docs-only follow-up records this evidence.
 - `python -m pytest -q` → **689 passed, 1 warning** (Starlette TestClient
   deprecation only). New coverage: transactional write/fsync/replace failures
   (queue enqueue/batch/claim/terminal transitions, identity and idempotency
