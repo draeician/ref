@@ -42,6 +42,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from ref_api.atomic_json import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 QUEUE_DIRNAME = "show_notes_queue"
@@ -262,10 +264,10 @@ class ShowNotesQueue:
         if self._corrupt:
             raise QueueCorruptError(self._corrupt_error)
 
-    def _prune_terminal(self) -> None:
+    def _prune_terminal(self, jobs: Dict[str, Dict[str, Any]]) -> None:
         """Compact terminal history to ``MAX_TERMINAL_JOBS`` (oldest first)."""
         terminal = [
-            job for job in self._jobs.values() if job.get("status") in TERMINAL_STATES
+            job for job in jobs.values() if job.get("status") in TERMINAL_STATES
         ]
         if len(terminal) <= MAX_TERMINAL_JOBS:
             return
@@ -273,21 +275,24 @@ class ShowNotesQueue:
             key=lambda job: (job.get("updated_at", 0.0), job.get("enqueued_at", 0.0))
         )
         for job in terminal[: len(terminal) - MAX_TERMINAL_JOBS]:
-            self._jobs.pop(job["id"], None)
+            jobs.pop(job["id"], None)
 
-    def _snapshot(self) -> None:
-        """Atomically persist the current job table (refuses when corrupt)."""
+    def _copy_jobs(self) -> Dict[str, Dict[str, Any]]:
+        """Return a shallow copy of the job table suitable for mutation."""
+        return {job_id: dict(job) for job_id, job in self._jobs.items()}
+
+    def _commit(self, jobs: Dict[str, Dict[str, Any]]) -> None:
+        """Persist ``jobs`` first, then publish it as the in-memory table.
+
+        Copy-on-write: a failed write leaves the previous in-memory snapshot
+        untouched, so a phantom accepted job is never visible to a later request
+        or to the worker.
+        """
         if self._corrupt:
             raise QueueCorruptError(self._corrupt_error)
-        self._prune_terminal()
-        os.makedirs(self.queue_dir, exist_ok=True)
-        tmp_path = f"{self.jobs_path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump({"jobs": self._jobs}, handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, self.jobs_path)
+        self._prune_terminal(jobs)
+        atomic_write_json(self.jobs_path, {"jobs": jobs})
+        self._jobs = jobs
 
     # -- lifecycle -------------------------------------------------------
 
@@ -295,16 +300,17 @@ class ShowNotesQueue:
         """Return any ``running`` job to ``pending`` (at-least-once after restart)."""
         with self._lock:
             self._check_not_corrupt()
+            jobs = self._copy_jobs()
             recovered = 0
             now = time.time()
-            for job in self._jobs.values():
+            for job in jobs.values():
                 if job.get("status") == "running":
                     job["status"] = "pending"
                     job["next_attempt_at"] = now
                     job["updated_at"] = now
                     recovered += 1
             if recovered:
-                self._snapshot()
+                self._commit(jobs)
             return recovered
 
     # -- mutations -------------------------------------------------------
@@ -348,12 +354,13 @@ class ShowNotesQueue:
             raise ValueError(f"Unsupported job source: {source!r}")
         with self._lock:
             self._check_not_corrupt()
-            for job in self._jobs.values():
+            jobs = self._copy_jobs()
+            for job in jobs.values():
                 if self._is_duplicate(job, key, kind):
                     return None
             job_id = uuid.uuid4().hex
             now = time.time()
-            self._jobs[job_id] = {
+            jobs[job_id] = {
                 "id": job_id,
                 "url": url,
                 "url_key": key,
@@ -367,7 +374,7 @@ class ShowNotesQueue:
                 "enqueued_at": now,
                 "updated_at": now,
             }
-            self._snapshot()
+            self._commit(jobs)
             return job_id
 
     def enqueue_many(
@@ -385,6 +392,7 @@ class ShowNotesQueue:
         skipped = 0
         with self._lock:
             self._check_not_corrupt()
+            jobs = self._copy_jobs()
             now = time.time()
             for url in urls:
                 key = self._key(url)
@@ -393,12 +401,12 @@ class ShowNotesQueue:
                     continue
                 if any(
                     self._is_duplicate(job, key, kind)
-                    for job in self._jobs.values()
+                    for job in jobs.values()
                 ):
                     skipped += 1
                     continue
                 job_id = uuid.uuid4().hex
-                self._jobs[job_id] = {
+                jobs[job_id] = {
                     "id": job_id,
                     "url": url,
                     "url_key": key,
@@ -414,7 +422,7 @@ class ShowNotesQueue:
                 }
                 queued += 1
             if queued:
-                self._snapshot()
+                self._commit(jobs)
             return queued, skipped
 
     def enqueue_discovery(
@@ -466,31 +474,35 @@ class ShowNotesQueue:
             if not candidates:
                 return None
             candidates.sort(key=lambda job: (job.get("enqueued_at", 0.0), job.get("id", "")))
-            job = candidates[0]
-            job["status"] = "running"
-            job["attempts"] = int(job.get("attempts", 0)) + 1
-            job["updated_at"] = now
-            self._snapshot()
-            return dict(job)
+            claimed_id = candidates[0]["id"]
+            jobs = self._copy_jobs()
+            claimed = jobs[claimed_id]
+            claimed["status"] = "running"
+            claimed["attempts"] = int(claimed.get("attempts", 0)) + 1
+            claimed["updated_at"] = now
+            self._commit(jobs)
+            return dict(claimed)
 
     def mark_done(self, job_id: str) -> None:
         with self._lock:
             self._check_not_corrupt()
-            job = self._jobs.get(job_id)
-            if job is None:
+            if job_id not in self._jobs:
                 return
+            jobs = self._copy_jobs()
+            job = jobs[job_id]
             job["status"] = "done"
             job["last_error"] = ""
             job["updated_at"] = time.time()
-            self._snapshot()
+            self._commit(jobs)
 
     def mark_failed(self, job_id: str, error: str, *, retryable: bool = True) -> None:
         """Record a failure; retry with backoff up to ``MAX_ATTEMPTS``, else terminal."""
         with self._lock:
             self._check_not_corrupt()
-            job = self._jobs.get(job_id)
-            if job is None:
+            if job_id not in self._jobs:
                 return
+            jobs = self._copy_jobs()
+            job = jobs[job_id]
             now = time.time()
             attempts = int(job.get("attempts", 0))
             job["last_error"] = (error or "")[:2000]
@@ -505,7 +517,26 @@ class ShowNotesQueue:
                 job["status"] = "failed"
                 job["next_attempt_at"] = now
             job["updated_at"] = now
-            self._snapshot()
+            self._commit(jobs)
+
+    def rollback_blockers(self) -> List[Dict[str, Any]]:
+        """Pending/running Reddit discovery jobs an older API would consume.
+
+        Older ref-api releases treat a ``discover`` job without a YouTube video
+        id as a no-op and mark it ``done``, losing the discovery.  A downgrade
+        is therefore blocked while any such job is unfinished.  Failed jobs are
+        terminal and are preserved unchanged by an older build, so they are not
+        blockers.  ``QueueCorruptError`` is raised when the queue cannot be read.
+        """
+        with self._lock:
+            self._check_not_corrupt()
+            return [
+                dict(job)
+                for job in self._jobs.values()
+                if job.get("kind") == KIND_DISCOVER
+                and job.get("source") == SOURCE_REDDIT
+                and job.get("status") in {"pending", "running"}
+            ]
 
     # -- introspection ---------------------------------------------------
 

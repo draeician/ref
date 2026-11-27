@@ -94,26 +94,67 @@ also synchronous and recursive on the API request path.
   are filtered and worker children disable further discovery.
 - `lynx` is executed as an argv list (no shell) so a timeout kills lynx itself.
 
+### Corrective review pass
+
+- **Forced crash recovery.** `IdempotencyStore` keeps positionally aligned
+  `attempts` (`archive fingerprint`, `started_at`) alongside `results`. Before a
+  forced write, `references.md` is fingerprinted and persisted. An interrupted
+  forced retry with an unchanged fingerprint resumes; a changed fingerprint
+  marks the key `ambiguous`, and later requests fail closed with `409`. Non-forced
+  retries stay safe via exact-row checks and queue dedup. `force` is part of the
+  request hash, and results (including `null` holes) remain bound to input order.
+- **Transactional persistence.** Added `src/ref_api/atomic_json.py` (unique temp
+  file, write + file `fsync`, `os.replace`, best-effort directory `fsync`).
+  `ShowNotesQueue`, `UrlIdentityStore`, and `IdempotencyStore` now mutate a copy,
+  persist it, and only then publish it in memory. Dump/fsync/replace failures
+  leave no phantom `queued`/durable identity/replay state and never overwrite a
+  corrupt file.
+- **Rollback safety.** `ShowNotesQueue.rollback_blockers()`,
+  `GET /queue/rollback-safety`, and `ref-api --rollback-check` block downgrade
+  while pending/running Reddit discovery (or a corrupt queue) exists. The check is
+  read-only; no snapshot is deleted, rewritten, or migrated.
+- **Primary isolation.** `process_one` recovers the recorded primary capture even
+  when `process_url` raises after the archive commit (playlist child/formatting),
+  re-verifies the exact row, and reports the auxiliary failure without changing
+  `primary`. Discovery/identity failures were already auxiliary.
+- **Deletion safety.** `GET /urls/exists` now returns `deletion_safe`, true only
+  for a proven exact/canonical-present row; `absent`/`unknown`/`error` are
+  documented as not proving absence.
+- **Diagnostics.** `redact_credentials` + `sanitize_error_detail` redact URL
+  userinfo and token-bearing query/fragment values at the API, file-log, and lynx
+  diagnostic boundaries; regression tests cover credential-bearing inputs.
+
 ## Verification evidence
 
 Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
 `uv pip install -e '.[api,test]'`).
 
-- PR CI (`pytest`) passed on every pushed head; see the checks on
-  [#43](https://github.com/draeician/ref/pull/43/checks).
-- `python -m pytest -q` → **623 passed, 1 warning** (Starlette TestClient
-  deprecation only).
+- PR CI (`pytest`) passed on the original head; correction-head CI is recorded on
+  [#43](https://github.com/draeician/ref/pull/43/checks) after push.
+- `python -m pytest -q` → **689 passed, 1 warning** (Starlette TestClient
+  deprecation only). New coverage: transactional write/fsync/replace failures
+  (queue enqueue/batch/claim/terminal transitions, identity and idempotency
+  begin/update, corrupt-file byte preservation), six interruption points ×
+  `force=false`/`true`, downgrade safety (pending/running/failed/corrupt and
+  read-only route/CLI), primary isolation from discovery and playlist-child
+  failures, deletion-safety semantics, and credential redaction.
 - `python -m compileall -q src` → OK.
 - `uv build` (equivalent package build; the local `build/` directory shadows the
   `build` module when invoked as `python -m build`) → sdist and wheel built
   successfully.
 - `git diff --check` → clean.
 - Isolated pipx install from the working tree with `[api]` into a fresh
-  `HOME`/`PIPX_HOME` and an ephemeral loopback port: `ref-api` started,
-  `/health` reported `api_contract_version: "2"`, `/capabilities` matched,
-  PDF ingest returned structured `added`, exact lookup returned `exists`,
-  an absent URL returned `absent`, an idempotent replay returned
-  `Idempotent-Replayed: true`, and a different payload returned `409`.
+  `HOME`/`PIPX_HOME` and an ephemeral loopback port. Verified over real HTTP:
+  `/health` and `/capabilities` reported `api_contract_version: "2"` plus the new
+  feature flags; PDF ingest returned structured `added` with an exact confirmed
+  canonical URL; exact lookup returned `exists`/`deletion_safe: true`; an absent
+  URL returned `absent`/`deletion_safe: false`; idempotent replay returned
+  `Idempotent-Replayed: true`; a changed payload returned `409`;
+  `/requests/{key}` returned `completed` with positional results. With a pending
+  Reddit discovery job present, `/queue/rollback-safety` and
+  `ref-api --rollback-check` reported `blocked` (CLI exit `2`), while the queue
+  `jobs.json` bytes were unchanged after the HTTP check. With no such job the CLI
+  exited `0`.
 - Lint/type tools (`ruff`, `mypy`) are not repository dependencies and are not
   installed in the isolated environment; per repository policy no installation
   was performed. CI's configured gate is `python -m pytest -q`.
@@ -133,19 +174,30 @@ Environment: isolated venv `/tmp/opencode/ref-venv` (Python 3.14.4,
 ## Compatibility and rollback
 
 - Response additions are backward compatible; existing fields and CLI rendering
-  are unchanged. `GET /capabilities` advertises contract version `2`.
+  are unchanged. `GET /capabilities` advertises contract version `2` plus
+  `deletion_safe_lookup`, `idempotency_ambiguous_state`, and
+  `rollback_safety_check`.
 - `jobs.json` is not migrated. Existing snapshots without `source` load as
-  YouTube. Rolling ref-api back to the previous build loses pending Reddit
-  discovery (new jobs degrade to no-op YouTube discovery) but preserves queue
-  rows and all archive data.
+  YouTube. **Downgrade is blocked while pending/running Reddit discovery jobs
+  exist** (or the queue is corrupt): an older build would consume them as no-op
+  YouTube jobs. Use `GET /queue/rollback-safety` or `ref-api --rollback-check`
+  (exit 0 safe / 2 blocked); drain the queue first. Terminal `failed` jobs are
+  preserved unchanged and do not block. No snapshot is deleted or rewritten.
 - Identity/idempotency files are additive under `ref_api_state/`; deleting them
-  only loses reconciliation history, not archive rows.
+  only loses reconciliation history, not archive rows. Ambiguous idempotency
+  entries are retained until resolved with a new key.
 - Planned next SemVer: **1.7.0** (documented only; no tag or release in scope).
 
 ## Known limitations
 
 - Idempotency key serialization is process-local (same model as the archive and
   queue locks). Multi-process/write-replica exactly-once is not claimed.
+- Atomic writes give torn-read safety and file-level `fsync` durability; directory
+  `fsync` is best-effort. This is not a claim of power-loss proof on filesystems
+  that ignore `fsync`, nor cross-process mutual exclusion.
+- A changed archive fingerprint marks an interrupted forced request `ambiguous`
+  even when the change came from unrelated work; the outcome is conservative but
+  never duplicates a forced write. Resolve by using a new key.
 - `archive_lock` remains process-local; no second archive writer was added.
-- `unknown`/`error` lookup outcomes must be treated as "not proven present" by
-  fail-safe clients.
+- `unknown`/`error`/`absent` lookup outcomes must be treated as "not proven
+  present" by fail-safe clients (`deletion_safe: false`).

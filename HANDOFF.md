@@ -12,22 +12,32 @@
   merged, deployed, or used to restart services** without explicit authorization.
 - **Delivered:** authoritative primary capture from the archive write/exact row
   check (never stdout); stored `canonical_url`; separate `discovery` status;
-  read-only exact/canonical `GET /urls/exists`; durable optional
-  `Idempotency-Key` with replay/409/reconciliation; API contract version `2`;
+  read-only exact/canonical `GET /urls/exists` with `deletion_safe`; durable
+  optional `Idempotency-Key` with replay/409/reconciliation plus per-input forced
+  fingerprints and fail-closed `ambiguous` state; API contract version `2`;
   asynchronous Reddit discovery on the existing durable queue with bounded
   fan-out, loop prevention, independent child retries, and link-only discovered
-  playlists; lynx argv/no-shell timeout cleanup; sanitized actionable errors.
-- **Verification:** 623 passed / 1 warning (`pytest -q`), compileall OK,
-  `uv build` sdist+wheel, `git diff --check` clean, and an isolated pipx `[api]`
-  install on a fresh HOME/archive/loopback port passed health/capabilities,
-  capture, exact lookup, idempotency replay and 409 conflict checks. `ruff` and
-  `mypy` are not repository dependencies; no installation was performed.
+  playlists; read-only downgrade guard; copy-on-write transactional queue/state
+  persistence; primary isolation from post-capture failures; lynx argv/no-shell
+  timeout cleanup; credential-redacted actionable errors.
+- **Verification:** 689 passed / 1 warning (`pytest -q`), compileall OK,
+  `uv build` sdist+wheel, `git diff --check` clean. Fresh isolated pipx `[api]`
+  install on a fresh HOME/loopback port verified over real HTTP:
+  health/capabilities (`contract 2` + new flags), structured capture,
+  `exists`/`absent` with `deletion_safe`, idempotent replay + `409`,
+  `/requests/{key}` positional results, and `/queue/rollback-safety` both safe
+  (CLI exit 0) and blocked by a pending Reddit discovery job (CLI exit 2), with
+  the queue `jobs.json` byte-unchanged. `ruff`/`mypy` are not repository
+  dependencies; no installation was performed.
 - **Safety:** no refwatch change, no PR #29 action, no production service
   restart, no production archive/queue write, no NFS/local-transcribe change,
   no queue migration, no tag or release.
 - **Rollback:** additive API/state files only; existing queue snapshots load as
-  YouTube. Rolling ref-api back loses pending Reddit discovery (new jobs become
-  no-op YouTube discovery) but preserves queue rows and archive data.
+  YouTube. **Downgrade is blocked while pending/running Reddit discovery exists**
+  (or the queue is corrupt), because an older build would consume those jobs as
+  no-op YouTube discoveries. Check with `GET /queue/rollback-safety` or
+  `ref-api --rollback-check`; the check is read-only and drains nothing. Terminal
+  failed jobs are preserved and do not block.
 - **Next SemVer:** 1.7.0, documented only.
 
 ## Historical — 7d2c9e41 production deployment (ref + queue producer)

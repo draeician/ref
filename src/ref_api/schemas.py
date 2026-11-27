@@ -1,6 +1,6 @@
 """Pydantic request/response models for the ref API."""
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -108,12 +108,20 @@ ArchiveLookupStatus = Literal["exists", "canonical", "absent", "unknown", "error
 
 
 class ArchiveLookupResponse(BaseModel):
-    """Read-only exact archive lookup result for one input URL."""
+    """Read-only exact archive lookup result for one input URL.
+
+    ``deletion_safe`` is true only when the response conclusively proves the
+    reference is present in the archive (an exact row or a persisted canonical
+    identity whose row exactly exists). ``absent``/``unknown``/``error`` are not
+    proof that a reference was never captured under another canonical form and
+    must be treated fail-closed by deletion workflows.
+    """
 
     input: str
     status: ArchiveLookupStatus
     archive_confirmed: bool = False
     exact_match: bool = False
+    deletion_safe: bool = False
     canonical_url: Optional[str] = None
     stored_url: Optional[str] = None
     identity: Literal["exact", "ledger", "none", "unresolved", "invalid"] = "none"
@@ -122,14 +130,19 @@ class ArchiveLookupResponse(BaseModel):
 
 
 class IdempotencyReconciliationResponse(BaseModel):
-    """Read-only view of a stored idempotency request key."""
+    """Read-only view of a stored idempotency request key.
+
+    ``results`` stays positionally aligned with ``inputs``: ``None`` marks an
+    input that has no durable confirmed result yet (interrupted or still being
+    processed).  Do not compact the list; position is the binding contract.
+    """
 
     key: str
-    state: Literal["processing", "completed"]
+    state: Literal["processing", "completed", "ambiguous"]
     request_hash: str
     inputs: List[str]
     force: bool = False
-    results: List[UrlResult] = Field(default_factory=list)
+    results: List[Optional[UrlResult]] = Field(default_factory=list)
     error: Optional[str] = None
     created_at: float
     updated_at: float
@@ -204,3 +217,14 @@ class QueueStatusResponse(BaseModel):
     failed: int = 0
     unfinished: int = 0
     corrupt: int = 0
+
+
+class RollbackSafetyResponse(BaseModel):
+    """Read-only downgrade safety check for outstanding Reddit discovery work."""
+
+    safe: bool
+    blocked: bool
+    corrupt: bool = False
+    blockers: List[Dict[str, Any]] = Field(default_factory=list)
+    failed_preserved: int = 0
+    reason: str = ""

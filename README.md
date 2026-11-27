@@ -182,6 +182,12 @@ guesses a normalization:
 | `unknown` | Identity is invalid, or a recorded canonical URL is missing from the archive. |
 | `error` | Archive/ledger lookup failed; sanitized details in `error`. |
 
+The response also includes `deletion_safe`. It is `true` **only** for a proven
+presence (`exists` exact row, or `canonical` persisted identity that resolves to
+an exact row). `absent`, `unknown`, and `error` are not proof that a reference
+was never captured under another canonical form; deletion workflows must treat
+`deletion_safe: false` as fail-closed.
+
 ```bash
 curl -sS "http://127.0.0.1:8000/urls/exists?url=https://redd.it/abc123"
 ```
@@ -208,19 +214,33 @@ curl -sS -X POST http://127.0.0.1:8000/urls \
 - Concurrent requests with the same key are serialized in-process.
 - Request state is durable at `<references>/ref_api_state/idempotency.json`.
   Completed entries are retained for **30 days** and bounded to the newest
-  **1000**; in-progress entries are never pruned. Pruning an old key makes it a
-  new request again.
+  **1000**; in-progress and ambiguous entries are never pruned. Pruning an old
+  key makes it a new request again.
 - `GET /requests/{key}` is a read-only reconciliation view (state, inputs,
-  results). Use it after an ambiguous client timeout.
+  results). Results stay **positionally aligned** with inputs; `null` marks an
+  input with no durable confirmed result yet. Use it after an ambiguous client
+  timeout.
 - Interruption is recoverable: archive writes are re-checked exactly and
-  discovery jobs deduplicate, so a retry cannot create a second reference or
-  job. This is **at-least-once with idempotent effects**, not a claim of
-  exactly-once execution.
-- `force: true` still forces an intentional new write for a **new** key. Replaying
-  the same key does not re-run the force operation.
+  discovery jobs deduplicate, so a non-forced retry cannot create a second
+  reference or job. This is **at-least-once with idempotent effects**, not a
+  claim of exactly-once execution.
+- For `force: true`, the pre-work archive fingerprint for each input is
+  persisted before the write. If an interrupted forced attempt left no result
+  and the archive changed, the key is marked `ambiguous` and later retries fail
+  closed with `409` instead of repeating a write that may already have
+  committed. A forced retry that can prove the archive did not change is safe
+  to resume. `GET /requests/{key}` shows the `ambiguous` state and diagnostics;
+  use a new key only when another forced capture is intentionally required.
+- `force: true` still forces an intentional new write for a **new** key or a
+  safe resumable retry. Replaying a completed key never re-runs the force
+  operation, and a key is bound to its `force` value (changing it is a payload
+  conflict).
 
 The idempotency/identity stores use the same single-process, atomic-JSON model as
-the show-notes queue. They are additive files; `jobs.json` is not migrated.
+the show-notes queue: copy-on-write mutation, write + file `fsync`, then atomic
+`os.replace`, then publish the new in-memory table. A failed write at any of
+those boundaries leaves no phantom accepted job/identity/request in memory and
+the previous file intact. They are additive files; `jobs.json` is not migrated.
 
 `GET /urls?domain=DOMAIN` is read-only (the archive is only parsed, never written). Matching uses the parsed hostname case-insensitively — `example.com`, `www.example.com`, and `docs.example.com` match; `notexample.com` or `example.com.evil.net` do not. URLs come back exactly as stored (paths, query strings, fragments intact), newest first. Pass a bare domain, not a URL: blank or malformed values return `400`.
 
@@ -606,9 +626,23 @@ Queue compatibility: new jobs use the existing `discover`/`ingest` kinds and add
 an optional `source` field (`youtube` default, or `reddit`). Existing snapshots
 without `source` load as YouTube jobs. An older ref-api reading a newer queue
 ignores the extra field; it would treat a Reddit discovery job as a non-video
-YouTube job and mark it done, so **rollback loses pending Reddit discovery but
-does not corrupt or discard the queue**. No production queue migration is
-required or authorized.
+YouTube job and mark it done, losing the discovery. **Downgrade is therefore
+blocked while incompatible work is outstanding**; the queue is never rewritten,
+deleted, or migrated to prepare a downgrade.
+
+Check safety without mutating anything:
+
+```bash
+ref-api --rollback-check        # exit 0 = safe, 2 = blocked/corrupt
+curl -sS http://127.0.0.1:8000/queue/rollback-safety
+```
+
+`GET /queue/rollback-safety` reports `safe`, `blocked`, `blockers` (pending or
+running Reddit discovery jobs with their ids/status/attempts), and
+`failed_preserved`. Pending/running Reddit discovery blocks downgrade; `done`
+jobs do not, and terminal `failed` jobs are preserved unchanged by an older build.
+A corrupt/unreadable queue also blocks (fail-closed). Drain the queue on the
+current build before downgrading.
 
 All writes to `references.md` — appends, transcript updates, and the whole-file
 rewrites driven by enrichment (`@meta` stamping / unavailable-video cleanup) —

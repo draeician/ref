@@ -5,7 +5,7 @@ import os
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from fastapi.responses import FileResponse
 
-from typing import Optional
+from typing import List, Optional
 
 from ref_api.schemas import (
     API_CONTRACT_VERSION,
@@ -14,6 +14,7 @@ from ref_api.schemas import (
     IdempotencyReconciliationResponse,
     ListResponse,
     QueueStatusResponse,
+    RollbackSafetyResponse,
     SearchField,
     SearchResponse,
     TranscriptRequest,
@@ -23,7 +24,11 @@ from ref_api.schemas import (
     UrlResult,
 )
 from ref_api import service
-from ref_api.state_store import IdempotencyConflict, StateStoreError
+from ref_api.state_store import (
+    IdempotencyAmbiguous,
+    IdempotencyConflict,
+    StateStoreError,
+)
 
 
 async def require_auth() -> None:
@@ -91,6 +96,11 @@ def ingest_urls(
             idempotency_key=key,
             force=body.force,
         )
+    except IdempotencyAmbiguous as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     except IdempotencyConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -161,17 +171,21 @@ def idempotency_request_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Unknown idempotency key",
         )
-    results = []
-    for raw in entry.get("results", []):
-        try:
-            results.append(UrlResult(**raw))
-        except Exception:  # noqa: BLE001 - never hide accepted state behind one bad row
+    raw_results = list(entry.get("results", []))
+    inputs = list(entry.get("inputs", []))
+    results: List[Optional[UrlResult]] = [None] * len(inputs)
+    for index, raw in enumerate(raw_results[: len(inputs)]):
+        if raw is None:
             continue
+        try:
+            results[index] = UrlResult(**raw)
+        except Exception:  # noqa: BLE001 - never hide accepted state behind one bad row
+            results[index] = None
     return IdempotencyReconciliationResponse(
         key=key,
         state=entry["state"],
         request_hash=entry["request_hash"],
-        inputs=entry["inputs"],
+        inputs=inputs,
         force=bool(entry.get("force", False)),
         results=results,
         error=entry.get("error") or None,
@@ -198,10 +212,13 @@ def capabilities(
         features={
             "structured_primary": True,
             "exact_url_lookup": True,
+            "deletion_safe_lookup": True,
             "idempotency_key": True,
+            "idempotency_ambiguous_state": True,
             "async_youtube_discovery": True,
             "async_reddit_discovery": True,
             "discovery_status": True,
+            "rollback_safety_check": True,
         },
     )
 
@@ -367,3 +384,20 @@ def queue_status(
     _auth: None = Depends(require_auth),
 ) -> QueueStatusResponse:
     return QueueStatusResponse(**service.queue_status())
+
+
+@router.get(
+    "/queue/rollback-safety",
+    response_model=RollbackSafetyResponse,
+    summary="Read-only downgrade safety check",
+    description=(
+        "Report whether an older ref-api could be started without consuming "
+        "incompatible outstanding jobs. Pending/running Reddit discovery jobs "
+        "block downgrade because an older build would mark them done as no-op "
+        "YouTube jobs. This endpoint never mutates the queue."
+    ),
+)
+def queue_rollback_safety(
+    _auth: None = Depends(require_auth),
+) -> RollbackSafetyResponse:
+    return RollbackSafetyResponse(**service.rollback_safety())

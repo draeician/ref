@@ -1019,7 +1019,10 @@ def get_title_from_url(url: str) -> str:
         "-display_charset=UTF-8", "-assume_charset=UTF-8", "-pseudo_inlines",
         "-dont_wrap_pre", "-source", url,
     ]
-    verbose_logger.log("Executing lynx command: " + " ".join(shlex.quote(part) for part in lynx_command))
+    verbose_logger.log(
+        "Executing lynx command: "
+        + " ".join(shlex.quote(sanitize_error_detail(part, limit=1000)) for part in lynx_command)
+    )
 
     try:
         result = subprocess.run(lynx_command, capture_output=True, text=True, errors="ignore", timeout=30)
@@ -1107,11 +1110,11 @@ def get_title_from_url(url: str) -> str:
         logging.error("Lynx command timed out")
         return "Error: Request timed out"
     except subprocess.SubprocessError as e:
-        logging.error(f"Subprocess error occurred: {e}")
-        return f"Error: Subprocess error - {e}"
+        logging.error("Subprocess error occurred: %s", sanitize_error_detail(e))
+        return f"Error: Subprocess error - {sanitize_error_detail(e)}"
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        return f"Error: Unexpected error - {e}"
+        logging.error("An unexpected error occurred: %s", sanitize_error_detail(e))
+        return f"Error: Unexpected error - {sanitize_error_detail(e)}"
 
 def check_integrity():
     """
@@ -2649,7 +2652,10 @@ def log_error(error_type: str, url: str, error_message: str) -> None:
         url (str): The URL that caused the error
         error_message (str): The detailed error message
     """
-    error_msg = f"{error_type} - URL: {url} - Error: {error_message}"
+    error_msg = (
+        f"{error_type} - URL: {sanitize_error_detail(url, limit=1000)} - "
+        f"Error: {sanitize_error_detail(error_message, limit=1000)}"
+    )
     error_logger.error(error_msg)
     logging.error(error_msg)
 

@@ -25,19 +25,30 @@ _PRIMARY_STATUSES = frozenset({"added", "exists"})
 # Keep diagnostics bounded and avoid spreading obviously sensitive URL
 # credentials / token-like query values into logs or API responses.
 _SECRET_QUERY_RE = re.compile(
-    r"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|"
-    r"password|passwd|signature|sig)=)[^&\s]+"
+    r"(?i)((?:[?&#]|\b)[^=&#\s]*?"
+    r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|"
+    r"passwd|signature|sig|credential)[^=&#\s]*=)[^&#\s]+"
 )
 _URL_USERINFO_RE = re.compile(r"(?i)(https?://)[^/@\s]+@")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
-def sanitize_error_detail(text: object, *, limit: int = 300) -> str:
-    """Return a one-line, bounded, credential-redacted diagnostic string."""
-    value = str(text or "").replace("\r", " ").replace("\n", " ")
-    value = _CONTROL_RE.sub(" ", value)
+def redact_credentials(text: object) -> str:
+    """Redact URL userinfo and token-bearing query/fragment values.
+
+    Does not flatten or truncate, so callers that need to preserve line breaks
+    (for example file logs) can use it directly.
+    """
+    value = str(text or "")
     value = _URL_USERINFO_RE.sub(r"\1***@", value)
     value = _SECRET_QUERY_RE.sub(r"\1***", value)
+    return value
+
+
+def sanitize_error_detail(text: object, *, limit: int = 300) -> str:
+    """Return a one-line, bounded, credential-redacted diagnostic string."""
+    value = redact_credentials(text).replace("\r", " ").replace("\n", " ")
+    value = _CONTROL_RE.sub(" ", value)
     value = re.sub(r"\s+", " ", value).strip()
     if len(value) > limit:
         value = value[: limit - 1].rstrip() + "…"

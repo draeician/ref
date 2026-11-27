@@ -75,3 +75,85 @@ single argv element, so shell metacharacters are inert.
 - Rollback of ref-api to this change's predecessor loses pending Reddit
   discovery jobs (they remain `done` no-ops) but preserves the queue table.
 - Production queue migration is neither needed nor authorized.
+
+## 2026-11-27 — Corrective review: crash recovery, transactional writes, rollback safety
+
+**Context.** Review of PR #43 found correctness gaps in the first pass: a forced
+retry could repeat an already-committed archive write; queue/state mutations were
+published in memory before persistence succeeded (phantom accepted state); and
+the documented downgrade behavior silently lost pending Reddit discovery. Primary
+successes could be downgraded by later playlist-child exceptions, and diagnostics
+were not proven credential-safe.
+
+**Decision 8 — per-input attempt fingerprints + explicit `ambiguous` state.**
+Before a forced input writes, the service persists a SHA-256 fingerprint of
+`references.md`. On a retry with no persisted result, an unchanged fingerprint
+proves re-execution is safe. A changed fingerprint (the write may have committed
+before the crash) is not reconcilable without risking a duplicate, so the key is
+persisted as `ambiguous` and subsequent requests fail closed with `409`. A
+non-forced retry remains safe because exact-row checks and queue dedup make
+re-processing idempotent. `force` is part of the request hash, so a key cannot be
+silently reused with different authorization. Results (including `null` holes)
+stay positionally bound to the original ordered inputs.
+
+Alternatives rejected: re-running forced work after a changed fingerprint
+(duplicate rows); inferring success from the presence of any row (cannot prove it
+was written by this attempt); treating a URI-identity match as proof of this
+attempt's write (redirects/canonicalization make it ambiguous).
+
+**Decision 9 — copy-on-write persistence for queue and state stores.**
+Every mutation builds a new job/identity/request table, writes it to a unique
+temp file, flushes and `fsync`s the file, atomically `os.replace`s the target,
+best-effort `fsync`s the directory, and only then publishes the new table in
+memory. A failure at dump, file fsync, or replace leaves the old in-memory table
+and old file intact, so a request never observes `queued`/`already_queued`, a
+durable identity, or a successful replay that was not actually persisted. A
+corrupt file is refused before any write, preserving its bytes.
+
+Note on guarantees: atomic replace prevents torn reads, and file fsync precedes
+the rename. Directory fsync is best-effort and logged if unsupported; the rename
+commit is already visible. This is single-writer-per-process durability, not
+cross-process mutual exclusion or power-loss proof on filesystems that ignore
+fsync.
+
+**Decision 10 — block downgrade while incompatible discovery is outstanding.**
+Supersedes the rollback consequence in Decision 3. Preserving the queue file is
+not enough: an older ref-api consumes a pending Reddit `discover` job as a no-op
+YouTube job and marks it `done`, losing the discovery. The current build exposes
+`GET /queue/rollback-safety` and `ref-api --rollback-check` (exit 0 safe, 2
+blocked). Pending/running Reddit discovery or a corrupt queue blocks downgrade;
+`done`/`failed` jobs do not. The check is read-only — no queue snapshot is ever
+deleted, rewritten, or migrated. Operators must drain the queue on the current
+build before downgrading.
+
+**Decision 11 — primary success is isolated from auxiliary failures.**
+`process_one` recovers the recorded primary capture even when `process_url`
+raises after the archive commit (for example a playlist-child or formatting
+failure). It re-verifies the exact row, records identity best-effort, reports the
+auxiliary failure in `output`, and returns the authoritative `primary` with its
+`added`/`exists` status. Discovery enqueue and identity bookkeeping were already
+auxiliary; this closes the remaining playlist-child path.
+
+**Decision 12 — deletion safety is an explicit proof, not an inference.**
+`GET /urls/exists` includes `deletion_safe`, true only for a proven exact row or a
+persisted canonical identity whose exact row exists. `absent`, `unknown`, and
+`error` are explicitly documented as *not* proof that an unresolved canonical
+reference was never captured. Deletion workflows must fail closed.
+
+**Decision 13 — sanitize at every diagnostic boundary.**
+`redact_credentials` strips URL userinfo and token-like query/fragment values
+without flattening; `sanitize_error_detail` then bounds and flattens for API
+responses and one-line logs. The file error logger and lynx argv diagnostics use
+it. Regression tests cover userinfo, API keys, access tokens, signatures,
+fragment tokens, error-log files, and a failing captured URL.
+
+**Consequences / limits (correction).**
+
+- The previous "rollback loses pending Reddit discovery" consequence is
+  superseded: downgrade is blocked instead.
+- `ambiguous` keys are retained indefinitely; a new key is required to perform a
+  new forced capture. This is intentional fail-closed behavior.
+- Fingerprint comparison detects any archive change, including unrelated writes;
+  an ambiguous result can be conservative but never duplicates a forced write.
+- Transactional tests inject failures at `json.dump`, file `os.fsync`, and
+  `os.replace`, not only at high-level methods.

@@ -9,19 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Structured primary capture** in `POST /urls`: `primary.status`, authoritative stored `canonical_url`, `archive_confirmed`, plus a separate `discovery` status. Status is recorded at the archive write/exact existing-row check, never inferred from stdout; existing PDFs and playlists now report `exists` even with no primary stdout.
-- **`GET /urls/exists?url=URL`** read-only exact archive lookup (`exists`, `canonical`, `absent`, `unknown`, `error`) using the existing parser and archive lock. Original→stored identity is persisted at `<references>/ref_api_state/url_identities.json`.
+- **`GET /urls/exists?url=URL`** read-only exact archive lookup (`exists`, `canonical`, `absent`, `unknown`, `error`) using the existing parser and archive lock. Original→stored identity is persisted at `<references>/ref_api_state/url_identities.json`. Responses include `deletion_safe`, true only for proven presence; absence/unknown/error must be treated fail-closed by deletion workflows.
 - **`GET /capabilities`** with explicit `api_contract_version: "2"` and feature flags; `/health` also reports the contract version.
-- **Optional `Idempotency-Key`** on `POST /urls` with durable request state, 409 on payload reuse, `Idempotent-Replayed`, concurrent per-key serialization, and read-only `GET /requests/{key}` reconciliation.
+- **Optional `Idempotency-Key`** on `POST /urls` with durable request state, 409 on payload reuse, `Idempotent-Replayed`, concurrent per-key serialization, and read-only `GET /requests/{key}` reconciliation. Results remain positionally bound to inputs (`null` = not yet durably confirmed).
+- **Forced-request crash recovery**: each input's pre-work archive fingerprint is persisted before a forced write. An interrupted forced attempt whose archive changed is marked `ambiguous` and retried keys fail closed with `409` instead of risking a duplicate forced row; provably unchanged attempts resume safely.
+- **`GET /queue/rollback-safety`** and `ref-api --rollback-check`: read-only downgrade guard. Pending/running Reddit discovery jobs (or a corrupt queue) block downgrade, because an older ref-api would consume them as no-op YouTube jobs. Nothing is deleted, rewritten, or migrated; terminal `failed` jobs are preserved.
 - **Asynchronous Reddit discovery** through the durable show-notes queue: submission destinations, body links, comment links and short-link canonical URLs are discovered by the worker, with bounded fan-out, independent child retries, loop prevention, and discovered playlists kept link-only.
-- Regression coverage for capture paths, exact lookup, idempotency/concurrency/restart recovery, slow/failing discovery, queue enqueue failure, legacy queue snapshots, and a real-route/archive/fixture-HTTP integration test.
+- Regression coverage for capture paths, exact lookup/deletion safety, idempotency/concurrency/restart recovery including six injection points × `force` true/false, transactional write/fsync/replace failures, downgrade safety, credential redaction, primary isolation from discovery/playlist-child failures, slow/failing discovery, queue enqueue failure, legacy queue snapshots, and a real-route/archive/fixture-HTTP integration test.
 
 ### Changed
 - `POST /urls` `url` is now the URL actually stored in the archive (after redirect/tracking normalization); `input` remains the original request identity. Existing response fields and CLI rendering are unchanged.
 - Reddit discovery no longer runs synchronously or recursively inside the API capture request.
+- The queue, identity and idempotency stores now mutate copy-on-write: the new table is written and `fsync`-ed to a temp file, atomically replaced, and only then published in memory. A failure at dump/fsync/replace leaves no phantom accepted state and cannot overwrite a corrupt file.
 
 ### Fixed
+- A confirmed primary capture is no longer downgraded to `error` when later auxiliary work fails (discovery enqueue, identity bookkeeping, playlist-child expansion, or formatting). The response keeps the authoritative `primary`, and the auxiliary failure is reported separately.
+- Exact lookup `absent`/`unknown` is documented and returned as non-proof of absence; `deletion_safe` prevents callers from treating an unresolved canonical reference as never captured.
 - `lynx` title fetch now uses an argv list instead of a shell wrapper, so a timeout cannot leave an orphaned shell/lynx process.
-- The generic `Error: An unexpected error occurred.` path preserves a sanitized actionable reason (credential-redacted, bounded) for API errors and background job records instead of discarding it.
+- The generic `Error: An unexpected error occurred.` path preserves a sanitized actionable reason (credential-redacted, bounded) for API errors and background job records instead of discarding it. Logs and returned errors redact URL userinfo and token-bearing query/fragment values.
 
 ### Infrastructure
 - New durable state files beside the archive (`ref_api_state/url_identities.json`, `ref_api_state/idempotency.json`) with atomic writes and fail-closed loading. No show-notes queue migration.

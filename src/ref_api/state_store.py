@@ -24,12 +24,14 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
+from ref_api.atomic_json import atomic_write_json
+
 IDENTITY_FILENAME = "url_identities.json"
 IDEMPOTENCY_FILENAME = "idempotency.json"
 
 STATE_VERSION = 1
 
-# Bounded state. In-progress idempotency requests are never pruned.
+# Bounded state. In-progress and ambiguous requests are never pruned.
 MAX_IDENTITIES = 5000
 MAX_IDEMPOTENCY_REQUESTS = 1000
 IDEMPOTENCY_RETENTION_SECONDS = 30 * 24 * 60 * 60
@@ -43,15 +45,12 @@ class IdempotencyConflict(StateStoreError):
     """The same idempotency key was reused with a different payload."""
 
 
-def _atomic_write(path: str, payload: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
+class IdempotencyAmbiguous(StateStoreError):
+    """An interrupted forced operation cannot be reconciled without risk.
+
+    Raised fail-closed instead of repeating an archive write that may already
+    have committed.
+    """
 
 
 def _read_object(path: str) -> Optional[Dict[str, Any]]:
@@ -109,20 +108,20 @@ class UrlIdentityStore:
         self._identities = normalized
         self._loaded = True
 
-    def _prune(self) -> None:
-        if len(self._identities) <= MAX_IDENTITIES:
+    def _prune(self, identities: Dict[str, Dict[str, Any]]) -> None:
+        if len(identities) <= MAX_IDENTITIES:
             return
         ordered = sorted(
-            self._identities.items(), key=lambda item: item[1].get("updated_at", 0.0)
+            identities.items(), key=lambda item: item[1].get("updated_at", 0.0)
         )
         for original, _entry in ordered[: len(ordered) - MAX_IDENTITIES]:
-            self._identities.pop(original, None)
+            identities.pop(original, None)
 
-    def _save(self) -> None:
-        self._prune()
-        _atomic_write(
+    def _save(self, identities: Dict[str, Dict[str, Any]]) -> None:
+        self._prune(identities)
+        atomic_write_json(
             self.path,
-            {"version": STATE_VERSION, "identities": self._identities},
+            {"version": STATE_VERSION, "identities": identities},
         )
 
     def record(self, original: str, stored_url: str) -> None:
@@ -135,11 +134,16 @@ class UrlIdentityStore:
             existing = self._identities.get(original)
             if existing and existing.get("url") == stored_url:
                 return
-            self._identities[original] = {
+            identities = {
+                key: dict(entry) for key, entry in self._identities.items()
+            }
+            identities[original] = {
                 "url": stored_url,
                 "updated_at": time.time(),
             }
-            self._save()
+            # Persist first; publish the new ledger only after the write commits.
+            self._save(identities)
+            self._identities = identities
 
     def lookup(self, original: str) -> Optional[str]:
         original = (original or "").strip()
@@ -194,6 +198,7 @@ class IdempotencyStore:
             inputs = entry.get("inputs")
             state = entry.get("state")
             results = entry.get("results")
+            attempts = entry.get("attempts")
             created_at = entry.get("created_at")
             updated_at = entry.get("updated_at")
             error = entry.get("error", "")
@@ -203,10 +208,45 @@ class IdempotencyStore:
                 isinstance(item, str) for item in inputs
             ):
                 raise StateStoreError(f"idempotency request {key!r} has invalid inputs")
-            if state not in ("processing", "completed"):
+            if state not in ("processing", "completed", "ambiguous"):
                 raise StateStoreError(f"idempotency request {key!r} has invalid state")
-            if not isinstance(results, list):
+            if not isinstance(results, list) or not all(
+                item is None or isinstance(item, dict) for item in results
+            ):
                 raise StateStoreError(f"idempotency request {key!r} has invalid results")
+            force = entry.get("force", False)
+            if not isinstance(force, bool):
+                raise StateStoreError(f"idempotency request {key!r} has invalid force")
+            if attempts is None:
+                attempts = [None] * len(inputs)
+            if not isinstance(attempts, list) or len(attempts) != len(inputs):
+                raise StateStoreError(
+                    f"idempotency request {key!r} has invalid attempts"
+                )
+            normalized_attempts: List[Optional[Dict[str, Any]]] = []
+            for attempt in attempts:
+                if attempt is None:
+                    normalized_attempts.append(None)
+                    continue
+                if not isinstance(attempt, dict):
+                    raise StateStoreError(
+                        f"idempotency request {key!r} has invalid attempt"
+                    )
+                fingerprint = attempt.get("fingerprint")
+                started_at = attempt.get("started_at")
+                if not isinstance(fingerprint, str) or not fingerprint:
+                    raise StateStoreError(
+                        f"idempotency request {key!r} attempt has no fingerprint"
+                    )
+                if isinstance(started_at, bool) or not isinstance(
+                    started_at, (int, float)
+                ):
+                    raise StateStoreError(
+                        f"idempotency request {key!r} attempt has invalid started_at"
+                    )
+                normalized_attempts.append(
+                    {"fingerprint": fingerprint, "started_at": float(started_at)}
+                )
             for value, field in (
                 (created_at, "created_at"),
                 (updated_at, "updated_at"),
@@ -220,9 +260,10 @@ class IdempotencyStore:
             normalized[key] = {
                 "request_hash": request_hash,
                 "inputs": list(inputs),
-                "force": bool(entry.get("force", False)),
+                "force": force,
                 "state": state,
                 "results": results,
+                "attempts": normalized_attempts,
                 "error": error,
                 "created_at": float(created_at),
                 "updated_at": float(updated_at),
@@ -230,35 +271,35 @@ class IdempotencyStore:
         self._requests = normalized
         self._loaded = True
 
-    def _prune(self) -> None:
+    def _prune(self, requests: Dict[str, Dict[str, Any]]) -> None:
         now = time.time()
         completed = [
             (key, entry)
-            for key, entry in self._requests.items()
+            for key, entry in requests.items()
             if entry.get("state") == "completed"
             and now - entry.get("updated_at", 0.0) > IDEMPOTENCY_RETENTION_SECONDS
         ]
         for key, _entry in completed:
-            self._requests.pop(key, None)
-        if len(self._requests) <= MAX_IDEMPOTENCY_REQUESTS:
+            requests.pop(key, None)
+        if len(requests) <= MAX_IDEMPOTENCY_REQUESTS:
             return
         prunable = sorted(
             (
                 (key, entry)
-                for key, entry in self._requests.items()
+                for key, entry in requests.items()
                 if entry.get("state") == "completed"
             ),
             key=lambda item: item[1].get("updated_at", 0.0),
         )
-        excess = len(self._requests) - MAX_IDEMPOTENCY_REQUESTS
+        excess = len(requests) - MAX_IDEMPOTENCY_REQUESTS
         for key, _entry in prunable[:excess]:
-            self._requests.pop(key, None)
+            requests.pop(key, None)
 
-    def _save(self) -> None:
-        self._prune()
-        _atomic_write(
+    def _save(self, requests: Dict[str, Dict[str, Any]]) -> None:
+        self._prune(requests)
+        atomic_write_json(
             self.path,
-            {"version": STATE_VERSION, "requests": self._requests},
+            {"version": STATE_VERSION, "requests": requests},
         )
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
@@ -278,7 +319,8 @@ class IdempotencyStore:
         """Return the current request entry, creating it when new.
 
         Raises :class:`IdempotencyConflict` when the key was already used with a
-        different request hash.
+        different request hash, and :class:`IdempotencyAmbiguous` when an earlier
+        attempt is unresolved and must not be re-executed.
         """
         with self._lock:
             self._load()
@@ -288,6 +330,12 @@ class IdempotencyStore:
                     raise IdempotencyConflict(
                         "Idempotency-Key was already used with a different request payload"
                     )
+                if existing["state"] == "ambiguous":
+                    raise IdempotencyAmbiguous(
+                        "Idempotency-Key is ambiguous after an interrupted forced "
+                        "operation; inspect GET /requests/{key} and use a new key "
+                        "if another forced capture is intended"
+                    )
                 return dict(existing)
             now = time.time()
             entry = {
@@ -295,20 +343,27 @@ class IdempotencyStore:
                 "inputs": list(inputs),
                 "force": bool(force),
                 "state": "processing",
-                "results": [],
+                "results": [None] * len(inputs),
+                "attempts": [None] * len(inputs),
                 "error": "",
                 "created_at": now,
                 "updated_at": now,
             }
-            self._requests[key] = entry
-            self._save()
+            requests = {
+                request_key: dict(request_entry)
+                for request_key, request_entry in self._requests.items()
+            }
+            requests[key] = entry
+            self._save(requests)
+            self._requests = requests
             return dict(entry)
 
     def update(
         self,
         key: str,
         *,
-        results: List[Dict[str, Any]],
+        results: List[Optional[Dict[str, Any]]],
+        attempts: Optional[List[Optional[Dict[str, Any]]]] = None,
         error: str = "",
         completed: bool = False,
     ) -> Dict[str, Any]:
@@ -317,9 +372,52 @@ class IdempotencyStore:
             entry = self._requests.get(key)
             if entry is None:
                 raise StateStoreError(f"idempotency request {key!r} disappeared")
-            entry["results"] = list(results)
-            entry["error"] = error[:2000]
-            entry["state"] = "completed" if completed else "processing"
-            entry["updated_at"] = time.time()
-            self._save()
-            return dict(entry)
+            requests = {
+                request_key: dict(request_entry)
+                for request_key, request_entry in self._requests.items()
+            }
+            updated = requests[key]
+            updated["results"] = list(results)
+            if attempts is not None:
+                if len(attempts) != len(updated["inputs"]):
+                    raise StateStoreError(
+                        f"idempotency request {key!r} attempt count mismatch"
+                    )
+                updated["attempts"] = list(attempts)
+            updated["error"] = error[:2000]
+            updated["state"] = "completed" if completed else "processing"
+            updated["updated_at"] = time.time()
+            self._save(requests)
+            self._requests = requests
+            return dict(updated)
+
+    def mark_ambiguous(
+        self,
+        key: str,
+        *,
+        results: List[Optional[Dict[str, Any]]],
+        attempts: List[Optional[Dict[str, Any]]],
+        error: str,
+    ) -> Dict[str, Any]:
+        """Persist an explicit fail-closed state after an unreconcilable crash."""
+        with self._lock:
+            self._load()
+            if key not in self._requests:
+                raise StateStoreError(f"idempotency request {key!r} disappeared")
+            requests = {
+                request_key: dict(request_entry)
+                for request_key, request_entry in self._requests.items()
+            }
+            updated = requests[key]
+            if len(attempts) != len(updated["inputs"]):
+                raise StateStoreError(
+                    f"idempotency request {key!r} attempt count mismatch"
+                )
+            updated["results"] = list(results)
+            updated["attempts"] = list(attempts)
+            updated["state"] = "ambiguous"
+            updated["error"] = error[:2000]
+            updated["updated_at"] = time.time()
+            self._save(requests)
+            self._requests = requests
+            return dict(updated)

@@ -33,6 +33,7 @@ from ref_api.show_notes_queue import (
     ShowNotesQueue,
 )
 from ref_api.state_store import (
+    IdempotencyAmbiguous,
     IdempotencyStore,
     StateStoreError,
     UrlIdentityStore,
@@ -195,6 +196,25 @@ def _queue_directory() -> str:
     )
 
 
+def _archive_fingerprint() -> str:
+    """Content fingerprint used to detect whether an interrupted attempt wrote.
+
+    The read is taken under the shared archive lock so it cannot straddle a
+    partial append/rewrite.  A missing archive is represented explicitly; an
+    unreadable archive raises :class:`StateStoreError` because a forced retry
+    cannot then be proven safe.
+    """
+    try:
+        with ref_cli._archive_lock:
+            with open(ref_cli.UNIFIED, "rb") as handle:
+                data = handle.read()
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:  # noqa: BLE001 - no proof means no forced replay
+        raise StateStoreError(f"archive fingerprint unavailable: {exc}") from exc
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
 def _get_queue() -> ShowNotesQueue:
     """Return the (lazily-created) durable queue for the current archive."""
     global _queue, _queue_dir
@@ -212,6 +232,63 @@ def queue_status() -> Dict[str, int]:
     counts = queue.stats()
     counts["unfinished"] = counts.get("pending", 0) + counts.get("running", 0)
     return counts
+
+
+def rollback_safety() -> Dict[str, Any]:
+    """Read-only downgrade check for incompatible outstanding queue work.
+
+    An older ref-api treats a Reddit ``discover`` job as a no-op YouTube job and
+    marks it done, losing the discovery.  Downgrade is blocked while any such
+    job is pending/running.  Terminal failed jobs are preserved unchanged by an
+    older build and do not block.  A corrupt/unreadable queue also blocks.
+    """
+    queue = _get_queue()
+    try:
+        blockers = queue.rollback_blockers()
+        failed_preserved = [
+            job
+            for job in queue.jobs()
+            if job.get("kind") == KIND_DISCOVER
+            and job.get("source") == SOURCE_REDDIT
+            and job.get("status") == "failed"
+        ]
+    except QueueCorruptError as exc:
+        detail = sanitize_error_detail(f"queue corrupt: {exc}")
+        return {
+            "safe": False,
+            "blocked": True,
+            "corrupt": True,
+            "blockers": [],
+            "failed_preserved": 0,
+            "reason": detail,
+        }
+
+    summaries = [
+        {
+            "job_id": job.get("id", ""),
+            "url": sanitize_error_detail(job.get("url", "")),
+            "status": job.get("status", ""),
+            "attempts": int(job.get("attempts", 0)),
+            "parent_video_id": job.get("parent_video_id", ""),
+        }
+        for job in blockers
+    ]
+    if summaries:
+        reason = (
+            "Downgrade blocked: pending/running Reddit discovery jobs would be "
+            "consumed as no-op YouTube jobs by an older ref-api. Drain the queue "
+            "or keep the current ref-api until these jobs reach a terminal state."
+        )
+    else:
+        reason = "No pending/running Reddit discovery jobs; downgrade is safe."
+    return {
+        "safe": not summaries,
+        "blocked": bool(summaries),
+        "corrupt": False,
+        "blockers": summaries,
+        "failed_preserved": len(failed_preserved),
+        "reason": reason,
+    }
 
 
 def _discover_youtube_show_note_links(
@@ -243,8 +320,11 @@ def _discover_youtube_show_note_links(
         chapter_count = len(chapters_from_description(description))
         links = outbound_urls(card, video_id)
     except Exception as exc:  # noqa: BLE001 - best-effort metadata retrieval
-        logger.warning("YouTube notes: unavailable video_id=%s reason=%s", video_id, exc)
-        return video_id, [], f"YouTube notes: unavailable for {video_id} ({exc})", 0
+        detail = sanitize_error_detail(exc)
+        logger.warning(
+            "YouTube notes: unavailable video_id=%s reason=%s", video_id, detail
+        )
+        return video_id, [], f"YouTube notes: unavailable for {video_id} ({detail})", 0
 
     logger.info(
         "YouTube notes: metadata video_id=%s source=%s description_chars=%d "
@@ -276,6 +356,29 @@ def _discovery_line(
     return f"{label}: discovery not queued ({detail or 'unknown error'})"
 
 
+def _discovery_source(
+    stored_url: str,
+    *,
+    allow_youtube: bool,
+    allow_reddit: bool,
+) -> tuple[str, str]:
+    """Return ``(source, video_id)`` for discovery, or ``("", "")``.
+
+    Kept separate so a post-capture formatting/import failure cannot turn a
+    confirmed primary result into an error, and so the caller can report a
+    failed discovery without guessing whether discovery applied.
+    """
+    if allow_reddit and is_reddit_url(stored_url):
+        return SOURCE_REDDIT, ""
+    if allow_youtube:
+        from ref_cli.youtube_extract import youtube_video_id
+
+        video_id = youtube_video_id(stored_url) or ""
+        if video_id:
+            return SOURCE_YOUTUBE, video_id
+    return "", ""
+
+
 def _enqueue_capture_discovery(
     stored_url: str,
     *,
@@ -288,16 +391,9 @@ def _enqueue_capture_discovery(
     returned only after the queue snapshot was written; any enqueue failure is
     reported as ``failed`` and never as queued.
     """
-    source = ""
-    video_id = ""
-    if allow_reddit and is_reddit_url(stored_url):
-        source = SOURCE_REDDIT
-    elif allow_youtube:
-        from ref_cli.youtube_extract import youtube_video_id
-
-        video_id = youtube_video_id(stored_url) or ""
-        if video_id:
-            source = SOURCE_YOUTUBE
+    source, video_id = _discovery_source(
+        stored_url, allow_youtube=allow_youtube, allow_reddit=allow_reddit
+    )
     if not source:
         return None
 
@@ -316,8 +412,9 @@ def _enqueue_capture_discovery(
         detail = sanitize_error_detail(
             f"{type(exc).__name__}: {exc}"
         )
-        logger.exception(
-            "Discovery: enqueue failed source=%s url=%s", source, safe_url
+        logger.error(
+            "Discovery: enqueue failed source=%s url=%s reason=%s",
+            source, safe_url, detail,
         )
         return DiscoveryResult(status="failed", detail=detail)
 
@@ -419,6 +516,106 @@ def _capture_status(
     return None, "error", "Primary capture was not confirmed"
 
 
+def _build_primary_result(
+    *,
+    original: str,
+    target: str,
+    capture: Any,
+    output: str,
+    discover_youtube: bool,
+    discover_reddit: bool,
+    auxiliary_error: str = "",
+) -> UrlResult:
+    """Build a result from a recorded primary capture.
+
+    The primary archive row is already committed. Identity bookkeeping and
+    discovery enqueue (and any playlist child work that may have run before an
+    exception) are auxiliary: their failure is reported, but it never changes the
+    primary status or removes ``primary`` from the response.
+    """
+    stored_url = capture.url
+    if not _exact_archive_match(stored_url):
+        detail = (
+            "Primary capture reported "
+            f"{capture.status!r} for {stored_url} but no exact archive row was found"
+        )
+        safe_detail = sanitize_error_detail(detail)
+        logger.error(
+            "Capture verification failed url=%s stored=%s status=%s",
+            sanitize_error_detail(target),
+            sanitize_error_detail(stored_url),
+            capture.status,
+        )
+        return UrlResult(
+            input=original,
+            url=target,
+            status="error",
+            message=safe_detail,
+            output=output,
+            error=safe_detail,
+        )
+
+    identity_recorded = _remember_identity(original, target, stored_url)
+    primary = PrimaryCapture(
+        status=capture.status,
+        canonical_url=stored_url,
+        archive_confirmed=True,
+        source=capture.source,
+        identity_recorded=identity_recorded,
+    )
+
+    discovery: Optional[DiscoveryResult] = None
+    if auxiliary_error:
+        output = (
+            f"{output}\nPost-capture work failed: {auxiliary_error}"
+            if output
+            else f"Post-capture work failed: {auxiliary_error}"
+        )
+    else:
+        try:
+            source, video_id = _discovery_source(
+                stored_url,
+                allow_youtube=discover_youtube,
+                allow_reddit=discover_reddit,
+            )
+            discovery = _enqueue_capture_discovery(
+                stored_url,
+                allow_youtube=discover_youtube,
+                allow_reddit=discover_reddit,
+            )
+            if discovery is not None:
+                summary = _discovery_line(
+                    source or SOURCE_YOUTUBE,
+                    status=discovery.status,
+                    job_id=discovery.job_id,
+                    video_id=video_id,
+                    detail=discovery.detail,
+                )
+                output = f"{output}\n{summary}" if output else summary
+        except Exception as exc:  # noqa: BLE001 - primary is already committed
+            detail = sanitize_error_detail(f"{type(exc).__name__}: {exc}")
+            discovery = DiscoveryResult(status="failed", detail=detail)
+            logger.error(
+                "Post-capture discovery failed url=%s reason=%s",
+                sanitize_error_detail(stored_url),
+                detail,
+            )
+
+    message = {
+        "added": "Recorded",
+        "exists": "Already recorded",
+    }.get(capture.status, "")
+    return UrlResult(
+        input=original,
+        url=stored_url,
+        status=capture.status,
+        message=message,
+        output=output,
+        primary=primary,
+        discovery=discovery,
+    )
+
+
 def process_one(
     raw_input: str,
     force: bool = False,
@@ -486,86 +683,64 @@ def process_one(
         capture, status, detail = _capture_status(target)
 
         if status not in {"added", "exists"} or capture is None:
-            message = detail or (output.splitlines()[0] if output else "Processing failed")
+            message = sanitize_error_detail(
+                detail or (output.splitlines()[0] if output else "Processing failed")
+            )
             return UrlResult(
                 input=original,
                 url=target,
                 status="error",
                 message=message,
                 output=output,
-                error=sanitize_error_detail(message),
+                error=message,
             )
 
-        stored_url = capture.url
-        if not _exact_archive_match(stored_url):
-            detail = (
-                "Primary capture reported "
-                f"{status!r} for {stored_url} but no exact archive row was found"
-            )
-            logger.error(
-                "Capture verification failed url=%s stored=%s status=%s",
-                target, stored_url, status,
-            )
-            return UrlResult(
-                input=original,
-                url=target,
-                status="error",
-                message=detail,
-                output=output,
-                error=sanitize_error_detail(detail),
-            )
-
-        identity_recorded = _remember_identity(original, target, stored_url)
-        primary = PrimaryCapture(
-            status=capture.status,
-            canonical_url=stored_url,
-            archive_confirmed=True,
-            source=capture.source,
-            identity_recorded=identity_recorded,
-        )
-
-        discovery = _enqueue_capture_discovery(
-            stored_url,
-            allow_youtube=_discover_youtube_links,
-            allow_reddit=_discover_reddit_links,
-        )
-        if discovery is not None:
-            discovery_source = (
-                SOURCE_REDDIT if is_reddit_url(stored_url) else SOURCE_YOUTUBE
-            )
-            video_id = ""
-            if discovery_source == SOURCE_YOUTUBE:
-                from ref_cli.youtube_extract import youtube_video_id
-
-                video_id = youtube_video_id(stored_url) or ""
-            summary = _discovery_line(
-                discovery_source,
-                status=discovery.status,
-                job_id=discovery.job_id,
-                video_id=video_id,
-                detail=discovery.detail,
-            )
-            output = f"{output}\n{summary}" if output else summary
-
-        message = {
-            "added": "Recorded",
-            "exists": "Already recorded",
-        }.get(capture.status, "")
-        return UrlResult(
-            input=original,
-            url=stored_url,
-            status=capture.status,
-            message=message,
+        return _build_primary_result(
+            original=original,
+            target=target,
+            capture=capture,
             output=output,
-            primary=primary,
-            discovery=discovery,
+            discover_youtube=_discover_youtube_links,
+            discover_reddit=_discover_reddit_links,
         )
-    except Exception as exc:  # noqa: BLE001 - surface as per-URL error when possible
+    except Exception as exc:  # noqa: BLE001 - primary may already be committed
         output = buf.getvalue().strip()
         reason = sanitize_error_detail(f"{type(exc).__name__}: {exc}")
-        logger.exception(
-            "Failed to process URL %s (operation=process_url exception=%s)",
-            target, type(exc).__name__,
+
+        # ``process_url`` may commit the primary archive row and then fail in
+        # auxiliary work (for example a playlist child or formatting). The
+        # recorder keeps the confirmed primary after the scope unwinds, so a
+        # committed capture must never be downgraded to an error.
+        capture, status, _detail = _capture_status(target)
+        if capture is not None and status in {"added", "exists"}:
+            try:
+                recovered = _build_primary_result(
+                    original=original,
+                    target=target,
+                    capture=capture,
+                    output=output,
+                    discover_youtube=_discover_youtube_links,
+                    discover_reddit=_discover_reddit_links,
+                    auxiliary_error=reason,
+                )
+            except Exception as verify_exc:  # noqa: BLE001 - fall back to error
+                reason = sanitize_error_detail(
+                    f"{reason}; recovery verification failed: "
+                    f"{type(verify_exc).__name__}: {verify_exc}"
+                )
+            else:
+                logger.warning(
+                    "Post-capture work failed but primary is committed url=%s "
+                    "status=%s reason=%s",
+                    sanitize_error_detail(target),
+                    status,
+                    reason,
+                )
+                return recovered
+
+        logger.error(
+            "Failed to process URL url=%s exception=%s reason=%s",
+            sanitize_error_detail(target), type(exc).__name__, reason,
         )
         return UrlResult(
             input=original,
@@ -652,9 +827,9 @@ def _process_reddit_discovery_job(queue: ShowNotesQueue, job: Dict[str, Any]) ->
         elapsed = time.monotonic() - start
         detail = sanitize_error_detail(f"{type(exc).__name__}: {exc}")
         queue.mark_failed(job_id, detail, retryable=True)
-        logger.exception(
-            "Reddit discovery: id=%s failed elapsed=%.2fs url=%s",
-            job_id, elapsed, safe_url,
+        logger.error(
+            "Reddit discovery: id=%s failed elapsed=%.2fs url=%s reason=%s",
+            job_id, elapsed, safe_url, detail,
         )
 
 
@@ -662,7 +837,8 @@ def _process_youtube_discovery_job(queue: ShowNotesQueue, job: Dict[str, Any]) -
     """Fetch a video's show notes (network, no lock) and enqueue its child links."""
     job_id = job.get("id", "")
     video_url = job.get("url", "")
-    logger.info("YouTube notes: discover start id=%s url=%s", job_id, video_url)
+    safe_url = sanitize_error_detail(video_url)
+    logger.info("YouTube notes: discover start id=%s url=%s", job_id, safe_url)
     start = time.monotonic()
     try:
         video_id, links, error_summary, chapter_count = _discover_youtube_show_note_links(
@@ -708,8 +884,9 @@ def _process_youtube_discovery_job(queue: ShowNotesQueue, job: Dict[str, Any]) -
         elapsed = time.monotonic() - start
         detail = sanitize_error_detail(f"{type(exc).__name__}: {exc}")
         queue.mark_failed(job_id, detail, retryable=True)
-        logger.exception(
-            "YouTube notes: discover id=%s failed elapsed=%.2fs", job_id, elapsed
+        logger.error(
+            "YouTube notes: discover id=%s failed elapsed=%.2fs reason=%s",
+            job_id, elapsed, detail,
         )
 
 
@@ -717,7 +894,8 @@ def _process_ingest_job(queue: ShowNotesQueue, job: Dict[str, Any]) -> None:
     """Record one discovered child URL, then record its terminal state."""
     job_id = job.get("id", "")
     url = job.get("url", "")
-    logger.info("YouTube notes: job start id=%s url=%s", job_id, url)
+    safe_url = sanitize_error_detail(url)
+    logger.info("YouTube notes: job start id=%s url=%s", job_id, safe_url)
     start = time.monotonic()
     try:
         result = process_one(
@@ -733,20 +911,21 @@ def _process_ingest_job(queue: ShowNotesQueue, job: Dict[str, Any]) -> None:
             queue.mark_failed(job_id, detail, retryable=True)
             logger.warning(
                 "show-notes: job id=%s url=%s status=error elapsed=%.2fs reason=%s",
-                job_id, url, elapsed, detail,
+                job_id, safe_url, elapsed, detail,
             )
         else:
             queue.mark_done(job_id)
             logger.info(
                 "show-notes: job id=%s url=%s status=%s elapsed=%.2fs",
-                job_id, url, result.status, elapsed,
+                job_id, safe_url, result.status, elapsed,
             )
     except Exception as exc:  # noqa: BLE001 - a failed child must not kill the worker
         elapsed = time.monotonic() - start
         detail = sanitize_error_detail(f"{type(exc).__name__}: {exc}")
         queue.mark_failed(job_id, detail, retryable=True)
-        logger.exception(
-            "show-notes: job id=%s url=%s failed elapsed=%.2fs", job_id, url, elapsed
+        logger.error(
+            "show-notes: job id=%s url=%s failed elapsed=%.2fs reason=%s",
+            job_id, safe_url, elapsed, detail,
         )
 
 
@@ -785,10 +964,11 @@ class _ShowNotesWorker:
         queue = _get_queue()
         try:
             queue.recover()
-        except QueueCorruptError:
-            logger.exception(
+        except QueueCorruptError as exc:
+            logger.error(
                 "show-notes queue is corrupt; worker idle until an operator "
-                "resolves it (never overwriting accepted jobs)"
+                "resolves it (never overwriting accepted jobs) reason=%s",
+                sanitize_error_detail(exc),
             )
             while not self._stop.is_set():
                 self._stop.wait(self._poll_interval)
@@ -800,8 +980,11 @@ class _ShowNotesWorker:
                 logger.error("show-notes queue became corrupt; pausing worker")
                 self._stop.wait(self._poll_interval * 10)
                 drained = False
-            except Exception:  # noqa: BLE001 - keep the worker alive across bad jobs
-                logger.exception("show-notes worker iteration failed")
+            except Exception as exc:  # noqa: BLE001 - keep the worker alive across bad jobs
+                logger.error(
+                    "show-notes worker iteration failed reason=%s",
+                    sanitize_error_detail(f"{type(exc).__name__}: {exc}"),
+                )
                 drained = False
             if not drained:
                 self._stop.wait(self._poll_interval)
@@ -955,8 +1138,11 @@ class _TranscriptReconcileWorker:
             while not self._stop.is_set():
                 try:
                     self._reconcile_once()
-                except Exception:  # noqa: BLE001 - keep the reconciler alive
-                    logger.exception("Transcript reconciliation iteration failed")
+                except Exception as exc:  # noqa: BLE001 - keep the reconciler alive
+                    logger.error(
+                        "Transcript reconciliation iteration failed reason=%s",
+                        sanitize_error_detail(f"{type(exc).__name__}: {exc}"),
+                    )
                 self._stop.wait(self._interval)
         finally:
             _reconcile_worker_exited(self)
@@ -1041,7 +1227,11 @@ def request_hash(inputs: List[str], force: bool) -> str:
 
 
 def _reconcile_documented_discovery(result: UrlResult) -> UrlResult:
-    """Ensure a confirmed prior result still has its discovery job enqueued."""
+    """Ensure a confirmed prior result still has its discovery job enqueued.
+
+    A reconciliation failure must not turn an authoritative primary success into
+    an error; it is reported as a failed discovery on the preserved result.
+    """
     primary = result.primary
     if primary is None or not primary.archive_confirmed:
         return result
@@ -1051,14 +1241,25 @@ def _reconcile_documented_discovery(result: UrlResult) -> UrlResult:
         "already_completed",
     ):
         return result
-    if not _exact_archive_match(primary.canonical_url):
-        return result
-    discovery = _enqueue_capture_discovery(
-        primary.canonical_url, allow_youtube=True, allow_reddit=True
-    )
-    if discovery is None:
-        return result
-    return result.model_copy(update={"discovery": discovery})
+    try:
+        if not _exact_archive_match(primary.canonical_url):
+            return result
+        discovery = _enqueue_capture_discovery(
+            primary.canonical_url, allow_youtube=True, allow_reddit=True
+        )
+        if discovery is None:
+            return result
+        return result.model_copy(update={"discovery": discovery})
+    except Exception as exc:  # noqa: BLE001 - primary is already authoritative
+        detail = sanitize_error_detail(f"{type(exc).__name__}: {exc}")
+        logger.error(
+            "Discovery reconciliation failed url=%s reason=%s",
+            sanitize_error_detail(primary.canonical_url),
+            detail,
+        )
+        return result.model_copy(
+            update={"discovery": DiscoveryResult(status="failed", detail=detail)}
+        )
 
 
 def _parse_stored_results(raw_results: List[Any], inputs: List[str]) -> List[Optional[UrlResult]]:
@@ -1078,6 +1279,25 @@ def _parse_stored_results(raw_results: List[Any], inputs: List[str]) -> List[Opt
     return parsed
 
 
+def _serialize_results(
+    results: List[Optional[UrlResult]],
+) -> List[Optional[Dict[str, Any]]]:
+    """Serialize results positionally, preserving ``None`` for unprocessed inputs."""
+    return [
+        result.model_dump() if result is not None else None for result in results
+    ]
+
+
+def _ambiguous_forced_message(key: str) -> str:
+    return (
+        f"Idempotency-Key {key!r} is ambiguous: an earlier forced request may "
+        "already have modified the archive, and no durable result proves whether "
+        "it committed. Refusing to repeat the forced write. Inspect "
+        f"GET /requests/{key} and use a new key only if another forced capture "
+        "is intentionally required."
+    )
+
+
 def process_many_idempotent(
     inputs: List[str],
     *,
@@ -1091,10 +1311,15 @@ def process_many_idempotent(
     work) after an interruption. A different payload raises
     :class:`IdempotencyConflict`.
 
-    This is **at-least-once with idempotent effects**, not exactly-once: a crash
-    before the first response can cause the client to retry, but archive writes
-    and discovery jobs are deduplicated by exact capture verification and the
-    queue. See README for retention/concurrency semantics.
+    For a **forced** request, each input's pre-work archive fingerprint is
+    persisted before processing. If an interrupted attempt left no result and
+    the archive content has changed, the request is marked ``ambiguous`` and
+    :class:`IdempotencyAmbiguous` is raised instead of repeating a write that may
+    already have committed. A non-forced retry remains safe because re-processing
+    is idempotent (exact existing-row checks and queue dedup).
+
+    This is **at-least-once with idempotent effects**, not exactly-once. See
+    README for retention/concurrency and ambiguous-recovery semantics.
     """
     store = _get_idempotency_store()
     digest = request_hash(inputs, force)
@@ -1107,34 +1332,81 @@ def process_many_idempotent(
         )
         was_completed = entry.get("state") == "completed"
         stored = _parse_stored_results(list(entry.get("results", [])), inputs)
+        attempts: List[Optional[Dict[str, Any]]] = list(
+            entry.get("attempts") or [None] * len(inputs)
+        )
+        if len(attempts) != len(inputs):
+            attempts = [None] * len(inputs)
 
         if was_completed and all(result is not None for result in stored):
             return [result for result in stored if result is not None], True
+
+        if was_completed and force:
+            # A completed forced request with a missing/malformed result is not
+            # safe to re-execute.
+            message = _ambiguous_forced_message(idempotency_key)
+            store.mark_ambiguous(
+                idempotency_key,
+                results=_serialize_results(stored),
+                attempts=attempts,
+                error=message,
+            )
+            raise IdempotencyAmbiguous(message)
 
         results: List[Optional[UrlResult]] = list(stored)
         for index, item in enumerate(inputs):
             prior = results[index]
             if prior is not None and prior.primary and prior.primary.archive_confirmed:
+                attempts[index] = None
                 results[index] = _reconcile_documented_discovery(prior)
-            else:
-                results[index] = process_one(item, force=force)
-            ordered = [
-                result for result in results if result is not None
-            ]
-            # Persist after each input so a crash between archive commit and
-            # response delivery leaves a narrow, recoverable window.
+                store.update(
+                    idempotency_key,
+                    results=_serialize_results(results),
+                    attempts=attempts,
+                )
+                continue
+
+            attempt = attempts[index]
+            if attempt is not None and force:
+                current_fingerprint = _archive_fingerprint()
+                if current_fingerprint != attempt.get("fingerprint"):
+                    message = _ambiguous_forced_message(idempotency_key)
+                    store.mark_ambiguous(
+                        idempotency_key,
+                        results=_serialize_results(results),
+                        attempts=attempts,
+                        error=message,
+                    )
+                    raise IdempotencyAmbiguous(message)
+
+            # Persist the pre-work fingerprint *before* any archive mutation so
+            # a crash can be classified as safe-to-retry or ambiguous.
+            fingerprint = _archive_fingerprint()
+            attempts[index] = {
+                "fingerprint": fingerprint,
+                "started_at": time.time(),
+            }
             store.update(
                 idempotency_key,
-                results=[result.model_dump() for result in ordered],
+                results=_serialize_results(results),
+                attempts=attempts,
             )
 
-        ordered = [result for result in results if result is not None]
+            results[index] = process_one(item, force=force)
+            attempts[index] = None
+            store.update(
+                idempotency_key,
+                results=_serialize_results(results),
+                attempts=attempts,
+            )
+
         store.update(
             idempotency_key,
-            results=[result.model_dump() for result in ordered],
+            results=_serialize_results(results),
+            attempts=attempts,
             completed=True,
         )
-        return ordered, was_completed
+        return [result for result in results if result is not None], was_completed
 
 
 def get_idempotency_request(key: str) -> Optional[Dict[str, Any]]:
@@ -1195,13 +1467,18 @@ def lookup_url(url_value: str) -> ArchiveLookupResponse:
                 status="exists",
                 archive_confirmed=True,
                 exact_match=True,
+                deletion_safe=True,
                 canonical_url=value,
                 stored_url=value,
                 identity="exact",
                 message="Exact archive row found",
             )
     except Exception as exc:  # noqa: BLE001 - report lookup failure explicitly
-        logger.exception("Archive lookup failed url=%s", sanitize_error_detail(value))
+        logger.error(
+            "Archive lookup failed url=%s reason=%s",
+            sanitize_error_detail(value),
+            sanitize_error_detail(f"{type(exc).__name__}: {exc}"),
+        )
         return ArchiveLookupResponse(
             input=value,
             status="error",
@@ -1214,7 +1491,9 @@ def lookup_url(url_value: str) -> ArchiveLookupResponse:
         mapped = _get_identity_store().lookup(value)
     except StateStoreError as exc:
         logger.error(
-            "Identity lookup failed for %s (%s)", value, type(exc).__name__
+            "Identity lookup failed url=%s (%s)",
+            sanitize_error_detail(value),
+            type(exc).__name__,
         )
         return ArchiveLookupResponse(
             input=value,
@@ -1224,7 +1503,11 @@ def lookup_url(url_value: str) -> ArchiveLookupResponse:
             error=sanitize_error_detail(f"{type(exc).__name__}: {exc}"),
         )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Identity lookup failed url=%s", sanitize_error_detail(value))
+        logger.error(
+            "Identity lookup failed url=%s reason=%s",
+            sanitize_error_detail(value),
+            sanitize_error_detail(f"{type(exc).__name__}: {exc}"),
+        )
         return ArchiveLookupResponse(
             input=value,
             status="error",
@@ -1241,13 +1524,18 @@ def lookup_url(url_value: str) -> ArchiveLookupResponse:
                     status="canonical",
                     archive_confirmed=True,
                     exact_match=False,
+                    deletion_safe=True,
                     canonical_url=mapped,
                     stored_url=mapped,
                     identity="ledger",
                     message="Authoritatively resolved canonical archive match",
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Canonical archive lookup failed url=%s", sanitize_error_detail(value))
+            logger.error(
+                "Canonical archive lookup failed url=%s reason=%s",
+                sanitize_error_detail(value),
+                sanitize_error_detail(f"{type(exc).__name__}: {exc}"),
+            )
             return ArchiveLookupResponse(
                 input=value,
                 status="error",
@@ -1262,14 +1550,20 @@ def lookup_url(url_value: str) -> ArchiveLookupResponse:
             identity="unresolved",
             canonical_url=mapped,
             message="A recorded identity exists but its archive row is missing",
-            error=f"Recorded canonical URL is not present in the archive: {mapped}",
+            error=(
+                "Recorded canonical URL is not present in the archive: "
+                f"{sanitize_error_detail(mapped)}"
+            ),
         )
 
     return ArchiveLookupResponse(
         input=value,
         status="absent",
         identity="none",
-        message="No exact or recorded canonical archive match",
+        message=(
+            "No exact or recorded canonical archive match; this is not proof "
+            "that the reference was never captured"
+        ),
     )
 
 
@@ -1407,10 +1701,15 @@ def update_transcript_for_url(video_url: str) -> TranscriptResult:
         )
     except Exception as exc:  # noqa: BLE001
         output = buf.getvalue().strip()
-        logger.exception("Failed to update transcript for %s", target)
+        detail = sanitize_error_detail(f"{type(exc).__name__}: {exc}")
+        logger.error(
+            "Failed to update transcript url=%s reason=%s",
+            sanitize_error_detail(target),
+            detail,
+        )
         return TranscriptResult(
             url=target,
             status="error",
-            message=str(exc),
+            message=detail,
             output=output,
         )
